@@ -1,0 +1,12 @@
+# mitmproxy reference settings for quarantine mode.
+# Runtime uses mitmdump with network/proxy/block_private.py (RFC1918 blocking + access log).
+
+listen_host: "0.0.0.0"
+listen_port: 8080
+
+# Flow dump path is set per session by Start-QuarantineProxy.ps1 (-w flows.mitm).
+
+# Phase 2 TLS inspection:
+# 1. Start proxy once to generate CA under logDir/certs/
+# 2. .\quarantine-vm.ps1 proxy export-ca
+# 3. Install mitmproxy-ca-cert.cer in guest Trusted Root Certification Authorities

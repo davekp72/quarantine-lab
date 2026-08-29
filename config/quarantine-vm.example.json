@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "vmName": "Quarantine-Win11",
+  "guestOsType": "Windows11_64",
+  "memoryMb": 4096,
+  "cpuCount": 2,
+  "diskSizeGb": 80,
+  "vmDataDir": "D:\\Vbox\\LabVM",
+  "diskPath": "",
+  "windowsIsoPath": "isos",
+  "autounattendPath": "",
+  "vboxManagePath": "",
+  "network": {
+    "mode": "intnet",
+    "hostOnlyAdapter": "VirtualBox Host-Only Ethernet Adapter",
+    "intnetName": "quarantine-net",
+    "guestGateway": "10.0.2.2",
+    "guestDns": "10.0.2.3",
+    "proxy": {
+      "enabled": true,
+      "listenHost": "0.0.0.0",
+      "listenPort": 8080,
+      "pacPort": 8081,
+      "logDir": "D:\\Vbox\\LabVM\\logs\\proxy"
+    },
+    "capture": {
+      "enabled": true,
+      "logDir": "D:\\Vbox\\LabVM\\logs\\pcap",
+      "interface": "auto",
+      "guestIp": "10.0.2.15"
+    }
+  },
+  "isolation": {
+    "disableClipboard": false,
+    "clipboardMode": "hosttoguest",
+    "disableDragDrop": true,
+    "disableUsb": true,
+    "disableAudio": true,
+    "disableSharedFolders": true
+  },
+  "cleanSnapshotName": "Clean",
+  "firmware": "efi"
+}

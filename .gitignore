@@ -1,0 +1,6 @@
+.venv/
+isos/*.iso
+vms/
+*.vdi
+*.vmdk
+config/quarantine-vm.json
