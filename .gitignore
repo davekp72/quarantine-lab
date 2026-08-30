@@ -4,3 +4,5 @@ vms/
 *.vdi
 *.vmdk
 config/quarantine-vm.json
+network/proxy/mitmproxy-ca-cert.cer
+**/secrets/

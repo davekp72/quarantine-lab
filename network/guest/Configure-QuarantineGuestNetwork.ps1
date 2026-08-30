@@ -40,7 +40,7 @@ Write-Host "  DNS: $DnsServer"
 Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -Name ProxyEnable -Value 1
 Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -Name ProxyServer -Value "${ProxyHost}:${ProxyPort}"
 Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -Name AutoConfigURL -Value $PacUrl
-Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -Name ProxyOverride -Value '<local>'
+Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -Name ProxyOverride -Value "${ProxyHost};<local>"
 
 # Machine-level proxy (optional; helps services that read system policy)
 $policyPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\Internet Settings'
@@ -61,27 +61,61 @@ if ($adapter) {
     Write-Warning 'No active network adapter found; set DNS manually to 10.0.2.3'
 }
 
-# Strict outbound firewall: default block, allow proxy + DNS only
+# Strict outbound firewall: allow proxy + PAC + DNS first, then default-block.
+# New-NetFirewallRule takes -Group (not -DisplayGroup; that is Get-NetFirewallRule only).
 $groupName = 'Quarantine Lab Outbound'
-Get-NetFirewallRule -DisplayGroup $groupName -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+$ruleNames = @(
+    'Quarantine Allow Proxy',
+    'Quarantine Allow PAC',
+    'Quarantine Allow DNS',
+    'Quarantine Allow DNS TCP'
+)
+foreach ($ruleName in $ruleNames) {
+    Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue |
+        Remove-NetFirewallRule -ErrorAction SilentlyContinue
+}
+
+New-NetFirewallRule -DisplayName 'Quarantine Allow Proxy' -Name 'Quarantine-Allow-Proxy' -Group $groupName `
+    -Direction Outbound -Action Allow -Protocol TCP -RemoteAddress $ProxyHost -RemotePort $ProxyPort | Out-Null
+New-NetFirewallRule -DisplayName 'Quarantine Allow PAC' -Name 'Quarantine-Allow-PAC' -Group $groupName `
+    -Direction Outbound -Action Allow -Protocol TCP -RemoteAddress $ProxyHost -RemotePort $PacPort | Out-Null
+New-NetFirewallRule -DisplayName 'Quarantine Allow DNS' -Name 'Quarantine-Allow-DNS' -Group $groupName `
+    -Direction Outbound -Action Allow -Protocol UDP -RemoteAddress $DnsServer -RemotePort 53 | Out-Null
+New-NetFirewallRule -DisplayName 'Quarantine Allow DNS TCP' -Name 'Quarantine-Allow-DNS-TCP' -Group $groupName `
+    -Direction Outbound -Action Allow -Protocol TCP -RemoteAddress $DnsServer -RemotePort 53 | Out-Null
 
 Set-NetFirewallProfile -Profile Domain, Public, Private -DefaultOutboundAction Block -ErrorAction SilentlyContinue
 
-New-NetFirewallRule -DisplayName 'Quarantine Allow Proxy' -DisplayGroup $groupName `
-    -Direction Outbound -Action Allow -Protocol TCP -RemoteAddress $ProxyHost -RemotePort $ProxyPort | Out-Null
-New-NetFirewallRule -DisplayName 'Quarantine Allow DNS' -DisplayGroup $groupName `
-    -Direction Outbound -Action Allow -Protocol UDP -RemoteAddress $DnsServer -RemotePort 53 | Out-Null
+# Trust the host mitmproxy CA so HTTPS works (download over HTTP, no TLS needed).
+$caUrl = "http://${ProxyHost}:${PacPort}/mitmproxy-ca-cert.cer"
+$caPath = Join-Path $env:TEMP 'mitmproxy-ca-cert.cer'
+$caInstalled = $false
+try {
+    & curl.exe --noproxy '*' -fsSL $caUrl -o $caPath
+    if (-not (Test-Path -LiteralPath $caPath) -or ((Get-Item -LiteralPath $caPath).Length -lt 32)) {
+        throw "empty download from $caUrl"
+    }
+    Import-Certificate -FilePath $caPath -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+    Import-Certificate -FilePath $caPath -CertStoreLocation Cert:\CurrentUser\Root | Out-Null
+    $caInstalled = $true
+    Write-Host '  mitmproxy CA installed (Trusted Root)'
+} catch {
+    Write-Warning "Could not install mitmproxy CA from $caUrl. After the host proxy is up, run Install-QuarantineProxyCA.ps1"
+}
 
 Write-Host @'
 
 Guest quarantine network configured.
 
-Next steps on the HOST:
-  1. Shut down this VM
-  2. .\quarantine-vm.ps1 network quarantine   (or keep intnet for offline work)
-  3. .\quarantine-vm.ps1 baseline             (freeze firewall + proxy into Clean)
+Next steps:
+  1. In this guest (Admin): Disable-QuarantineGuestUpdates.ps1
+  2. Shut down this VM
+  3. On the host: .\quarantine-vm.ps1 baseline   (freeze firewall + proxy + CA + no-WU into Clean)
 
 Test from guest (after host enables quarantine network):
   - Internet HTTP(S) should work via proxy
   - ping 192.168.x.x should fail
 '@
+if (-not $caInstalled) {
+    Write-Host '  If browsers show SSL errors, run Install-QuarantineProxyCA.ps1 as Admin.'
+}

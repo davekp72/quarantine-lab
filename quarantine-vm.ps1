@@ -30,7 +30,7 @@ param(
 
     [Parameter(Position = 0)]
 
-    [ValidateSet('create', 'install', 'start', 'stop', 'snapshot', 'snapshots', 'baseline', 'preserve', 'reset', 'status', 'mount-iso', 'guest-additions', 'relocate', 'consolidate', 'network', 'proxy', 'capture', 'clipboard', 'help')]
+    [ValidateSet('create', 'install', 'start', 'stop', 'snapshot', 'snapshots', 'baseline', 'preserve', 'reset', 'status', 'mount-iso', 'guest-additions', 'relocate', 'consolidate', 'network', 'proxy', 'capture', 'clipboard', 'inbox', 'guest', 'help')]
 
     [string]$Action = 'help',
 
@@ -38,7 +38,7 @@ param(
 
     [Parameter(Position = 1)]
 
-    [ValidateSet('start', 'stop', 'status', 'export-ca', 'quarantine', 'offline', 'nat', 'intnet', 'none', 'hostonly', 'hosttoguest', 'guesttohost', 'bidirectional', 'disabled')]
+    [ValidateSet('start', 'stop', 'status', 'export-ca', 'quarantine', 'offline', 'nat', 'intnet', 'none', 'hostonly', 'hosttoguest', 'guesttohost', 'bidirectional', 'disabled', 'push', 'open', 'close', 'clear', 'run', 'copy', 'test', 'ps')]
 
     [string]$SubAction,
 
@@ -90,7 +90,43 @@ param(
 
     [Parameter()]
 
-    [string]$SnapshotDescription
+    [string]$SnapshotDescription,
+
+
+
+    [Parameter(ValueFromRemainingArguments = $true)]
+
+    [string[]]$SourcePath,
+
+
+
+    [Parameter()]
+
+    [string]$GuestUser,
+
+
+
+    [Parameter()]
+
+    [string]$GuestPassword,
+
+
+
+    [Parameter()]
+
+    [string]$GuestExe,
+
+
+
+    [Parameter()]
+
+    [string]$GuestDomain,
+
+
+
+    [Parameter()]
+
+    [string]$GuestTargetDir
 
 )
 
@@ -250,11 +286,13 @@ switch ($Action) {
 
         switch ($SubAction) {
 
-            'start' { Start-QuarantineCapture -ConfigPath $ConfigPath }
+            'start' { Start-QuarantineCapture -ConfigPath $ConfigPath -Required }
 
             'stop' { Stop-QuarantineCapture -ConfigPath $ConfigPath }
 
-            default { throw "Usage: .\quarantine-vm.ps1 capture start|stop" }
+            'status' { Get-QuarantineCaptureStatus -ConfigPath $ConfigPath | Format-List }
+
+            default { throw "Usage: .\quarantine-vm.ps1 capture start|stop|status" }
 
         }
 
@@ -265,6 +303,100 @@ switch ($Action) {
         $mode = if ($SubAction) { $SubAction } else { 'hosttoguest' }
 
         Set-QuarantineVMClipboard -Mode $mode -ConfigPath $ConfigPath
+
+    }
+
+    'inbox' {
+
+        switch ($SubAction) {
+
+            'push' {
+
+                if (-not $SourcePath -or $SourcePath.Count -eq 0) {
+
+                    throw 'Usage: .\quarantine-vm.ps1 inbox push <file> [file...]'
+
+                }
+
+                Push-QuarantineVMInbox -Path $SourcePath -ConfigPath $ConfigPath
+
+            }
+
+            'open' { Open-QuarantineVMInbox -ConfigPath $ConfigPath }
+
+            'close' { Close-QuarantineVMInbox -ConfigPath $ConfigPath }
+
+            'status' { Get-QuarantineVMInbox -ConfigPath $ConfigPath | Format-List }
+
+            'clear' { Clear-QuarantineVMInbox -ConfigPath $ConfigPath }
+
+            default { throw 'Usage: .\quarantine-vm.ps1 inbox push|open|close|status|clear' }
+
+        }
+
+    }
+
+    'guest' {
+
+        $guestParams = @{
+            ConfigPath = $ConfigPath
+        }
+
+        if ($GuestUser) { $guestParams.Username = $GuestUser }
+
+        if ($GuestPassword) { $guestParams.Password = $GuestPassword }
+
+        if ($GuestDomain) { $guestParams.Domain = $GuestDomain }
+
+        switch ($SubAction) {
+
+            'run' {
+
+                if (-not $SourcePath -or $SourcePath.Count -eq 0) {
+
+                    throw 'Usage: .\quarantine-vm.ps1 guest run <command...>'
+
+                }
+
+                if ($GuestExe) { $guestParams.Exe = $GuestExe }
+
+                Invoke-QuarantineVMGuestRun @guestParams -Command $SourcePath
+
+            }
+
+            'ps' {
+
+                if (-not $SourcePath -or $SourcePath.Count -eq 0) {
+
+                    throw 'Usage: .\quarantine-vm.ps1 guest ps <powershell-command>'
+
+                }
+
+                $guestParams.Exe = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
+
+                Invoke-QuarantineVMGuestRun @guestParams -Command @('-NoProfile', '-NonInteractive', '-Command', ($SourcePath -join ' '))
+
+            }
+
+            'copy' {
+
+                if (-not $SourcePath -or $SourcePath.Count -eq 0) {
+
+                    throw 'Usage: .\quarantine-vm.ps1 guest copy <host-file> [file...]'
+
+                }
+
+                if ($GuestTargetDir) { $guestParams.TargetDirectory = $GuestTargetDir }
+
+                Copy-QuarantineVMGuestFile @guestParams -Path $SourcePath
+
+            }
+
+            'test' { Test-QuarantineVMGuestControl @guestParams | Out-Null }
+
+            default { throw 'Usage: .\quarantine-vm.ps1 guest run|ps|copy|test' }
+
+        }
 
     }
 
@@ -334,6 +466,32 @@ Clipboard (requires Guest Additions in the guest):
 
 
 
+Sample transfer (one-way host inbox):
+
+  inbox push <file>       Copy sample(s) to host inbox + SHA256 log
+
+  inbox open              Mount read-only share in running guest
+
+  inbox close             Remove transient share
+
+  inbox status            List inbox files and mount state
+
+  inbox clear             Delete inbox files (share must be closed)
+
+
+
+Guest control (requires Guest Additions + guest credentials):
+
+  guest test              Verify guest control connectivity
+
+  guest run <cmd...>      Run cmd.exe /c command in guest
+
+  guest ps <script>       Run PowerShell -Command in guest
+
+  guest copy <file>       Copy host file(s) into guest (no shared folder)
+
+
+
 Setup:
 
   1. Copy config\quarantine-vm.example.json -> config\quarantine-vm.json
@@ -346,7 +504,9 @@ Setup:
 
   5. Run network\guest\Configure-QuarantineGuestNetwork.ps1 in guest (Admin)
 
-  6. .\quarantine-vm.ps1 baseline
+  6. If HTTPS fails, run network\guest\Install-QuarantineProxyCA.ps1 in guest (Admin)
+
+  7. .\quarantine-vm.ps1 baseline
 
 
 

@@ -558,7 +558,7 @@ function Set-QuarantineVMIsolation {
     if ($ctx -eq 'live') {
         Invoke-VBoxManage -Arguments @('controlvm', $VmName, 'clipboard', 'mode', $clipboardMode) -AllowFailure | Out-Null
         if ($Isolation.disableSharedFolders) {
-            Invoke-VBoxManage -Arguments @('controlvm', $VmName, 'sharedfolder', 'remove', '--name=quarantine-in', '--transient') -AllowFailure | Out-Null
+            Remove-QuarantineVMInboxShare -VmName $VmName
         }
         return
     }
@@ -571,8 +571,768 @@ function Set-QuarantineVMIsolation {
     Invoke-VBoxManage -Arguments $args | Out-Null
 
     if ($Isolation.disableSharedFolders) {
-        Invoke-VBoxManage -Arguments @('controlvm', $VmName, 'sharedfolder', 'remove', '--name=quarantine-in', '--transient') -AllowFailure | Out-Null
+        Remove-QuarantineVMInboxShare -VmName $VmName
     }
+}
+
+function Get-QuarantineVMInboxSettings {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        $Config = $script:Config
+    )
+
+    $dataDir = Get-QuarantineVMDataDir -Config $Config
+    $settings = [ordered]@{
+        hostPath          = Join-Path $dataDir 'quarantine-inbox'
+        shareName         = 'quarantine-in'
+        readOnly          = $true
+        requireNetworkOff = $false
+        logDir            = Join-Path $dataDir 'logs\inbox'
+    }
+
+    if ($Config.inbox) {
+        foreach ($key in @($settings.Keys)) {
+            $value = $Config.inbox.$key
+            if ($null -ne $value -and -not [string]::IsNullOrWhiteSpace("$value")) {
+                $settings[$key] = $value
+            }
+        }
+    }
+
+    return [pscustomobject]$settings
+}
+
+function Ensure-QuarantineVMInboxDirectory {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$HostPath,
+
+        [Parameter()]
+        [string]$LogDir
+    )
+
+    if (-not (Test-Path -LiteralPath $HostPath)) {
+        New-Item -ItemType Directory -Path $HostPath -Force | Out-Null
+        Write-Verbose "Created inbox directory: $HostPath"
+    }
+
+    if ($LogDir -and -not (Test-Path -LiteralPath $LogDir)) {
+        New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
+    }
+}
+
+function Get-QuarantineVMInboxShareName {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        $Config = $script:Config
+    )
+
+    return (Get-QuarantineVMInboxSettings -Config $Config).shareName
+}
+
+function Test-QuarantineVMInboxShareOpen {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$VmName,
+
+        [Parameter()]
+        [string]$ShareName
+    )
+
+    if (-not $ShareName) {
+        $ShareName = Get-QuarantineVMInboxShareName
+    }
+
+    $lines = Invoke-VBoxManage -Arguments @('showvminfo', $VmName, '--machinereadable') -AllowFailure
+    foreach ($line in $lines) {
+        if ($line -match '^SharedFolderNameMachineMapping\d+="([^"]+)"$' -and $Matches[1] -eq $ShareName) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Remove-QuarantineVMInboxShare {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$VmName,
+
+        [Parameter()]
+        [string]$ShareName,
+
+        [Parameter()]
+        [switch]$Quiet
+    )
+
+    if (-not $ShareName) {
+        $ShareName = Get-QuarantineVMInboxShareName
+    }
+
+    $state = Get-QuarantineVMState -VmName $VmName
+    if ($state -notin @('running', 'paused')) {
+        return $false
+    }
+
+    if (-not (Test-QuarantineVMInboxShareOpen -VmName $VmName -ShareName $ShareName)) {
+        return $false
+    }
+
+    Invoke-VBoxManage -Arguments @(
+        'sharedfolder', 'remove', $VmName, "--name=$ShareName", '--transient'
+    ) -AllowFailure | Out-Null
+
+    if (-not $Quiet) {
+        Write-Host "Removed transient shared folder '$ShareName'."
+    }
+
+    return $true
+}
+
+function Test-QuarantineVMInboxNetworkAllowed {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        $Config = $script:Config
+    )
+
+    $settings = Get-QuarantineVMInboxSettings -Config $Config
+    if (-not $settings.requireNetworkOff) {
+        return $true
+    }
+
+    $mode = if ($Config.network -and $Config.network.mode) { $Config.network.mode } else { 'intnet' }
+    return $mode -in @('none', 'offline', 'intnet')
+}
+
+function Write-QuarantineVMInboxTransferLog {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$LogDir,
+
+        [Parameter(Mandatory)]
+        [object[]]$Entries
+    )
+
+    Ensure-QuarantineVMInboxDirectory -HostPath $LogDir -LogDir $LogDir
+    $logPath = Join-Path $LogDir 'transfers.jsonl'
+    foreach ($entry in $Entries) {
+        ($entry | ConvertTo-Json -Compress) | Add-Content -LiteralPath $logPath -Encoding UTF8
+    }
+}
+
+function Push-QuarantineVMInbox {
+    <#
+    .SYNOPSIS
+      Copy sample file(s) into the host inbox and record SHA256 hashes.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Alias('FullName', 'PSPath')]
+        [string[]]$Path,
+
+        [Parameter()]
+        [string]$ConfigPath
+    )
+
+    begin {
+        $script:Config = Get-QuarantineVMConfig -ConfigPath $ConfigPath
+        $settings = Get-QuarantineVMInboxSettings
+        Ensure-QuarantineVMInboxDirectory -HostPath $settings.hostPath -LogDir $settings.logDir
+        $pushed = @()
+    }
+
+    process {
+        foreach ($src in $Path) {
+            $resolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($src)
+            if (-not (Test-Path -LiteralPath $resolved -PathType Leaf)) {
+                throw "File not found: $src"
+            }
+
+            $item = Get-Item -LiteralPath $resolved
+            $dest = Join-Path $settings.hostPath $item.Name
+            Copy-Item -LiteralPath $item.FullName -Destination $dest -Force
+            $hash = (Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash
+
+            $entry = [pscustomobject]@{
+                timestamp = (Get-Date).ToString('o')
+                fileName  = $item.Name
+                bytes     = $item.Length
+                sha256    = $hash
+                hostPath  = $dest
+            }
+            $pushed += $entry
+            Write-Host "Pushed $($item.Name) ($($item.Length) bytes)"
+            Write-Host "  SHA256: $hash"
+        }
+    }
+
+    end {
+        if ($pushed.Count -gt 0) {
+            Write-QuarantineVMInboxTransferLog -LogDir $settings.logDir -Entries $pushed
+            Write-Host "Inbox: $($settings.hostPath)"
+            Write-Host "Run: .\quarantine-vm.ps1 inbox open"
+        }
+    }
+}
+
+function Open-QuarantineVMInbox {
+    <#
+    .SYNOPSIS
+      Mount the host inbox as a transient shared folder in the running guest.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter()]
+        [string]$ConfigPath,
+
+        [Parameter()]
+        [switch]$Writable
+    )
+
+    $script:Config = Get-QuarantineVMConfig -ConfigPath $ConfigPath
+    $vmName = $script:Config.vmName
+    $settings = Get-QuarantineVMInboxSettings
+
+    if (-not (Test-QuarantineVMExists -VmName $vmName)) {
+        throw "VM '$vmName' not found."
+    }
+
+    $state = Get-QuarantineVMState -VmName $vmName
+    if ($state -notin @('running', 'paused')) {
+        throw "VM '$vmName' must be running to open the inbox (state: $state). Start it with: .\quarantine-vm.ps1 start"
+    }
+
+    if (-not (Test-QuarantineVMInboxNetworkAllowed)) {
+        $mode = $script:Config.network.mode
+        throw "Inbox open blocked: network mode '$mode' is not allowed while inbox.requireNetworkOff is true. Run: .\quarantine-vm.ps1 network none"
+    }
+
+    Ensure-QuarantineVMInboxDirectory -HostPath $settings.hostPath -LogDir $settings.logDir
+
+    $files = @(Get-ChildItem -LiteralPath $settings.hostPath -File -ErrorAction SilentlyContinue)
+    if ($files.Count -eq 0) {
+        Write-Warning "Inbox is empty. Push files first: .\quarantine-vm.ps1 inbox push <file>"
+    }
+
+    Remove-QuarantineVMInboxShare -VmName $vmName -ShareName $settings.shareName -Quiet
+
+    $hostPath = Format-VBoxPath -Path $settings.hostPath
+    $args = @(
+        'sharedfolder', 'add', $vmName,
+        "--name=$($settings.shareName)",
+        "--hostpath=$hostPath",
+        '--automount',
+        '--transient'
+    )
+    if ($settings.readOnly -and -not $Writable) {
+        $args += '--readonly'
+    } elseif ($Writable) {
+        Write-Host 'WARNING: Mounting inbox READ-WRITE (lab only). Close immediately after use.'
+    }
+
+    if ($PSCmdlet.ShouldProcess($vmName, "Open inbox share '$($settings.shareName)'")) {
+        try {
+            Invoke-VBoxManage -Arguments $args | Out-Null
+        } catch {
+            if ($_.Exception.Message -notmatch 'already exists') {
+                throw
+            }
+            Write-Verbose "Share '$($settings.shareName)' already mounted."
+        }
+        $guestPath = "\\VBOXSVR\$($settings.shareName)"
+        $mountedReadOnly = $settings.readOnly -and -not $Writable
+        Write-Host "Inbox mounted in guest (read-only: $mountedReadOnly)."
+        Write-Host "  Host:  $($settings.hostPath)"
+        Write-Host "  Guest: $guestPath"
+        Write-Host 'Copy files in the guest, then run: .\quarantine-vm.ps1 inbox close'
+    }
+}
+
+function Close-QuarantineVMInbox {
+    <#
+    .SYNOPSIS
+      Remove the transient inbox shared folder from the running guest.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [string]$ConfigPath
+    )
+
+    $script:Config = Get-QuarantineVMConfig -ConfigPath $ConfigPath
+    $vmName = $script:Config.vmName
+    $settings = Get-QuarantineVMInboxSettings
+
+    if (-not (Test-QuarantineVMExists -VmName $vmName)) {
+        throw "VM '$vmName' not found."
+    }
+
+    if (Remove-QuarantineVMInboxShare -VmName $vmName -ShareName $settings.shareName) {
+        return
+    }
+
+    $state = Get-QuarantineVMState -VmName $vmName
+    if ($state -notin @('running', 'paused')) {
+        Write-Host "VM '$vmName' is not running; no transient share to remove."
+        return
+    }
+
+    Write-Host "Inbox share '$($settings.shareName)' is not mounted."
+}
+
+function Get-QuarantineVMInbox {
+    <#
+    .SYNOPSIS
+      Show inbox directory contents, mount state, and recent transfer log entries.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [string]$ConfigPath
+    )
+
+    $script:Config = Get-QuarantineVMConfig -ConfigPath $ConfigPath
+    $vmName = $script:Config.vmName
+    $settings = Get-QuarantineVMInboxSettings
+    $mounted = $false
+
+    if (Test-QuarantineVMExists -VmName $vmName) {
+        $mounted = Test-QuarantineVMInboxShareOpen -VmName $vmName -ShareName $settings.shareName
+    }
+
+    $files = @()
+    if (Test-Path -LiteralPath $settings.hostPath) {
+        $files = Get-ChildItem -LiteralPath $settings.hostPath -File -ErrorAction SilentlyContinue | ForEach-Object {
+            [pscustomobject]@{
+                Name   = $_.Name
+                Bytes  = $_.Length
+                Sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+            }
+        }
+    }
+
+    $recentTransfers = @()
+    $logPath = Join-Path $settings.logDir 'transfers.jsonl'
+    if (Test-Path -LiteralPath $logPath) {
+        $recentTransfers = Get-Content -LiteralPath $logPath -Tail 5 -ErrorAction SilentlyContinue | ForEach-Object {
+            $_ | ConvertFrom-Json
+        }
+    }
+
+    [pscustomobject]@{
+        HostPath          = $settings.hostPath
+        ShareName         = $settings.shareName
+        ReadOnly          = $settings.readOnly
+        RequireNetworkOff = $settings.requireNetworkOff
+        Mounted           = $mounted
+        GuestPath         = "\\VBOXSVR\$($settings.shareName)"
+        Files             = $files
+        RecentTransfers   = $recentTransfers
+        LogPath           = $logPath
+    }
+}
+
+function Clear-QuarantineVMInbox {
+    <#
+    .SYNOPSIS
+      Delete all files from the host inbox directory (not the transfer log).
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter()]
+        [string]$ConfigPath
+    )
+
+    $script:Config = Get-QuarantineVMConfig -ConfigPath $ConfigPath
+    $vmName = $script:Config.vmName
+    $settings = Get-QuarantineVMInboxSettings
+
+    if (Test-QuarantineVMExists -VmName $vmName) {
+        if (Test-QuarantineVMInboxShareOpen -VmName $vmName -ShareName $settings.shareName) {
+            throw "Inbox is mounted in the guest. Close it first: .\quarantine-vm.ps1 inbox close"
+        }
+    }
+
+    if (-not (Test-Path -LiteralPath $settings.hostPath)) {
+        Write-Host 'Inbox directory does not exist; nothing to clear.'
+        return
+    }
+
+    $files = @(Get-ChildItem -LiteralPath $settings.hostPath -File -ErrorAction SilentlyContinue)
+    if ($files.Count -eq 0) {
+        Write-Host 'Inbox is already empty.'
+        return
+    }
+
+    if ($PSCmdlet.ShouldProcess($settings.hostPath, "Delete $($files.Count) file(s)")) {
+        $files | Remove-Item -Force
+        Write-Host "Cleared $($files.Count) file(s) from inbox."
+    }
+}
+
+function Get-QuarantineVMGuestSettings {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        $Config = $script:Config
+    )
+
+    $settings = [ordered]@{
+        username      = ''
+        password      = ''
+        passwordFile  = ''
+        domain        = ''
+        defaultExe    = 'C:\Windows\System32\cmd.exe'
+        copyTargetDir = 'C:\Users\Public\Quarantine'
+        timeoutMs     = 60000
+    }
+
+    if ($Config.guest) {
+        foreach ($key in @($settings.Keys)) {
+            $value = $Config.guest.$key
+            if ($null -ne $value -and -not [string]::IsNullOrWhiteSpace("$value")) {
+                $settings[$key] = $value
+            }
+        }
+    }
+
+    return [pscustomobject]$settings
+}
+
+function Get-QuarantineVMGuestPassword {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [string]$Password,
+
+        [Parameter()]
+        [string]$ConfigPassword,
+
+        [Parameter()]
+        [string]$PasswordFile
+    )
+
+    if ($Password) {
+        return $Password
+    }
+
+    $envPass = [Environment]::GetEnvironmentVariable('QUARANTINE_GUEST_PASSWORD')
+    if ($envPass) {
+        return $envPass
+    }
+
+    if ($ConfigPassword) {
+        return $ConfigPassword
+    }
+
+    if ($PasswordFile -and (Test-Path -LiteralPath $PasswordFile)) {
+        return (Get-Content -LiteralPath $PasswordFile -Raw).Trim()
+    }
+
+    if ([Environment]::UserInteractive) {
+        $secure = Read-Host 'Guest password' -AsSecureString
+        $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+        try {
+            return [Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
+        } finally {
+            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+        }
+    }
+
+    throw @"
+Guest password required. Provide one of:
+  -GuestPassword parameter
+  QUARANTINE_GUEST_PASSWORD environment variable
+  guest.password in config
+  guest.passwordFile in config (path to a file containing the password)
+"@
+}
+
+function Resolve-QuarantineVMGuestCredential {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [string]$Username,
+
+        [Parameter()]
+        [string]$Password,
+
+        [Parameter()]
+        [string]$Domain,
+
+        [Parameter()]
+        [string]$ConfigPath
+    )
+
+    $script:Config = Get-QuarantineVMConfig -ConfigPath $ConfigPath
+    $settings = Get-QuarantineVMGuestSettings
+
+    $resolvedUser = if ($Username) { $Username } elseif ($settings.username) { $settings.username } else { $null }
+    if (-not $resolvedUser) {
+        throw @"
+Guest username required. Set guest.username in config or pass -GuestUser.
+Use a dedicated local account in the guest (not your personal credentials).
+"@
+    }
+
+    $resolvedDomain = if ($Domain) { $Domain } elseif ($settings.domain) { $settings.domain } else { '' }
+    if ($resolvedUser -match '^([^\\]+)\\(.+)$') {
+        if (-not $resolvedDomain) {
+            $resolvedDomain = $Matches[1]
+        }
+        $resolvedUser = $Matches[2]
+    }
+    $resolvedPassword = Get-QuarantineVMGuestPassword -Password $Password -ConfigPassword $settings.password -PasswordFile $settings.passwordFile
+
+    [pscustomobject]@{
+        Username = $resolvedUser
+        Password = $resolvedPassword
+        Domain   = $resolvedDomain
+        Settings = $settings
+    }
+}
+
+function Assert-QuarantineVMGuestRunning {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$VmName
+    )
+
+    if (-not (Test-QuarantineVMExists -VmName $VmName)) {
+        throw "VM '$VmName' not found."
+    }
+
+    $state = Get-QuarantineVMState -VmName $VmName
+    if ($state -notin @('running', 'paused')) {
+        throw "VM '$VmName' must be running for guest control (state: $state). Start it with: .\quarantine-vm.ps1 start"
+    }
+}
+
+function Invoke-QuarantineVMGuestControl {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string[]]$Arguments,
+
+        [Parameter(Mandatory)]
+        [string]$Username,
+
+        [Parameter(Mandatory)]
+        [string]$Password,
+
+        [Parameter()]
+        [string]$Domain,
+
+        [Parameter()]
+        [int]$TimeoutMs = 60000
+    )
+
+    $vmName = $script:Config.vmName
+    Assert-QuarantineVMGuestRunning -VmName $vmName
+
+    if ($Arguments.Count -lt 1) {
+        throw 'Guest control subcommand is required (run, copyto, mkdir, ...).'
+    }
+
+    $subCommand = $Arguments[0]
+    $subCommandArgs = @()
+    if ($Arguments.Count -gt 1) {
+        $subCommandArgs = $Arguments[1..($Arguments.Count - 1)]
+    }
+
+    $args = @('guestcontrol', $vmName, $subCommand)
+    $args += "--username=$Username"
+    $args += "--password=$Password"
+    if ($Domain) {
+        $args += "--domain=$Domain"
+    }
+    if ($subCommand -in @('run', 'start')) {
+        $args += "--timeout=$TimeoutMs"
+    }
+    $args += $subCommandArgs
+
+    try {
+        Invoke-VBoxManage -Arguments $args
+    } catch {
+        if ($_.Exception.Message -match 'not able to logon|logon on guest|Authentication failure') {
+            throw @"
+$($_.Exception.Message)
+
+Guest logon failed. Check:
+  1. guest.username / guest.password in config (Microsoft accounts often fail - use a local account name)
+  2. Run 'whoami' inside the guest to see the exact username
+  3. Guest Additions installed and VM rebooted after install
+  4. Account password is correct (typo in email domain? .ccom vs .com)
+"@
+        }
+        throw
+    }
+}
+
+function Invoke-QuarantineVMGuestRun {
+    <#
+    .SYNOPSIS
+      Run a program inside the guest via VirtualBox Guest Control (requires Guest Additions).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string[]]$Command,
+
+        [Parameter()]
+        [string]$Exe,
+
+        [Parameter()]
+        [string]$Username,
+
+        [Parameter()]
+        [string]$Password,
+
+        [Parameter()]
+        [string]$Domain,
+
+        [Parameter()]
+        [string]$ConfigPath,
+
+        [Parameter()]
+        [int]$TimeoutMs
+    )
+
+    if (-not $Command -or $Command.Count -eq 0) {
+        throw 'Command arguments are required.'
+    }
+
+    $cred = Resolve-QuarantineVMGuestCredential -Username $Username -Password $Password -Domain $Domain -ConfigPath $ConfigPath
+    $settings = $cred.Settings
+    $timeout = if ($TimeoutMs) { $TimeoutMs } else { [int]$settings.timeoutMs }
+    $exePath = if ($Exe) { $Exe } else { $settings.defaultExe }
+
+    $args = @(
+        'run',
+        '--exe', $exePath,
+        '--wait-stdout',
+        '--wait-stderr',
+        '--'
+    )
+
+    if ($exePath -match '(?i)(\\)?cmd\.exe$') {
+        $args += '/c'
+        $args += ($Command -join ' ')
+    } else {
+        $args += $Command
+    }
+
+    $output = Invoke-QuarantineVMGuestControl -Arguments $args -Username $cred.Username -Password $cred.Password -Domain $cred.Domain -TimeoutMs $timeout
+    if ($output) {
+        $output | ForEach-Object { Write-Output $_ }
+    }
+}
+
+function Copy-QuarantineVMGuestFile {
+    <#
+    .SYNOPSIS
+      Copy file(s) from the host into the guest via VirtualBox Guest Control.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+        [Alias('FullName', 'PSPath')]
+        [string[]]$Path,
+
+        [Parameter()]
+        [string]$TargetDirectory,
+
+        [Parameter()]
+        [string]$Username,
+
+        [Parameter()]
+        [string]$Password,
+
+        [Parameter()]
+        [string]$Domain,
+
+        [Parameter()]
+        [string]$ConfigPath
+    )
+
+    begin {
+        $cred = Resolve-QuarantineVMGuestCredential -Username $Username -Password $Password -Domain $Domain -ConfigPath $ConfigPath
+        $settings = $cred.Settings
+        $target = if ($TargetDirectory) { $TargetDirectory } else { $settings.copyTargetDir }
+        $hostPaths = @()
+    }
+
+    process {
+        foreach ($src in $Path) {
+            $resolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($src)
+            if (-not (Test-Path -LiteralPath $resolved -PathType Leaf)) {
+                throw "File not found: $src"
+            }
+            $hostPaths += $resolved
+        }
+    }
+
+    end {
+        if ($hostPaths.Count -eq 0) {
+            throw 'At least one host file path is required.'
+        }
+
+        try {
+            Invoke-QuarantineVMGuestControl -Arguments @(
+                'mkdir', '--parents', $target
+            ) -Username $cred.Username -Password $cred.Password -Domain $cred.Domain -TimeoutMs $settings.timeoutMs | Out-Null
+        } catch {
+            Write-Verbose "mkdir $target (may already exist): $($_.Exception.Message)"
+        }
+
+        foreach ($hostPath in $hostPaths) {
+            $name = Split-Path -Leaf $hostPath
+            $destFile = Join-Path $target $name
+            $copyArgs = @('copyto', "--target-directory=$destFile", $hostPath)
+            Invoke-QuarantineVMGuestControl -Arguments $copyArgs -Username $cred.Username -Password $cred.Password -Domain $cred.Domain -TimeoutMs $settings.timeoutMs | Out-Null
+            Write-Host "Copied $name -> $destFile"
+        }
+    }
+}
+
+function Test-QuarantineVMGuestControl {
+    <#
+    .SYNOPSIS
+      Verify Guest Additions guest control is reachable with the configured credentials.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [string]$Username,
+
+        [Parameter()]
+        [string]$Password,
+
+        [Parameter()]
+        [string]$Domain,
+
+        [Parameter()]
+        [string]$ConfigPath
+    )
+
+    $output = Invoke-QuarantineVMGuestRun -Command @('echo quarantine-guest-ok') -Username $Username -Password $Password -Domain $Domain -ConfigPath $ConfigPath
+    $text = ($output | Out-String).Trim()
+    if ($text -match 'quarantine-guest-ok') {
+        Write-Host 'Guest control OK.'
+        return $true
+    }
+
+    Write-Warning "Guest control returned unexpected output: $text"
+    return $false
 }
 
 function Set-QuarantineVMClipboard {
@@ -745,7 +1505,8 @@ function Set-QuarantineVMNetworkMode {
     }
 
     if ($Mode -eq 'nat') {
-        Write-Warning 'NAT is enabled — VM has internet. Switch back after setup: .\quarantine-vm.ps1 network offline'
+        Write-Warning 'NAT is enabled — VM has internet. Switch back after setup: .\quarantine-vm.ps1 network quarantine'
+        Write-Warning 'Guest firewall/proxy still block Windows Update. In the guest run Open-QuarantineGuestForUpdates.ps1 as Admin.'
     } else {
         Write-Host "Network mode set to: $Mode"
     }
@@ -1030,6 +1791,13 @@ function Start-QuarantineVM {
     $state = Get-QuarantineVMState -VmName $vmName
     if ($state -in @('running', 'paused', 'starting')) {
         Write-Host "VM '$vmName' is already $state."
+        if (-not $SkipProxy) {
+            $networkModule = Join-Path $PSScriptRoot 'QuarantineNetwork.psm1'
+            if (Test-Path -LiteralPath $networkModule) {
+                Import-Module $networkModule -Force
+                Initialize-QuarantineNetworkServices -ConfigPath $ConfigPath -SkipProxy:$SkipProxy
+            }
+        }
         return
     }
 
@@ -1045,6 +1813,13 @@ function Start-QuarantineVM {
             Write-Host "Resuming saved session for '$vmName'..."
             Invoke-VBoxManage -Arguments @('startvm', $vmName, '--type', $Type) | Out-Null
             Write-Host "VM resumed. Treat all guest activity as hostile."
+            if (-not $SkipProxy) {
+                $networkModule = Join-Path $PSScriptRoot 'QuarantineNetwork.psm1'
+                if (Test-Path -LiteralPath $networkModule) {
+                    Import-Module $networkModule -Force
+                    Initialize-QuarantineNetworkServices -ConfigPath $ConfigPath -SkipProxy:$SkipProxy
+                }
+            }
         }
         return
     }
@@ -1099,6 +1874,8 @@ function Stop-QuarantineVM {
     }
 
     $action = if ($Force) { @('poweroff') } else { @('acpipowerbutton') }
+
+    Close-QuarantineVMInbox -ConfigPath $ConfigPath
 
     if ($PSCmdlet.ShouldProcess($vmName, ($action -join ' '))) {
         Invoke-VBoxManage -Arguments (@('controlvm', $vmName) + $action) | Out-Null
@@ -1438,6 +2215,7 @@ function Reset-QuarantineVM {
 
     $state = Get-QuarantineVMState -VmName $vmName
     if ($state -in @('running', 'paused')) {
+        Close-QuarantineVMInbox -ConfigPath $ConfigPath
         Stop-QuarantineVM -ConfigPath $ConfigPath -Force
         Start-Sleep -Seconds 3
     }
@@ -1708,6 +2486,15 @@ Export-ModuleMember -Function @(
     'Mount-QuarantineVMGuestAdditions',
     'Set-QuarantineVMNetworkMode',
     'Set-QuarantineVMClipboard',
+    'Push-QuarantineVMInbox',
+    'Open-QuarantineVMInbox',
+    'Close-QuarantineVMInbox',
+    'Get-QuarantineVMInbox',
+    'Clear-QuarantineVMInbox',
+    'Get-QuarantineVMGuestSettings',
+    'Invoke-QuarantineVMGuestRun',
+    'Copy-QuarantineVMGuestFile',
+    'Test-QuarantineVMGuestControl',
     'Update-QuarantineVMNetworkConfig',
     'Move-QuarantineVMDisk',
     'Move-QuarantineVMHome',

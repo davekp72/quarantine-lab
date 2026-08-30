@@ -298,19 +298,49 @@ Optional unattended install: customize `templates\autounattend.xml` (change pass
 
 ## Transferring samples to the guest
 
-Prefer **manual, one-way** transfer without shared folders:
-
-1. Detach network (`network.mode`: `none`) for maximum isolation, or
-2. Use a dedicated USB drive passed only when needed, or
-3. Enable a transient shared folder manually for a single transfer, then remove it:
+Use the **inbox** workflow for one-way host→guest transfer with a transient read-only share:
 
 ```powershell
-VBoxManage sharedfolder add "Quarantine-Win11" --name quarantine-in --hostpath "D:\quarantine-inbox" --automount --transient
-# ... copy file in guest ...
-VBoxManage sharedfolder remove "Quarantine-Win11" --name quarantine-in --transient
+.\quarantine-vm.ps1 inbox push .\sample.exe
+.\quarantine-vm.ps1 start
+.\quarantine-vm.ps1 inbox open
+# In guest: copy from \\VBOXSVR\quarantine-in (requires Guest Additions)
+.\quarantine-vm.ps1 inbox close
 ```
 
+- Files land in `D:\Vbox\LabVM\quarantine-inbox` (configurable via `inbox.hostPath`)
+- Each push is logged with SHA256 to `logs\inbox\transfers.jsonl`
+- The share is transient and removed on `inbox close`, `stop`, `reset`, or isolation apply
+- Set `inbox.requireNetworkOff`: `true` to block `inbox open` unless network is `none`, `offline`, or `intnet`
+
+Alternatives for maximum isolation:
+
+1. Detach network (`.\quarantine-vm.ps1 network none`) before opening the inbox, or
+2. Use a dedicated USB drive passed only when needed
+
 Never map host folders that contain sensitive data.
+
+### Guest control (run commands from host)
+
+With **Guest Additions** installed, the host can run commands or copy files into the guest via `VBoxManage guestcontrol` — no shared folder needed.
+
+**Setup:**
+
+1. Create a dedicated local account in the guest (e.g. `quarantine`) with a known password.
+2. Store the password in `D:\Vbox\LabVM\secrets\guest-password.txt` (or set `QUARANTINE_GUEST_PASSWORD`).
+3. Set `guest.username` in `config/quarantine-vm.json`.
+4. VM must be **running**.
+
+```powershell
+.\quarantine-vm.ps1 guest test
+.\quarantine-vm.ps1 guest run whoami
+.\quarantine-vm.ps1 guest ps "Get-Process | Select-Object -First 3"
+.\quarantine-vm.ps1 guest copy .\sample.exe
+```
+
+Files copied with `guest copy` land in `C:\Users\Public\Quarantine` by default (`guest.copyTargetDir`).
+
+**Security:** guest credentials live on the host — use a disposable guest account, not your personal password. Guest control is host→guest only; malware cannot invoke it from inside the VM without a separate escape.
 
 ## Safety notes
 

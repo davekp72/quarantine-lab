@@ -122,6 +122,22 @@ function Write-QuarantineConfig {
             disableAudio         = $true
             disableSharedFolders = $true
         }
+        inbox                = [ordered]@{
+            hostPath          = 'D:\Vbox\LabVM\quarantine-inbox'
+            shareName         = 'quarantine-in'
+            readOnly          = $true
+            requireNetworkOff = $false
+            logDir            = 'D:\Vbox\LabVM\logs\inbox'
+        }
+        guest                = [ordered]@{
+            username      = ''
+            password      = ''
+            passwordFile  = 'D:\Vbox\LabVM\secrets\guest-password.txt'
+            domain        = ''
+            defaultExe    = 'C:\Windows\System32\cmd.exe'
+            copyTargetDir = 'C:\Users\Public\Quarantine'
+            timeoutMs     = 60000
+        }
         cleanSnapshotName    = 'Clean'
         firmware             = 'efi'
     }

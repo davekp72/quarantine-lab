@@ -78,10 +78,19 @@ function Get-QuarantineNetworkStatePath {
 function Read-QuarantineNetworkState {
     param([string]$StatePath)
 
+    $skipProps = @('Keys', 'Values', 'Count', 'IsFixedSize', 'IsReadOnly', 'IsSynchronized', 'SyncRoot')
     if (-not (Test-Path -LiteralPath $StatePath)) {
         return [ordered]@{}
     }
-    return (Get-Content -LiteralPath $StatePath -Raw | ConvertFrom-Json)
+
+    $obj = Get-Content -LiteralPath $StatePath -Raw | ConvertFrom-Json
+    $state = [ordered]@{}
+    foreach ($prop in $obj.PSObject.Properties) {
+        if ($prop.Name -notin $skipProps) {
+            $state[$prop.Name] = $prop.Value
+        }
+    }
+    return $state
 }
 
 function Write-QuarantineNetworkState {
@@ -93,7 +102,14 @@ function Write-QuarantineNetworkState {
         [string]$StatePath
     )
 
-    ($State | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath $StatePath -Encoding UTF8
+    $allowed = @('mitmproxyPid', 'pacPid', 'sessionDir', 'startedAt', 'listenPort', 'pacPort')
+    $clean = [ordered]@{}
+    foreach ($key in $allowed) {
+        if ($null -ne $State[$key]) {
+            $clean[$key] = $State[$key]
+        }
+    }
+    ($clean | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath $StatePath -Encoding UTF8
 }
 
 function Find-TsharkCommand {
@@ -178,15 +194,10 @@ function Start-QuarantineProxy {
     }
 
     $statePath = Get-QuarantineNetworkStatePath -LogRoot $logDir
-    $state = @{}
-    $existing = Read-QuarantineNetworkState -StatePath $statePath
-    if ($existing) {
-        foreach ($prop in $existing.PSObject.Properties) {
-            $state[$prop.Name] = $prop.Value
-        }
-    }
+    $state = Read-QuarantineNetworkState -StatePath $statePath
 
-    if (Test-ProcessRunning -ProcessId ([int]$state.mitmproxyPid)) {
+    $mitmPid = if ($state['mitmproxyPid']) { [int]$state['mitmproxyPid'] } else { 0 }
+    if (Test-ProcessRunning -ProcessId $mitmPid) {
         Write-Host 'Quarantine proxy already running.'
         return
     }
@@ -210,9 +221,12 @@ function Start-QuarantineProxy {
     $pacPort = if ($proxy.pacPort) { [int]$proxy.pacPort } else { 8081 }
     $pacPath = Join-Path $script:NetworkRoot 'proxy\quarantine.pac'
 
+    $caPath = Publish-QuarantineProxyCA -LogDir $logDir
+
     $env:QUARANTINE_ACCESS_LOG = $accessLog
     $env:QUARANTINE_ERROR_LOG = $errorLog
     $env:QUARANTINE_PAC_PATH = $pacPath
+    if ($caPath) { $env:QUARANTINE_CA_PATH = $caPath }
 
     $mitmArgs = @(
         '--listen-host', $listenHost,
@@ -223,20 +237,25 @@ function Start-QuarantineProxy {
     )
 
     $mitmProc = Start-Process -FilePath $mitmdump -ArgumentList $mitmArgs -PassThru -WindowStyle Hidden
-    Start-Sleep -Milliseconds 500
+    Start-Sleep -Milliseconds 800
     if ($mitmProc.HasExited) {
         throw "mitmdump exited immediately (code $($mitmProc.ExitCode)). Check $errorLog"
+    }
+
+    if (-not $caPath) {
+        $caPath = Publish-QuarantineProxyCA -LogDir $logDir
+        if ($caPath) { $env:QUARANTINE_CA_PATH = $caPath }
     }
 
     $pacDir = Split-Path $pacPath -Parent
     $pacProc = Start-QuarantinePacServer -PacDir $pacDir -Port $pacPort
 
-    $state.mitmproxyPid = $mitmProc.Id
-    if ($pacProc) { $state.pacPid = $pacProc.Id }
-    $state.sessionDir = $sessionDir
-    $state.startedAt = (Get-Date).ToString('o')
-    $state.listenPort = $listenPort
-    $state.pacPort = $pacPort
+    $state['mitmproxyPid'] = $mitmProc.Id
+    if ($pacProc) { $state['pacPid'] = $pacProc.Id }
+    $state['sessionDir'] = $sessionDir
+    $state['startedAt'] = (Get-Date).ToString('o')
+    $state['listenPort'] = $listenPort
+    $state['pacPort'] = $pacPort
 
     Write-QuarantineNetworkState -State $state -StatePath $statePath
 
@@ -248,6 +267,12 @@ function Start-QuarantineProxy {
         Write-Host "  PAC URL (via proxy): http://$($cfg.network.guestGateway):$listenPort/quarantine.pac"
     }
     Write-Host "  Logs: $sessionDir"
+    if ($caPath) {
+        Write-Host "  CA: $caPath"
+        Write-Host "  Guest CA URL: http://$($cfg.network.guestGateway):$pacPort/mitmproxy-ca-cert.cer"
+    } else {
+        Write-Warning 'mitmproxy CA not published yet. Re-run proxy start or proxy export-ca after the first run.'
+    }
 }
 
 function Stop-QuarantineProxy {
@@ -262,11 +287,11 @@ function Stop-QuarantineProxy {
     $statePath = Get-QuarantineNetworkStatePath -LogRoot $logDir
     $state = Read-QuarantineNetworkState -StatePath $statePath
 
-    if ($state -and $state.mitmproxyPid) {
-        Stop-QuarantineManagedProcess -ProcessId ([int]$state.mitmproxyPid) -Label 'mitmdump'
+    if ($state['mitmproxyPid']) {
+        Stop-QuarantineManagedProcess -ProcessId ([int]$state['mitmproxyPid']) -Label 'mitmdump'
     }
-    if ($state -and $state.pacPid) {
-        Stop-QuarantineManagedProcess -ProcessId ([int]$state.pacPid) -Label 'PAC server'
+    if ($state['pacPid']) {
+        Stop-QuarantineManagedProcess -ProcessId ([int]$state['pacPid']) -Label 'PAC server'
     }
 
     if (Test-Path -LiteralPath $statePath) {
@@ -289,16 +314,18 @@ function Get-QuarantineProxyStatus {
     $state = Read-QuarantineNetworkState -StatePath $statePath
 
     $mitmRunning = $false
-    if ($state -and $state.mitmproxyPid) {
-        $mitmRunning = Test-ProcessRunning -ProcessId ([int]$state.mitmproxyPid)
+    $mitmPid = $null
+    if ($state['mitmproxyPid']) {
+        $mitmPid = [int]$state['mitmproxyPid']
+        $mitmRunning = Test-ProcessRunning -ProcessId $mitmPid
     }
 
     [pscustomobject]@{
         Running    = $mitmRunning
-        MitmPid    = if ($state) { $state.mitmproxyPid } else { $null }
-        ListenPort = if ($state) { $state.listenPort } else { $cfg.network.proxy.listenPort }
-        PacPort    = if ($state) { $state.pacPort } else { $cfg.network.proxy.pacPort }
-        SessionDir = if ($state) { $state.sessionDir } else { $null }
+        MitmPid    = $mitmPid
+        ListenPort = if ($state['listenPort']) { $state['listenPort'] } else { $cfg.network.proxy.listenPort }
+        PacPort    = if ($state['pacPort']) { $state['pacPort'] } else { $cfg.network.proxy.pacPort }
+        SessionDir = if ($state['sessionDir']) { $state['sessionDir'] } else { $null }
         LogDir     = $logDir
         Mitmdump   = Find-MitmproxyCommand
     }
@@ -307,10 +334,11 @@ function Get-QuarantineProxyStatus {
 function Get-QuarantineCaptureInterface {
     param(
         [string]$Preferred,
-        [string]$TsharkPath
+        [string]$TsharkPath,
+        [string]$Mode = 'auto'
     )
 
-    if ($Preferred -and $Preferred -ne 'auto') {
+    if ($Preferred -and $Preferred -notin @('auto', 'loopback')) {
         return $Preferred
     }
 
@@ -320,11 +348,25 @@ function Get-QuarantineCaptureInterface {
     if (-not $TsharkPath) { return $null }
 
     $output = & $TsharkPath -D 2>&1
+    if ($Preferred -eq 'loopback' -or $Mode -eq 'loopback-proxy') {
+        foreach ($line in $output) {
+            if ($line -match 'loopback' -and $line -match '^(\d+)\.') {
+                return $Matches[1]
+            }
+        }
+    }
+
     foreach ($line in $output) {
         if ($line -match 'VirtualBox|VBox') {
             if ($line -match '^(\d+)\.') {
                 return $Matches[1]
             }
+        }
+    }
+
+    foreach ($line in $output) {
+        if ($line -match 'loopback' -and $line -match '^(\d+)\.') {
+            return $Matches[1]
         }
     }
 
@@ -336,11 +378,68 @@ function Get-QuarantineCaptureInterface {
     return $null
 }
 
+function Get-QuarantineCaptureFilter {
+    param(
+        [string]$Mode,
+        [string]$GuestIp,
+        [int]$ProxyPort,
+        [int]$PacPort,
+        [string]$InterfaceName
+    )
+
+    if ($Mode -eq 'loopback-proxy' -or ($InterfaceName -and $InterfaceName -match 'loopback')) {
+        return "tcp port $ProxyPort or tcp port $PacPort"
+    }
+    if ($GuestIp) {
+        return "host $GuestIp"
+    }
+    return "tcp port $ProxyPort or tcp port $PacPort"
+}
+
+function Get-QuarantineCaptureStatus {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [string]$ConfigPath = (Join-Path $script:ProjectRoot 'config\quarantine-vm.json')
+    )
+
+    $cfg = Get-QuarantineNetworkConfig -ConfigPath $ConfigPath
+    $logDir = $cfg.network.capture.logDir
+    $statePath = Join-Path $logDir 'capture.state.json'
+    $state = $null
+    if (Test-Path -LiteralPath $statePath) {
+        $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+    }
+
+    $running = $false
+    $pcapBytes = 0
+    if ($state -and $state.pid) {
+        $running = Test-ProcessRunning -ProcessId ([int]$state.pid)
+    }
+    if ($state -and $state.pcapPath -and (Test-Path -LiteralPath $state.pcapPath)) {
+        $pcapBytes = (Get-Item -LiteralPath $state.pcapPath).Length
+    }
+
+    [pscustomobject]@{
+        Running   = $running
+        Pid       = if ($state) { $state.pid } else { $null }
+        PcapPath  = if ($state) { $state.pcapPath } else { $null }
+        PcapBytes = $pcapBytes
+        Interface = if ($state) { $state.interface } else { $null }
+        Filter    = if ($state) { $state.filter } else { $null }
+        LogDir    = $logDir
+        Tshark    = Find-TsharkCommand
+    }
+}
+
 function Start-QuarantineCapture {
     [CmdletBinding()]
     param(
         [Parameter()]
-        [string]$ConfigPath
+        [string]$ConfigPath,
+
+        [Parameter()]
+        [switch]$Required
     )
 
     $cfg = Get-QuarantineNetworkConfig -ConfigPath $ConfigPath
@@ -352,7 +451,10 @@ function Start-QuarantineCapture {
 
     $tshark = Find-TsharkCommand
     if (-not $tshark) {
-        throw 'tshark not found. Install Wireshark (includes Npcap): https://www.wireshark.org/download.html'
+        $msg = 'tshark not found. Packet capture skipped. Install Wireshark (includes Npcap) for PCAPs: https://www.wireshark.org/download.html'
+        if ($Required) { throw $msg }
+        Write-Warning $msg
+        return
     }
 
     $logDir = $capture.logDir
@@ -365,40 +467,81 @@ function Start-QuarantineCapture {
         $existing = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
         if ($existing.pid -and (Test-ProcessRunning -ProcessId ([int]$existing.pid))) {
             Write-Host "Capture already running (PID $($existing.pid))."
+            Write-Host "  PCAP: $($existing.pcapPath)"
             return
         }
     }
 
-    $iface = Get-QuarantineCaptureInterface -Preferred $capture.interface -TsharkPath $tshark
+    $captureMode = if ($capture.mode) { $capture.mode } else { 'loopback-proxy' }
+    $iface = Get-QuarantineCaptureInterface -Preferred $capture.interface -TsharkPath $tshark -Mode $captureMode
     if (-not $iface) {
-        throw 'Could not detect capture interface. Set network.capture.interface in config.'
+        throw 'Could not detect capture interface. Set network.capture.interface in config (use "loopback" for NAT VMs).'
     }
 
     $guestIp = if ($capture.guestIp) { $capture.guestIp } else { '10.0.2.15' }
+    $proxyPort = [int]$cfg.network.proxy.listenPort
+    $pacPort = [int]$cfg.network.proxy.pacPort
+    $ifaceLine = (& $tshark -D 2>&1 | Where-Object { $_ -match "^$iface\." } | Select-Object -First 1)
+    $bpf = Get-QuarantineCaptureFilter -Mode $captureMode -GuestIp $guestIp -ProxyPort $proxyPort -PacPort $pacPort -InterfaceName $ifaceLine
     $session = Get-Date -Format 'yyyyMMdd-HHmmss'
     $pcapPath = Join-Path $logDir "quarantine-$session.pcap"
 
-    $tsharkArgs = @(
-        '-i', $iface,
-        '-f', "host $guestIp",
-        '-w', $pcapPath
-    )
-
-    $proc = Start-Process -FilePath $tshark -ArgumentList $tsharkArgs -PassThru -WindowStyle Hidden
-    Start-Sleep -Milliseconds 300
+    $pcapPathEsc = $pcapPath -replace '"', '\"'
+    $bpfEsc = $bpf -replace '"', '\"'
+    $argString = "-i $iface -f `"$bpfEsc`" -w `"$pcapPathEsc`""
+    $proc = Start-Process -FilePath $tshark -ArgumentList $argString -PassThru -WindowStyle Hidden
+    Start-Sleep -Milliseconds 500
+    if ($proc.HasExited) {
+        throw "tshark exited immediately (code $($proc.ExitCode)). Capture filter: $bpf on interface $iface"
+    }
 
     $capState = [ordered]@{
         pid       = $proc.Id
         pcapPath  = $pcapPath
         interface = $iface
+        filter    = $bpf
         guestIp   = $guestIp
+        mode      = $captureMode
         startedAt = (Get-Date).ToString('o')
     }
     ($capState | ConvertTo-Json) | Set-Content -LiteralPath $statePath -Encoding UTF8
 
     Write-Host "Packet capture started (PID $($proc.Id))."
-    Write-Host "  Interface: $iface, filter: host $guestIp"
+    Write-Host "  Interface: $iface ($ifaceLine)"
+    Write-Host "  Filter: $bpf"
     Write-Host "  PCAP: $pcapPath"
+    if ($captureMode -eq 'loopback-proxy') {
+        Write-Host '  Note: loopback capture records proxy/PAC traffic (guest NAT IP is not visible on host NICs).'
+    }
+}
+
+function Initialize-QuarantineNetworkServices {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [string]$ConfigPath,
+
+        [Parameter()]
+        [switch]$SkipProxy,
+
+        [Parameter()]
+        [switch]$SkipCapture
+    )
+
+    $cfg = Get-QuarantineNetworkConfig -ConfigPath $ConfigPath
+    $networkMode = if ($cfg.network.mode) { $cfg.network.mode.ToLowerInvariant() } else { '' }
+    if ($networkMode -ne 'quarantine') { return }
+
+    if (-not $SkipProxy -and $cfg.network.proxy.enabled) {
+        Start-QuarantineProxy -ConfigPath $ConfigPath
+        $proxy = Get-QuarantineProxyStatus -ConfigPath $ConfigPath
+        if ($proxy.Running -and $proxy.SessionDir) {
+            Write-Host "  Access log: $(Join-Path $proxy.SessionDir 'access.log')"
+        }
+    }
+    if (-not $SkipCapture -and $cfg.network.capture.enabled) {
+        Start-QuarantineCapture -ConfigPath $ConfigPath
+    }
 }
 
 function Stop-QuarantineCapture {
@@ -515,6 +658,42 @@ Run Configure-QuarantineGuestNetwork.ps1 inside the guest once, then baseline.
 "@
 }
 
+function Find-QuarantineProxyCA {
+    param([string]$LogDir)
+
+    $candidates = @(
+        (Join-Path $env:USERPROFILE '.mitmproxy\mitmproxy-ca-cert.cer'),
+        (Join-Path $env:USERPROFILE '.mitmproxy\mitmproxy-ca-cert.pem'),
+        (Join-Path $LogDir 'certs\mitmproxy-ca-cert.cer'),
+        (Join-Path $script:NetworkRoot 'proxy\mitmproxy-ca-cert.cer')
+    )
+    foreach ($path in $candidates) {
+        if ($path -and (Test-Path -LiteralPath $path)) { return $path }
+    }
+    return $null
+}
+
+function Publish-QuarantineProxyCA {
+    param([string]$LogDir)
+
+    $src = Find-QuarantineProxyCA -LogDir $LogDir
+    if (-not $src) { return $null }
+
+    $srcFull = [System.IO.Path]::GetFullPath($src)
+    $pacDir = Join-Path $script:NetworkRoot 'proxy'
+    $certsDir = Join-Path $LogDir 'certs'
+    foreach ($dir in @($pacDir, $certsDir)) {
+        if (-not (Test-Path -LiteralPath $dir)) {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        }
+        $dest = [System.IO.Path]::GetFullPath((Join-Path $dir 'mitmproxy-ca-cert.cer'))
+        if ($srcFull -ne $dest) {
+            Copy-Item -LiteralPath $src -Destination $dest -Force
+        }
+    }
+    return (Join-Path $pacDir 'mitmproxy-ca-cert.cer')
+}
+
 function Export-QuarantineProxyCA {
     [CmdletBinding()]
     param(
@@ -527,18 +706,13 @@ function Export-QuarantineProxyCA {
 
     $cfg = Get-QuarantineNetworkConfig -ConfigPath $ConfigPath
     $logDir = $cfg.network.proxy.logDir
-    $candidates = @(
-        Join-Path $logDir 'certs\mitmproxy-ca-cert.cer',
-        Join-Path $env:USERPROFILE '.mitmproxy\mitmproxy-ca-cert.cer',
-        Join-Path $env:USERPROFILE '.mitmproxy\mitmproxy-ca-cert.pem'
-    )
-    $mitmCert = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    $published = Publish-QuarantineProxyCA -LogDir $logDir
 
-    if (-not $mitmCert) {
+    if (-not $published) {
         Write-Warning @"
-Phase 2 TLS: mitmproxy CA not found.
-Start the proxy once (.\quarantine-vm.ps1 proxy start) so mitmproxy generates its CA under %USERPROFILE%\.mitmproxy\, then re-run proxy export-ca.
-Install the .cer in the guest Trusted Root Certification Authorities store.
+mitmproxy CA not found.
+Start the proxy once (.\quarantine-vm.ps1 proxy start) so mitmproxy generates its CA, then re-run proxy export-ca.
+Install in the guest with network\guest\Install-QuarantineProxyCA.ps1 (Admin).
 Note: certificate pinning, HSTS preload, and many system services will still not be decryptable.
 "@
         return
@@ -549,8 +723,12 @@ Note: certificate pinning, HSTS preload, and many system services will still not
         New-Item -ItemType Directory -Path $dest -Force | Out-Null
     }
     $target = Join-Path $dest 'mitmproxy-ca-cert.cer'
-    Copy-Item -LiteralPath $mitmCert -Destination $target -Force
+    Copy-Item -LiteralPath $published -Destination $target -Force
+    $gateway = $cfg.network.guestGateway
+    $pacPort = [int]$cfg.network.proxy.pacPort
     Write-Host "CA certificate exported to: $target"
+    Write-Host "Also served at: http://${gateway}:${pacPort}/mitmproxy-ca-cert.cer"
+    Write-Host "In the guest (Admin): powershell -ExecutionPolicy Bypass -File .\Install-QuarantineProxyCA.ps1"
 }
 
 Export-ModuleMember -Function @(
@@ -560,6 +738,8 @@ Export-ModuleMember -Function @(
     'Get-QuarantineProxyStatus',
     'Start-QuarantineCapture',
     'Stop-QuarantineCapture',
+    'Get-QuarantineCaptureStatus',
+    'Initialize-QuarantineNetworkServices',
     'Enable-QuarantineVMNetwork',
     'Export-QuarantineProxyCA',
     'Find-MitmproxyCommand',

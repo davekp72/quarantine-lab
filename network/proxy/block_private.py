@@ -19,6 +19,7 @@ PRIVATE_NETS = [
 ACCESS_LOG = None
 ERROR_LOG = None
 PAC_BODY = None
+CA_BODY = None
 
 
 def _is_private(host: str) -> bool:
@@ -45,9 +46,23 @@ def _serve_pac(flow: http.HTTPFlow) -> bool:
     return False
 
 
+def _serve_ca(flow: http.HTTPFlow) -> bool:
+    if not CA_BODY:
+        return False
+    path = flow.request.path.split("?", 1)[0].rstrip("/").lower()
+    if path.endswith("mitmproxy-ca-cert.cer") or path.endswith("/cert.cer"):
+        flow.response = http.Response.make(
+            200,
+            CA_BODY,
+            {"Content-Type": "application/x-x509-ca-cert"},
+        )
+        return True
+    return False
+
+
 class QuarantineBlocker:
     def request(self, flow: http.HTTPFlow) -> None:
-        if _serve_pac(flow):
+        if _serve_pac(flow) or _serve_ca(flow):
             return
 
         host = flow.request.host
@@ -73,10 +88,11 @@ addons = [QuarantineBlocker()]
 
 
 def load(loader):
-    global ACCESS_LOG, ERROR_LOG, PAC_BODY
+    global ACCESS_LOG, ERROR_LOG, PAC_BODY, CA_BODY
     access = os.environ.get("QUARANTINE_ACCESS_LOG", "")
     errors = os.environ.get("QUARANTINE_ERROR_LOG", "")
     pac_path = os.environ.get("QUARANTINE_PAC_PATH", "")
+    ca_path = os.environ.get("QUARANTINE_CA_PATH", "")
     if access:
         ACCESS_LOG = open(access, "a", encoding="utf-8")
     if errors:
@@ -84,6 +100,9 @@ def load(loader):
     if pac_path and os.path.isfile(pac_path):
         with open(pac_path, "r", encoding="utf-8") as pac_file:
             PAC_BODY = pac_file.read()
+    if ca_path and os.path.isfile(ca_path):
+        with open(ca_path, "rb") as ca_file:
+            CA_BODY = ca_file.read()
 
 
 def done():
