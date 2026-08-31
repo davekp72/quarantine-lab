@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Quarantine Manifest Diff</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="dropzone" class="dropzone">
+    <h2>Quarantine Manifest Diff Viewer</h2>
+    <p>Drop a <code>*.diff.json</code> file here, or choose one.</p>
+    <p><input type="file" id="fileInput" accept=".json,application/json"></p>
+    <p style="font-size:0.85rem">Generate with:<br><code>.\quarantine-vm.ps1 manifest view -FromSnapshot Clean -ToSnapshot testdiff</code></p>
+  </div>
+
+  <div id="app" class="hidden">
+    <header>
+      <h1>Manifest diff</h1>
+      <div class="meta" id="meta"></div>
+    </header>
+
+    <div class="toolbar">
+      <input type="search" id="search" placeholder="Filter paths, keys, task names…">
+      <select id="categoryFilter">
+        <option value="all">All categories</option>
+        <option value="files">Files only</option>
+        <option value="registry">Registry only</option>
+        <option value="tasks">Tasks only</option>
+        <option value="sysmon">Sysmon only</option>
+      </select>
+      <select id="changeFilter">
+        <option value="all">All changes</option>
+        <option value="added">Added</option>
+        <option value="removed">Removed</option>
+        <option value="modified">Modified</option>
+        <option value="volatile">Tasks: schedule noise only</option>
+      </select>
+      <label><input type="checkbox" id="hideNoise" checked> Hide routine noise</label>
+    </div>
+
+    <div class="stats" id="stats"></div>
+
+    <div class="tabs" id="tabs">
+      <button class="tab active" data-tab="overview">Overview</button>
+      <button class="tab" data-tab="files">Files</button>
+      <button class="tab" data-tab="registry">Registry</button>
+      <button class="tab" data-tab="tasks">Tasks</button>
+      <button class="tab" data-tab="sysmon">Sysmon</button>
+      <button class="tab" data-tab="usn">USN journal</button>
+    </div>
+
+    <div id="panel-overview" class="panel active"></div>
+    <div id="panel-files" class="panel"></div>
+    <div id="panel-registry" class="panel"></div>
+    <div id="panel-tasks" class="panel"></div>
+    <div id="panel-sysmon" class="panel"></div>
+    <div id="panel-usn" class="panel"></div>
+
+    <aside id="detail-panel" class="detail-panel hidden" aria-label="Change detail">
+      <div class="detail-header">
+        <div>
+          <div class="detail-kicker" id="detail-kicker"></div>
+          <h3 id="detail-title"></h3>
+        </div>
+        <button type="button" id="detail-close" class="detail-close" title="Close">×</button>
+      </div>
+      <div id="detail-meta" class="detail-meta"></div>
+      <div id="detail-body" class="detail-body"></div>
+    </aside>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

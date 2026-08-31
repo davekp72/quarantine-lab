@@ -22,6 +22,17 @@ function Get-QuarantineVMConfig {
     return $raw
 }
 
+function Initialize-QuarantineVMContext {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [string]$ConfigPath = (Join-Path $PSScriptRoot 'config\quarantine-vm.json')
+    )
+
+    $script:Config = Get-QuarantineVMConfig -ConfigPath $ConfigPath
+    return $script:Config
+}
+
 function Get-QuarantineVMDataDir {
     [CmdletBinding()]
     param(
@@ -254,12 +265,57 @@ function Get-QuarantineVMState {
 
     $info = Invoke-VBoxManage -Arguments @('showvminfo', $VmName, '--machinereadable')
     foreach ($line in $info) {
-        if ($line -match '^VMState="(?<state>[^"]+)"$') {
-            return $Matches['state']
+        $trimmed = "$line".Trim()
+        if ($trimmed -match '^VMState="(?<state>[^"]+)"') {
+            return $Matches['state'].ToLowerInvariant()
         }
     }
 
     return 'unknown'
+}
+
+function Ensure-QuarantineVMMutable {
+    <#
+    .SYNOPSIS
+      VirtualBox cannot modifyvm while a VM is running or in saved (live snapshot) state.
+      Discards saved RAM or powers off so NIC and other settings can be changed.
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$ConfigPath,
+        [Parameter(Mandatory)]
+        [string]$VmName,
+        [string]$Reason = 'change VM settings'
+    )
+
+    $state = 'unknown'
+    for ($i = 0; $i -lt 10; $i++) {
+        $state = Get-QuarantineVMState -VmName $VmName
+        if ($state -ne 'unknown') { break }
+        Start-Sleep -Milliseconds 500
+    }
+
+    if ($state -eq 'saved') {
+        Write-Host "VM is in saved (live snapshot) state; discarding RAM so we can $Reason. Disk snapshot state is unchanged."
+        Invoke-VBoxManage -Arguments @('discardstate', $VmName) | Out-Null
+        Start-Sleep -Seconds 1
+        $state = Get-QuarantineVMState -VmName $VmName
+    } elseif ($state -eq 'unknown') {
+        Invoke-VBoxManage -Arguments @('discardstate', $VmName) -AllowFailure | Out-Null
+        Start-Sleep -Seconds 1
+        $state = Get-QuarantineVMState -VmName $VmName
+    }
+
+    if ($state -in @('running', 'paused', 'starting')) {
+        Write-Host "Stopping VM before $($Reason)..."
+        Stop-QuarantineVM -ConfigPath $ConfigPath -Force
+        Start-Sleep -Seconds 2
+        $state = Get-QuarantineVMState -VmName $VmName
+    }
+
+    if ($state -eq 'saved') {
+        throw "VM '$VmName' is still in saved state; cannot $Reason. Discard the saved RAM or restore a disk-only snapshot first."
+    }
 }
 
 function Get-QuarantineHostOnlyAdapter {
@@ -1100,6 +1156,124 @@ Use a dedicated local account in the guest (not your personal credentials).
     }
 }
 
+function Get-QuarantineVMPayloadSettings {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        $Config = $script:Config
+    )
+
+    $settings = [ordered]@{
+        username      = ''
+        password      = ''
+        passwordFile  = ''
+        domain        = ''
+        defaultExe    = 'C:\Windows\System32\cmd.exe'
+        copyTargetDir = 'C:\Users\Public\Quarantine'
+        timeoutMs     = 120000
+    }
+
+    if ($Config.payload) {
+        foreach ($key in @($settings.Keys)) {
+            $value = $Config.payload.$key
+            if ($null -ne $value -and -not [string]::IsNullOrWhiteSpace("$value")) {
+                $settings[$key] = $value
+            }
+        }
+    }
+
+    return [pscustomobject]$settings
+}
+
+function Resolve-QuarantineVMPayloadCredential {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [string]$Username,
+
+        [Parameter()]
+        [string]$Password,
+
+        [Parameter()]
+        [string]$Domain,
+
+        [Parameter()]
+        [string]$ConfigPath
+    )
+
+    $script:Config = Get-QuarantineVMConfig -ConfigPath $ConfigPath
+    $settings = Get-QuarantineVMPayloadSettings
+
+    $resolvedUser = if ($Username) { $Username } elseif ($settings.username) { $settings.username } else { $null }
+    if (-not $resolvedUser) {
+        throw 'Payload username required. Set payload.username in config/quarantine-vm.json or pass -GuestUser.'
+    }
+
+    $resolvedDomain = if ($Domain) { $Domain } elseif ($settings.domain) { $settings.domain } else { '' }
+    if ($resolvedUser -match '^([^\\]+)\\(.+)$') {
+        if (-not $resolvedDomain) { $resolvedDomain = $Matches[1] }
+        $resolvedUser = $Matches[2]
+    }
+
+    $resolvedPassword = Get-QuarantineVMGuestPassword -Password $Password -ConfigPassword $settings.password -PasswordFile $settings.passwordFile
+
+    [pscustomobject]@{
+        Username = $resolvedUser
+        Password = $resolvedPassword
+        Domain   = $resolvedDomain
+        Settings = $settings
+    }
+}
+
+function Restart-QuarantineVMGuestSession {
+    <#
+    .SYNOPSIS
+      Recover from a broken guest-control session by power-cycling the VM and waiting for Guest Additions.
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$ConfigPath,
+        [int]$TimeoutSeconds = 180
+    )
+
+    if ($ConfigPath) {
+        $script:Config = Get-QuarantineVMConfig -ConfigPath $ConfigPath
+    }
+
+    $vmName = $script:Config.vmName
+    $state = Get-QuarantineVMState -VmName $vmName
+    Write-Warning "Recovering guest session (VM state: $state)..."
+
+    if ($state -in @('running', 'paused', 'starting')) {
+        Stop-QuarantineVM -ConfigPath $ConfigPath -Force
+        Start-Sleep -Seconds 5
+    } elseif ($state -in @('aborted', 'gurumeditation')) {
+        Invoke-VBoxManage -Arguments @('controlvm', $vmName, 'poweroff') -AllowFailure | Out-Null
+        Start-Sleep -Seconds 3
+    }
+
+    Start-QuarantineVM -ConfigPath $ConfigPath -Type headless -SkipProxy
+    Start-Sleep -Seconds 15
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        try {
+            if (Test-QuarantineVMGuestControl -ConfigPath $ConfigPath) {
+                Write-Host 'Guest control OK.'
+                return
+            }
+        } catch {
+            if ($_.Exception.Message -match 'not ready|poweroff|not running|E_ACCESSDENIED') {
+                Start-Sleep -Seconds 5
+                continue
+            }
+            throw
+        }
+    }
+
+    throw 'Guest control did not become ready after VM restart.'
+}
+
 function Assert-QuarantineVMGuestRunning {
     [CmdletBinding()]
     param(
@@ -1133,6 +1307,9 @@ function Invoke-QuarantineVMGuestControl {
         [string]$Domain,
 
         [Parameter()]
+        [string]$ConfigPath,
+
+        [Parameter()]
         [int]$TimeoutMs = 60000
     )
 
@@ -1160,12 +1337,24 @@ function Invoke-QuarantineVMGuestControl {
     }
     $args += $subCommandArgs
 
-    try {
-        Invoke-VBoxManage -Arguments $args
-    } catch {
-        if ($_.Exception.Message -match 'not able to logon|logon on guest|Authentication failure') {
-            throw @"
-$($_.Exception.Message)
+    $maxAttempts = if ($subCommand -in @('run', 'start')) { 3 } else { 1 }
+    $lastError = $null
+
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        try {
+            return Invoke-VBoxManage -Arguments $args
+        } catch {
+            $lastError = $_
+            $msg = $_.Exception.Message
+            if ($attempt -lt $maxAttempts -and $msg -match 'RPC_S_SERVER_UNAVAILABLE|E_UNEXPECTED|session state|Unlocked|guest control|aborted|gurumeditation') {
+                Write-Warning "Guest control attempt $attempt/$maxAttempts failed (transient VBox session). Restarting VM..."
+                Start-Sleep -Seconds 5
+                Restart-QuarantineVMGuestSession -ConfigPath $ConfigPath
+                continue
+            }
+            if ($msg -match 'not able to logon|logon on guest|Authentication failure') {
+                throw @"
+$msg
 
 Guest logon failed. Check:
   1. guest.username / guest.password in config (Microsoft accounts often fail - use a local account name)
@@ -1173,9 +1362,12 @@ Guest logon failed. Check:
   3. Guest Additions installed and VM rebooted after install
   4. Account password is correct (typo in email domain? .ccom vs .com)
 "@
+            }
+            throw
         }
-        throw
     }
+
+    throw $lastError
 }
 
 function Invoke-QuarantineVMGuestRun {
@@ -1231,10 +1423,49 @@ function Invoke-QuarantineVMGuestRun {
         $args += $Command
     }
 
-    $output = Invoke-QuarantineVMGuestControl -Arguments $args -Username $cred.Username -Password $cred.Password -Domain $cred.Domain -TimeoutMs $timeout
+    $output = Invoke-QuarantineVMGuestControl -Arguments $args -Username $cred.Username -Password $cred.Password -Domain $cred.Domain -ConfigPath $ConfigPath -TimeoutMs $timeout
     if ($output) {
         $output | ForEach-Object { Write-Output $_ }
     }
+}
+
+function Invoke-QuarantineGuestHostsEntry {
+    <#
+    .SYNOPSIS
+      Add a harmless hosts-file entry in the guest via elevated scheduled task (lab admin account).
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$ConfigPath,
+        [string]$IpAddress = '127.0.0.1',
+        [string]$Hostname = 'smoke.lab.test',
+        [int]$TimeoutMs = 120000
+    )
+
+    if (-not $ConfigPath) {
+        $ConfigPath = Join-Path $PSScriptRoot 'config\quarantine-vm.json'
+    }
+    Initialize-QuarantineVMContext -ConfigPath $ConfigPath | Out-Null
+
+    $guestScript = Join-Path $PSScriptRoot 'guest\Add-QuarantineGuestHostsEntry.ps1'
+    if (-not (Test-Path -LiteralPath $guestScript)) {
+        throw "Guest script not found: $guestScript"
+    }
+
+    $settings = Get-QuarantineVMGuestSettings
+    $guestDir = $settings.copyTargetDir
+    if (-not $guestDir) { $guestDir = 'C:\Users\Public\Quarantine' }
+
+    Copy-QuarantineVMGuestFile -Path $guestScript -ConfigPath $ConfigPath -TargetDirectory $guestDir
+    $guestPath = Join-Path $guestDir (Split-Path -Leaf $guestScript)
+
+    Invoke-QuarantineVMGuestRun -ConfigPath $ConfigPath -TimeoutMs $TimeoutMs `
+        -Exe 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' `
+        -Command @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $guestPath,
+            '-IpAddress', $IpAddress,
+            '-Hostname', $Hostname
+        )
 }
 
 function Copy-QuarantineVMGuestFile {
@@ -1485,12 +1716,7 @@ function Set-QuarantineVMNetworkMode {
         throw "VM '$vmName' not found."
     }
 
-    $state = Get-QuarantineVMState -VmName $vmName
-    if ($state -in @('running', 'paused', 'starting')) {
-        Write-Host 'Stopping VM before changing network...'
-        Invoke-VBoxManage -Arguments @('controlvm', $vmName, 'poweroff') -AllowFailure | Out-Null
-        Start-Sleep -Seconds 2
-    }
+    Ensure-QuarantineVMMutable -ConfigPath $ConfigPath -VmName $vmName -Reason "set network mode to $Mode"
 
     $network = [pscustomobject]@{
         mode              = $Mode
@@ -1897,11 +2123,13 @@ function Clear-QuarantineVMSnapshots {
         throw "VM '$vmName' not found."
     }
 
-    $lines = Invoke-VBoxManage -Arguments @('snapshot', $vmName, 'list', '--machinereadable')
+    $lines = Invoke-VBoxManage -Arguments @('snapshot', $vmName, 'list', '--machinereadable') -AllowFailure
     $uuids = @()
-    foreach ($line in $lines) {
-        if ($line -match '^SnapshotUUID(-[0-9]+)*="([^"]+)"$') {
-            $uuids += $Matches[2]
+    if ($LASTEXITCODE -eq 0) {
+        foreach ($line in $lines) {
+            if ($line -match '^SnapshotUUID((?:-[0-9]+)*)="([^"]+)"$') {
+                $uuids += $Matches[2]
+            }
         }
     }
 
@@ -1931,10 +2159,56 @@ function Clear-QuarantineVMSnapshots {
     }
 }
 
+function Remove-QuarantineVMSnapshotsByName {
+    <#
+    .SYNOPSIS
+      Delete all snapshots with the given name (by UUID, deepest in tree first).
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)]
+        [string]$VmName,
+
+        [Parameter(Mandatory)]
+        [string]$Name,
+
+        [Parameter()]
+        [string]$ConfigPath
+    )
+
+    $all = @(Get-QuarantineVMSnapshotList -ConfigPath $ConfigPath)
+    $targets = @($all | Where-Object { $_.Name -eq $Name })
+    if ($targets.Count -eq 0) {
+        return
+    }
+
+    for ($i = $all.Count - 1; $i -ge 0; $i--) {
+        $s = $all[$i]
+        if ($s.Name -ne $Name) { continue }
+        if ($PSCmdlet.ShouldProcess($VmName, "Delete snapshot '$($s.Name)' ($($s.UUID))")) {
+            Write-Host "Deleting snapshot '$($s.Name)' ($($s.UUID))..."
+            try {
+                Invoke-VBoxManage -Arguments @('snapshot', $VmName, 'delete', $s.UUID) | Out-Null
+            } catch {
+                throw @"
+Failed to delete snapshot '$($s.Name)' ($($s.UUID)).
+
+VirtualBox may block deletion while child snapshots exist (for example Evidence-* under this snapshot).
+Delete those first in the VirtualBox GUI or run: .\quarantine-vm.ps1 snapshots
+
+$($_.Exception.Message)
+"@
+            }
+        }
+    }
+}
+
 function New-QuarantineVMBaseline {
     <#
     .SYNOPSIS
       Delete all snapshots, merge current disk state, and save a fresh Clean baseline.
+      Flattening requires the VM off, so this Clean is disk-only. For a logged-in
+      resume point, start the VM, log in, then run snapshot while it is running.
     #>
     [CmdletBinding(SupportsShouldProcess)]
     param(
@@ -1949,7 +2223,10 @@ function New-QuarantineVMBaseline {
     )
 
     Clear-QuarantineVMSnapshots -ConfigPath $ConfigPath
-    Save-QuarantineVMSnapshot -ConfigPath $ConfigPath -Name $Name -Description $Description
+    Save-QuarantineVMSnapshot -ConfigPath $ConfigPath -Name $Name -Description $Description -Offline
+    Write-Host 'Baseline is disk-only (flatten requires power-off). For reset-to-desktop: start, log in, then:'
+    Write-Host '  .\quarantine-vm.ps1 snapshot -SnapshotName Session'
+    Write-Host '  (set cleanSnapshotName to Session in config\quarantine-vm.json)'
 }
 
 function Save-QuarantineVMSnapshot {
@@ -1962,7 +2239,13 @@ function Save-QuarantineVMSnapshot {
         [string]$Name,
 
         [Parameter()]
-        [string]$Description = 'Known-good baseline for quarantine reset.'
+        [string]$Description = 'Known-good baseline for quarantine reset.',
+
+        [Parameter()]
+        [switch]$Force,
+
+        [Parameter()]
+        [switch]$Offline
     )
 
     $script:Config = Get-QuarantineVMConfig -ConfigPath $ConfigPath
@@ -1982,25 +2265,115 @@ function Save-QuarantineVMSnapshot {
     }
 
     $state = Get-QuarantineVMState -VmName $vmName
-    if ($state -in @('running', 'paused', 'starting')) {
-        Write-Host 'Stopping VM before snapshot (required for a consistent snapshot)...'
+    if ($state -eq 'starting') {
+        Write-Host 'Waiting for VM to finish starting before snapshot...'
+        $deadline = (Get-Date).AddSeconds(60)
+        do {
+            Start-Sleep -Seconds 2
+            $state = Get-QuarantineVMState -VmName $vmName
+        } while ($state -eq 'starting' -and (Get-Date) -lt $deadline)
+    }
+
+    $liveStates = @('running', 'paused', 'saved')
+    if ($Offline -and $state -in @('running', 'paused', 'starting')) {
+        Write-Host 'Stopping VM for a disk-only snapshot (restore will cold-boot)...'
         Invoke-VBoxManage -Arguments @('controlvm', $vmName, 'poweroff') -AllowFailure | Out-Null
         Start-Sleep -Seconds 3
+        $state = Get-QuarantineVMState -VmName $vmName
     }
-    if ((Get-QuarantineVMState -VmName $vmName) -eq 'saved') {
+    if ($Offline -and $state -eq 'saved') {
+        Write-Host 'Discarding saved RAM so this snapshot is disk-only...'
         Invoke-VBoxManage -Arguments @('discardstate', $vmName) -AllowFailure | Out-Null
         Start-Sleep -Seconds 1
+        $state = Get-QuarantineVMState -VmName $vmName
+    }
+
+    $includesRam = (-not $Offline) -and ($state -in $liveStates)
+
+    $existing = @(Get-QuarantineVMSnapshotList -ConfigPath $ConfigPath | Where-Object {
+        $_.Name -eq $snapshotName
+    })
+    if ($existing.Count -gt 0) {
+        $details = ($existing | ForEach-Object {
+            $when = if ($_.TakenAt -ne [datetime]::MinValue) {
+                $_.TakenAt.ToString('yyyy-MM-dd HH:mm')
+            } else {
+                'unknown time'
+            }
+            $kind = if ($_.HasSavedState) { 'live' } else { 'disk' }
+            "  $($_.Name)  $when  $kind  $($_.UUID)"
+        }) -join [Environment]::NewLine
+
+        if (-not $Force) {
+            Write-Host "Snapshot '$snapshotName' already exists ($($existing.Count)):"
+            Write-Host $details
+            $newKind = if ($includesRam) { 'live (RAM + disk)' } else { 'disk-only' }
+            $reply = Read-Host "Replace with a new $newKind snapshot? [y/N]"
+            if ($reply -notmatch '^[yY](es)?$') {
+                Write-Host 'Cancelled — snapshot not saved.'
+                return
+            }
+        } else {
+            Write-Host "Replacing $($existing.Count) existing snapshot(s) named '$snapshotName' (-Force)..."
+        }
+
+        Remove-QuarantineVMSnapshotsByName -ConfigPath $ConfigPath -VmName $vmName -Name $snapshotName
+        $state = Get-QuarantineVMState -VmName $vmName
+        if (-not $Offline) {
+            $includesRam = $state -in $liveStates
+        }
     }
 
     if ($PSCmdlet.ShouldProcess($vmName, "Snapshot '$snapshotName'")) {
+        if ($includesRam) {
+            if ($state -in @('running', 'paused')) {
+                Write-Host "Taking live snapshot (RAM + disk). VM pauses briefly, then keeps running..."
+            } else {
+                Write-Host "Taking snapshot of saved session (RAM + disk)..."
+            }
+        } else {
+            Write-Host "Taking disk-only snapshot. Restore will cold-boot (firmware POST + login)."
+        }
+
         $snapArgs = @(
             'snapshot', $vmName, 'take', $snapshotName,
-            '--description', $description,
-            '--pause'
+            '--description', $description
         )
         Invoke-VBoxManage -Arguments $snapArgs | Out-Null
+        $uuid = $null
+        foreach ($line in (Invoke-VBoxManage -Arguments @('snapshot', $vmName, 'list', '--machinereadable'))) {
+            if ($line -match '^CurrentSnapshotUUID="([^"]+)"$') {
+                $uuid = $Matches[1]
+                break
+            }
+        }
         Write-Host "Snapshot '$snapshotName' saved."
+        if ($uuid) {
+            Write-Host "  UUID: $uuid"
+        }
+        if ($includesRam) {
+            Write-Host '  Kind: live (restore resumes this logged-in session, no POST)'
+        } else {
+            Write-Host '  Kind: disk-only (restore cold-boots Windows)'
+        }
         Write-Host "  Folder: $(Join-Path (Get-QuarantineVMFolder -Config $script:Config) 'Snapshots')"
+
+        if ($includesRam) {
+            try {
+                $manifestModule = Join-Path $PSScriptRoot 'manifest\QuarantineManifest.psm1'
+                Import-Module $manifestModule -Force -ErrorAction Stop
+                $markConfig = if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) {
+                    $ConfigPath
+                } else {
+                    Join-Path $PSScriptRoot 'config\quarantine-vm.json'
+                }
+                Invoke-QuarantineLiveSnapshotManifestMark -ConfigPath $markConfig -SnapshotName $snapshotName `
+                    -SkipGuestReadyWait -TimeoutMs 900000
+            } catch {
+                Write-Warning "Live snapshot USN/registry mark failed: $($_.Exception.Message)"
+                Write-Host 'Retry: .\quarantine-vm.ps1 manifest mark -SnapshotName' $snapshotName
+            }
+        }
     }
 }
 
@@ -2008,7 +2381,7 @@ function Save-QuarantineVMEvidence {
     <#
     .SYNOPSIS
       Save the current (possibly compromised) VM state under a timestamped snapshot for later analysis.
-      Does not modify the Clean baseline.
+      Does not modify the Clean baseline. Running VMs are snapshotted live (RAM included).
     #>
     [CmdletBinding(SupportsShouldProcess)]
     param(
@@ -2016,7 +2389,10 @@ function Save-QuarantineVMEvidence {
         [string]$ConfigPath,
 
         [Parameter()]
-        [string]$Label
+        [string]$Label,
+
+        [Parameter()]
+        [switch]$Offline
     )
 
     $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -2028,10 +2404,70 @@ function Save-QuarantineVMEvidence {
     $name = "Evidence-$suffix"
     $description = "Preserved session state ($timestamp). Possibly compromised - for analysis only."
 
-    Save-QuarantineVMSnapshot -ConfigPath $ConfigPath -Name $name -Description $description
+    Save-QuarantineVMSnapshot -ConfigPath $ConfigPath -Name $name -Description $description -Offline:$Offline
     Write-Host "Evidence snapshot: $name"
     Write-Host "Return to Clean baseline: .\quarantine-vm.ps1 reset -Clean"
     Write-Host "Re-open this evidence:   .\quarantine-vm.ps1 reset"
+}
+
+function ConvertTo-QuarantineVMSnapshotLocalTime {
+    param([string]$Timestamp)
+
+    if ([string]::IsNullOrWhiteSpace($Timestamp)) {
+        return $null
+    }
+
+    $styles = [System.Globalization.DateTimeStyles]::AssumeUniversal -bor
+        [System.Globalization.DateTimeStyles]::AdjustToUniversal
+    try {
+        $utc = [datetime]::Parse($Timestamp, [System.Globalization.CultureInfo]::InvariantCulture, $styles)
+        return $utc.ToLocalTime()
+    } catch {
+        return $null
+    }
+}
+
+function Get-QuarantineVMSnapshotXmlMeta {
+    <#
+    .SYNOPSIS
+      Map snapshot UUID -> taken-at and whether the snapshot includes saved RAM.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$VmName
+    )
+
+    $map = @{}
+    $cfgFile = Get-QuarantineVMCfgFile -VmName $VmName
+    if (-not $cfgFile -or -not (Test-Path -LiteralPath $cfgFile)) {
+        return $map
+    }
+
+    $xml = New-Object System.Xml.XmlDocument
+    $xml.Load($cfgFile)
+    foreach ($node in $xml.SelectNodes('//*[local-name()="Snapshot"]')) {
+        $uuid = ($node.GetAttribute('uuid') -replace '[{}]', '')
+        if (-not $uuid) { continue }
+        $ts = $node.GetAttribute('timeStamp')
+        $stateFile = $node.GetAttribute('stateFile')
+        $local = if ($ts) { ConvertTo-QuarantineVMSnapshotLocalTime -Timestamp $ts } else { $null }
+        $map[$uuid] = @{
+            TakenAt       = $local
+            HasSavedState = -not [string]::IsNullOrWhiteSpace($stateFile)
+        }
+    }
+
+    return $map
+}
+
+function Format-QuarantineVMSnapshotWhen {
+    param($Snapshot)
+
+    if ($Snapshot.TakenAt -and $Snapshot.TakenAt -ne [datetime]::MinValue) {
+        return $Snapshot.TakenAt.ToString('yyyy-MM-dd HH:mm')
+    }
+    return 'unknown time'
 }
 
 function Get-QuarantineVMSnapshotList {
@@ -2048,7 +2484,11 @@ function Get-QuarantineVMSnapshotList {
         throw "VM '$vmName' not found."
     }
 
-    $lines = Invoke-VBoxManage -Arguments @('snapshot', $vmName, 'list', '--machinereadable')
+    $lines = Invoke-VBoxManage -Arguments @('snapshot', $vmName, 'list', '--machinereadable') -AllowFailure
+    if ($LASTEXITCODE -ne 0) {
+        return @()
+    }
+
     $currentUuid = $null
     $orderedSuffixes = [System.Collections.Generic.List[string]]::new()
     $entries = @{}
@@ -2057,9 +2497,9 @@ function Get-QuarantineVMSnapshotList {
         if ($line -match '^CurrentSnapshotUUID="([^"]+)"$') {
             $currentUuid = $Matches[1]
         }
-        if ($line -match '^(SnapshotName|SnapshotUUID|SnapshotDescription)(-[0-9]+)*="(.*)"$') {
+        if ($line -match '^(SnapshotName|SnapshotUUID|SnapshotDescription)((?:-[0-9]+)*)="(.*)"$') {
             $field = $Matches[1]
-            $suffix = if ($Matches[2]) { $Matches[2] } else { '' }
+            $suffix = $Matches[2]
             $value = $Matches[3]
 
             if (-not $entries.ContainsKey($suffix)) {
@@ -2067,6 +2507,16 @@ function Get-QuarantineVMSnapshotList {
                 $orderedSuffixes.Add($suffix) | Out-Null
             }
             $entries[$suffix][$field] = $value
+        }
+    }
+
+    $xmlMeta = Get-QuarantineVMSnapshotXmlMeta -VmName $vmName
+    $nameCounts = @{}
+    foreach ($suffix in $orderedSuffixes) {
+        $n = $entries[$suffix]['SnapshotName']
+        if ($n) {
+            if (-not $nameCounts.ContainsKey($n)) { $nameCounts[$n] = 0 }
+            $nameCounts[$n]++
         }
     }
 
@@ -2078,37 +2528,173 @@ function Get-QuarantineVMSnapshotList {
         $description = $entry['SnapshotDescription']
 
         $takenAt = $null
-        if ($name -match 'Evidence-(\d{8})-(\d{6})') {
+        $hasSavedState = $false
+        if ($uuid -and $xmlMeta.ContainsKey($uuid)) {
+            $meta = $xmlMeta[$uuid]
+            $takenAt = $meta.TakenAt
+            $hasSavedState = [bool]$meta.HasSavedState
+        }
+        if (-not $takenAt -and $name -match 'Evidence-(\d{8})-(\d{6})') {
             $takenAt = [datetime]::ParseExact(
                 "$($Matches[1])$($Matches[2])", 'yyyyMMddHHmmss', $null)
         }
-
-        $info = Invoke-VBoxManage -Arguments @('snapshot', $vmName, 'showvminfo', $name) -AllowFailure
-        foreach ($infoLine in $info) {
-            if ($infoLine -match 'since (\d{4}-\d{2}-\d{2}T[0-9:\.]+)') {
-                $parsed = [datetime]::Parse($Matches[1], [System.Globalization.CultureInfo]::InvariantCulture)
-                if (-not $takenAt -or $parsed -gt $takenAt) {
-                    $takenAt = $parsed
-                }
-            }
-        }
-
-        if (-not $takenAt) {
+        if (-not $takenAt -and $uuid) {
             $snapDir = Join-Path (Get-QuarantineVMFolder -Config $script:Config) 'Snapshots'
             $vdi = Get-ChildItem -LiteralPath $snapDir -Filter "*$uuid*" -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($vdi) { $takenAt = $vdi.LastWriteTime }
         }
 
         $results += [pscustomobject]@{
-            Name        = $name
-            UUID        = $uuid
-            Description = $description
-            TakenAt     = if ($takenAt) { $takenAt } else { [datetime]::MinValue }
-            IsCurrent   = ($uuid -eq $currentUuid)
+            Name          = $name
+            UUID          = $uuid
+            Description   = $description
+            TakenAt       = if ($takenAt) { $takenAt } else { [datetime]::MinValue }
+            IsCurrent     = ($uuid -eq $currentUuid)
+            NameIsDup     = ($name -and $nameCounts[$name] -gt 1)
+            HasSavedState = $hasSavedState
         }
     }
 
     return $results
+}
+
+function Format-QuarantineVMSnapshotDupList {
+    param([object[]]$Snapshots)
+
+    return (
+        $Snapshots | ForEach-Object {
+            $mark = if ($_.IsCurrent) { '  [current]' } else { '' }
+            "  $($_.Name)  $(Format-QuarantineVMSnapshotWhen $_)  $($_.UUID)$mark"
+        }
+    ) -join [Environment]::NewLine
+}
+
+function Resolve-QuarantineVMSnapshot {
+    <#
+    .SYNOPSIS
+      Resolve a snapshot to a unique object (exact, Evidence- prefix, or unique partial match).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [string]$Name,
+
+        [Parameter()]
+        [string]$ConfigPath,
+
+        [Parameter()]
+        [switch]$Clean
+    )
+
+    if (-not $ConfigPath) {
+        $ConfigPath = Join-Path $PSScriptRoot 'config\quarantine-vm.json'
+    }
+
+    Initialize-QuarantineVMContext -ConfigPath $ConfigPath | Out-Null
+    $snapshots = @(Get-QuarantineVMSnapshotList -ConfigPath $ConfigPath)
+    if ($snapshots.Count -eq 0) {
+        throw @'
+No snapshots found. The VM disk is still intact (powered off with no restore point).
+
+Create a Clean baseline now:
+  .\quarantine-vm.ps1 snapshot -SnapshotName Clean
+
+Or after setup:
+  .\quarantine-vm.ps1 baseline
+'@
+    }
+
+    if ($Clean) {
+        $cleanName = if ($script:Config.cleanSnapshotName) { $script:Config.cleanSnapshotName } else { 'Clean' }
+        $matches = @($snapshots | Where-Object { $_.Name -eq $cleanName })
+        if ($matches.Count -eq 0) {
+            throw "No snapshot named '$cleanName'."
+        }
+        if ($matches.Count -eq 1) {
+            return $matches[0]
+        }
+
+        $current = @($matches | Where-Object { $_.IsCurrent })
+        $pick = if ($current.Count -eq 1) {
+            $current[0]
+        } else {
+            $matches | Sort-Object TakenAt | Select-Object -Last 1
+        }
+        Write-Warning "Multiple snapshots named '$cleanName'. Restoring $($pick.UUID) taken $(Format-QuarantineVMSnapshotWhen $pick)."
+        return $pick
+    }
+
+    if ([string]::IsNullOrWhiteSpace($Name)) {
+        throw 'Snapshot name is required.'
+    }
+
+    $exact = @($snapshots | Where-Object { $_.Name -eq $Name })
+    if ($exact.Count -eq 1) {
+        return $exact[0]
+    }
+    if ($exact.Count -gt 1) {
+        throw @"
+Snapshot '$Name' is ambiguous ($($exact.Count) snapshots share that name). Use .\quarantine-vm.ps1 reset and pick by number.
+
+$(Format-QuarantineVMSnapshotDupList -Snapshots $exact)
+"@
+    }
+
+    $withEvidence = "Evidence-$Name"
+    $evidence = @($snapshots | Where-Object { $_.Name -eq $withEvidence })
+    if ($evidence.Count -eq 1) {
+        Write-Host "Resolved snapshot '$Name' -> '$withEvidence'"
+        return $evidence[0]
+    }
+    if ($evidence.Count -gt 1) {
+        throw @"
+Snapshot '$withEvidence' is ambiguous.
+
+$(Format-QuarantineVMSnapshotDupList -Snapshots $evidence)
+"@
+    }
+
+    $partial = @($snapshots | Where-Object { $_.Name -like "*$Name*" })
+    if ($partial.Count -eq 1) {
+        Write-Host "Resolved snapshot '$Name' -> '$($partial[0].Name)'"
+        return $partial[0]
+    }
+
+    $list = Format-QuarantineVMSnapshotDupList -Snapshots $snapshots
+    if ($partial.Count -gt 1) {
+        throw @"
+Snapshot '$Name' is ambiguous. Matches:
+$(Format-QuarantineVMSnapshotDupList -Snapshots $partial)
+Use the exact snapshot name from: .\quarantine-vm.ps1 snapshots
+"@
+    }
+
+    throw @"
+Snapshot '$Name' not found.
+
+Available snapshots:
+$list
+
+Tip: preserve creates 'Evidence-<label>' — use that full name or just the label (e.g. testdiff -> Evidence-testdiff).
+"@
+}
+
+function Resolve-QuarantineVMSnapshotName {
+    <#
+    .SYNOPSIS
+      Resolve a snapshot name (exact, Evidence- prefix, or unique partial match).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Name,
+
+        [Parameter()]
+        [string]$ConfigPath
+    )
+
+    $snap = Resolve-QuarantineVMSnapshot -Name $Name -ConfigPath $ConfigPath
+    return $snap.Name
 }
 
 function Select-QuarantineVMSnapshot {
@@ -2120,7 +2706,15 @@ function Select-QuarantineVMSnapshot {
 
     $snapshots = Get-QuarantineVMSnapshotList -ConfigPath $ConfigPath
     if ($snapshots.Count -eq 0) {
-        throw 'No snapshots found.'
+        throw @'
+No snapshots found. The VM disk is still intact (powered off with no restore point).
+
+Create a Clean baseline now:
+  .\quarantine-vm.ps1 snapshot -SnapshotName Clean
+
+Or wipe and recreate in one step (only if no snapshots exist):
+  .\quarantine-vm.ps1 baseline
+'@
     }
 
     Write-Host ''
@@ -2135,7 +2729,8 @@ function Select-QuarantineVMSnapshot {
             'unknown time'
         }
         $current = if ($s.IsCurrent) { '  [current]' } else { '' }
-        Write-Host ("  [{0}] {1}  ({2}){3}" -f ($i + 1), $s.Name, $when, $current)
+        $shortUuid = if ($s.UUID) { $s.UUID.Substring(0, [Math]::Min(8, $s.UUID.Length)) } else { '' }
+        Write-Host ("  [{0}] {1}  ({2})  {3}{4}" -f ($i + 1), $s.Name, $when, $shortUuid, $current)
         if ($s.Description) {
             Write-Host "       $($s.Description)"
         }
@@ -2151,7 +2746,7 @@ function Select-QuarantineVMSnapshot {
             throw 'Restore cancelled.'
         }
         if ($choice -match '^\d+$' -and [int]$choice -ge 1 -and [int]$choice -le $snapshots.Count) {
-            return $snapshots[[int]$choice - 1].Name
+            return $snapshots[[int]$choice - 1]
         }
         Write-Host 'Invalid selection.' -ForegroundColor Yellow
     } while ($true)
@@ -2175,17 +2770,27 @@ function Get-QuarantineVMSnapshots {
     Write-Host "  $(Join-Path (Get-QuarantineVMFolder -Config $script:Config) 'Snapshots')"
     Write-Host ''
 
-    foreach ($s in (Get-QuarantineVMSnapshotList -ConfigPath $ConfigPath)) {
+    $listed = @(Get-QuarantineVMSnapshotList -ConfigPath $ConfigPath)
+    foreach ($s in $listed) {
         $when = if ($s.TakenAt -ne [datetime]::MinValue) {
             $s.TakenAt.ToString('yyyy-MM-dd HH:mm')
         } else {
             'unknown'
         }
         $current = if ($s.IsCurrent) { ' *' } else { '' }
-        Write-Host "  $($s.Name)  ($when)$current"
+        $kind = if ($s.HasSavedState) { 'live' } else { 'disk' }
+        $shortUuid = if ($s.UUID) { $s.UUID.Substring(0, [Math]::Min(8, $s.UUID.Length)) } else { '' }
+        Write-Host "  $($s.Name)  ($when)  $kind  $shortUuid$current"
         if ($s.Description) {
             Write-Host "    $($s.Description)"
         }
+    }
+
+    if ($listed.Count -eq 0) {
+        Write-Host '  (none)'
+        Write-Host ''
+        Write-Host 'Create a baseline:  .\quarantine-vm.ps1 snapshot -SnapshotName Clean'
+        Write-Host 'Or after setup:       .\quarantine-vm.ps1 baseline'
     }
 }
 
@@ -2206,11 +2811,11 @@ function Reset-QuarantineVM {
     $vmName = $script:Config.vmName
 
     if ($Clean) {
-        $target = if ($script:Config.cleanSnapshotName) { $script:Config.cleanSnapshotName } else { 'Clean' }
+        $snap = Resolve-QuarantineVMSnapshot -ConfigPath $ConfigPath -Clean
     } elseif (-not [string]::IsNullOrWhiteSpace($SnapshotName)) {
-        $target = $SnapshotName
+        $snap = Resolve-QuarantineVMSnapshot -Name $SnapshotName -ConfigPath $ConfigPath
     } else {
-        $target = Select-QuarantineVMSnapshot -ConfigPath $ConfigPath
+        $snap = Select-QuarantineVMSnapshot -ConfigPath $ConfigPath
     }
 
     $state = Get-QuarantineVMState -VmName $vmName
@@ -2220,10 +2825,15 @@ function Reset-QuarantineVM {
         Start-Sleep -Seconds 3
     }
 
-    if ($PSCmdlet.ShouldProcess($vmName, "Restore snapshot '$target'")) {
-        Invoke-VBoxManage -Arguments @('snapshot', $vmName, 'restore', $target) | Out-Null
-        Write-Host "Restored '$vmName' to snapshot '$target'."
+    $label = "$($snap.Name) ($($snap.UUID))"
+    if ($PSCmdlet.ShouldProcess($vmName, "Restore snapshot $label")) {
+        Invoke-VBoxManage -Arguments @('snapshot', $vmName, 'restore', $snap.UUID) | Out-Null
+        $kind = if ($snap.HasSavedState) { 'live (saved RAM — start resumes the session, no POST)' } else { 'disk-only (start cold-boots Windows)' }
+        Write-Host "Restored '$vmName' to snapshot '$($snap.Name)'."
+        Write-Host "  UUID: $($snap.UUID)  taken $(Format-QuarantineVMSnapshotWhen $snap)"
+        Write-Host "  Kind: $kind"
     }
+    return $snap
 }
 
 function Get-QuarantineVMStatus {
@@ -2464,6 +3074,7 @@ function Move-QuarantineVMStorage {
 
 Export-ModuleMember -Function @(
     'Get-QuarantineVMConfig',
+    'Initialize-QuarantineVMContext',
     'Get-QuarantineVMDataDir',
     'Get-QuarantineVMFolder',
     'Get-QuarantineVMDiskPath',
@@ -2476,6 +3087,8 @@ Export-ModuleMember -Function @(
     'New-QuarantineVMBaseline',
     'Save-QuarantineVMSnapshot',
     'Get-QuarantineVMSnapshotList',
+    'Resolve-QuarantineVMSnapshot',
+    'Resolve-QuarantineVMSnapshotName',
     'Select-QuarantineVMSnapshot',
     'Get-QuarantineVMSnapshots',
     'Reset-QuarantineVM',
@@ -2493,11 +3106,18 @@ Export-ModuleMember -Function @(
     'Clear-QuarantineVMInbox',
     'Get-QuarantineVMGuestSettings',
     'Invoke-QuarantineVMGuestRun',
+    'Restart-QuarantineVMGuestSession',
+    'Invoke-QuarantineGuestHostsEntry',
     'Copy-QuarantineVMGuestFile',
     'Test-QuarantineVMGuestControl',
+    'Resolve-QuarantineVMGuestCredential',
+    'Resolve-QuarantineVMPayloadCredential',
+    'Get-QuarantineVMPayloadSettings',
+    'Invoke-QuarantineVMGuestControl',
     'Update-QuarantineVMNetworkConfig',
     'Move-QuarantineVMDisk',
     'Move-QuarantineVMHome',
     'Move-QuarantineVMStorage',
-    'Get-QuarantineVMState'
+    'Get-QuarantineVMState',
+    'Ensure-QuarantineVMMutable'
 )

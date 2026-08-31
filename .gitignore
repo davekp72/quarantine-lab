@@ -6,3 +6,4 @@ vms/
 config/quarantine-vm.json
 network/proxy/mitmproxy-ca-cert.cer
 **/secrets/
+manifest/viewer/session.html

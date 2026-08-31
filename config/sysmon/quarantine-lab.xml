@@ -1,0 +1,99 @@
+<!--
+  Sysmon 15.21 lab config (schema 4.91)
+  Validate:  Sysmon64.exe -c quarantine-lab.xml
+  Install:   see Install-QuarantineSysmon.ps1 (install service first, then apply config)
+-->
+<Sysmon schemaversion="4.91">
+  <HashAlgorithms>sha256,IMPHASH</HashAlgorithms>
+  <CheckRevocation>false</CheckRevocation>
+  <EventFiltering>
+
+    <RuleGroup name="ProcessCreate" groupRelation="or">
+      <ProcessCreate onmatch="exclude">
+        <Image condition="is">C:\Program Files\Sysmon\Sysmon64.exe</Image>
+        <Image condition="is">C:\Windows\System32\SearchIndexer.exe</Image>
+      </ProcessCreate>
+      <ProcessCreate onmatch="include">
+        <Image condition="end with">.exe</Image>
+        <Image condition="end with">.scr</Image>
+        <Image condition="end with">.bat</Image>
+        <Image condition="end with">.cmd</Image>
+        <Image condition="end with">.ps1</Image>
+        <Image condition="end with">.vbs</Image>
+        <Image condition="end with">.js</Image>
+        <Image condition="end with">.hta</Image>
+        <Image condition="end with">.msi</Image>
+      </ProcessCreate>
+    </RuleGroup>
+
+    <RuleGroup name="NetworkConnect" groupRelation="or">
+      <NetworkConnect onmatch="exclude">
+        <Image condition="is">C:\Windows\System32\svchost.exe</Image>
+        <DestinationIp condition="begin with">127.</DestinationIp>
+        <DestinationIp condition="is">10.0.2.2</DestinationIp>
+        <DestinationIp condition="is">10.0.2.3</DestinationIp>
+      </NetworkConnect>
+      <NetworkConnect onmatch="include">
+        <DestinationPort condition="is">443</DestinationPort>
+        <DestinationPort condition="is">80</DestinationPort>
+        <DestinationPort condition="is">53</DestinationPort>
+        <DestinationPort condition="is">445</DestinationPort>
+        <DestinationPort condition="is">8080</DestinationPort>
+      </NetworkConnect>
+    </RuleGroup>
+
+    <RuleGroup name="DnsQuery" groupRelation="or">
+      <DnsQuery onmatch="exclude">
+        <QueryName condition="end with">.local</QueryName>
+      </DnsQuery>
+      <DnsQuery onmatch="include">
+        <QueryName condition="end with">.com</QueryName>
+        <QueryName condition="end with">.net</QueryName>
+        <QueryName condition="end with">.org</QueryName>
+        <QueryName condition="end with">.io</QueryName>
+      </DnsQuery>
+    </RuleGroup>
+
+    <RuleGroup name="FileCreate" groupRelation="or">
+      <FileCreate onmatch="include">
+        <TargetFilename condition="contains">Users\Public</TargetFilename>
+        <TargetFilename condition="contains">Desktop</TargetFilename>
+        <TargetFilename condition="contains">Downloads</TargetFilename>
+        <TargetFilename condition="contains">AppData</TargetFilename>
+        <TargetFilename condition="contains">ProgramData</TargetFilename>
+        <TargetFilename condition="contains">Startup</TargetFilename>
+        <TargetFilename condition="contains">Windows\Temp</TargetFilename>
+        <TargetFilename condition="contains">Windows\System32</TargetFilename>
+        <TargetFilename condition="end with">.exe</TargetFilename>
+        <TargetFilename condition="end with">.dll</TargetFilename>
+        <TargetFilename condition="end with">.ps1</TargetFilename>
+        <TargetFilename condition="end with">.lnk</TargetFilename>
+      </FileCreate>
+    </RuleGroup>
+
+    <RuleGroup name="RegistryEvent" groupRelation="or">
+      <RegistryEvent onmatch="include">
+        <TargetObject condition="contains">CurrentVersion\Run</TargetObject>
+        <TargetObject condition="contains">CurrentVersion\RunOnce</TargetObject>
+        <TargetObject condition="contains">Winlogon</TargetObject>
+        <TargetObject condition="contains">Software\Microsoft\Feeds</TargetObject>
+      </RegistryEvent>
+    </RuleGroup>
+
+    <RuleGroup name="ImageLoad" groupRelation="or">
+      <ImageLoad onmatch="include">
+        <ImageLoaded condition="contains">Users\Public</ImageLoaded>
+        <ImageLoaded condition="contains">AppData</ImageLoaded>
+        <ImageLoaded condition="contains">ProgramData</ImageLoaded>
+        <ImageLoaded condition="contains">Windows\Temp</ImageLoaded>
+      </ImageLoad>
+    </RuleGroup>
+
+    <RuleGroup name="DriverLoad" groupRelation="or">
+      <DriverLoad onmatch="include">
+        <Signed condition="is">false</Signed>
+      </DriverLoad>
+    </RuleGroup>
+
+  </EventFiltering>
+</Sysmon>

@@ -46,14 +46,44 @@
     "logDir": "D:\\Vbox\\LabVM\\logs\\inbox"
   },
   "guest": {
-    "username": "",
+    "username": "quarantine",
     "password": "",
     "passwordFile": "D:\\Vbox\\LabVM\\secrets\\guest-password.txt",
     "domain": "",
     "defaultExe": "C:\\Windows\\System32\\cmd.exe",
     "copyTargetDir": "C:\\Users\\Public\\Quarantine",
-    "timeoutMs": 60000
+    "timeoutMs": 60000,
+    "role": "Lab admin account (local Administrators)"
+  },
+  "payload": {
+    "username": "jkcooper",
+    "password": "",
+    "passwordFile": "D:\\Vbox\\LabVM\\secrets\\payload-password.txt",
+    "domain": "",
+    "defaultExe": "C:\\Windows\\System32\\cmd.exe",
+    "copyTargetDir": "C:\\Users\\Public\\Quarantine",
+    "timeoutMs": 120000,
+    "role": "Standard user for sample execution (not in Administrators)"
+  },
+  "sysmon": {
+    "hostConfigPath": "config\\sysmon\\quarantine-lab.xml",
+    "hostSysmonExe": "tools\\Sysmon64.exe",
+    "guestDir": "C:\\Users\\Public\\Quarantine\\sysmon",
+    "guestConfigName": "quarantine-lab.xml",
+    "guestSysmonExe": "C:\\Users\\Public\\Quarantine\\sysmon\\Sysmon64.exe",
+    "eventLog": "Microsoft-Windows-Sysmon/Operational"
   },
   "cleanSnapshotName": "Clean",
-  "firmware": "efi"
+  "firmware": "efi",
+  "manifest": {
+    "logDir": "D:\\Vbox\\LabVM\\logs\\manifests",
+    "scanMode": "events",
+    "registryEngine": "cli",
+    "hashMaxMb": 50,
+    "contentMaxKb": 51200
+  },
+  "regshot": {
+    "guestDir": "C:\\Users\\Public\\Quarantine\\regshot",
+    "hostToolsDir": "tools\\regshot"
+  }
 }

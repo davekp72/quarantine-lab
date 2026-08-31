@@ -624,16 +624,28 @@ function Enable-QuarantineVMNetwork {
         throw "VM '$vmName' not found."
     }
 
-    $powerState = (& $vbox showvminfo $vmName --machinereadable 2>&1 | Where-Object { $_ -match '^VMState=' }) -replace '^VMState="(.*)"$', '$1'
-    if ($powerState -in @('running', 'paused', 'starting')) {
+    $powerLine = & $vbox showvminfo $vmName --machinereadable 2>&1 |
+        Where-Object { "$_".Trim() -match '^VMState=' } |
+        Select-Object -First 1
+    $powerState = ("$powerLine".Trim() -replace '^VMState="([^"]+)".*', '$1').ToLowerInvariant()
+    if ($powerState -eq 'saved') {
+        Write-Host 'VM is in saved state; discarding RAM before changing network...'
+        $discardOut = & $vbox discardstate $vmName 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            $discardText = if ($discardOut) { ($discardOut | Out-String).Trim() } else { 'Unknown VirtualBox error.' }
+            throw "Failed to discard saved state for '$vmName' before changing network.`n$discardText"
+        }
+        Start-Sleep -Seconds 1
+    } elseif ($powerState -in @('running', 'paused', 'starting')) {
         Write-Host 'Stopping VM before enabling quarantine network...'
         & $vbox controlvm $vmName poweroff 2>&1 | Out-Null
         Start-Sleep -Seconds 2
     }
 
-    & $vbox modifyvm $vmName --nic1 nat --cableconnected1 on 2>&1 | Out-Null
+    $natOut = & $vbox modifyvm $vmName --nic1 nat --cableconnected1 on 2>&1
     if ($LASTEXITCODE -ne 0) {
-        throw 'Failed to set VM NIC to NAT.'
+        $natText = if ($natOut) { ($natOut | Out-String).Trim() } else { 'Unknown VirtualBox error.' }
+        throw "Failed to set VM NIC to NAT.`n$natText"
     }
 
     $proxyPort = [int]$cfg.network.proxy.listenPort
