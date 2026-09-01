@@ -8,6 +8,20 @@ Set-StrictMode -Version Latest
 if (-not (Get-Command ConvertFrom-RegshotCompareLog -ErrorAction SilentlyContinue)) {
     . (Join-Path $PSScriptRoot 'ConvertFrom-RegshotCompareLog.ps1')
 }
+if (-not (Get-Command Get-QuarantineNetworkEvidence -ErrorAction SilentlyContinue)) {
+    . (Join-Path $PSScriptRoot 'Get-QuarantineNetworkEvidence.ps1')
+}
+
+function Get-ManifestStringProperty {
+    param(
+        [object]$Manifest,
+        [string]$Name
+    )
+
+    if ($null -eq $Manifest) { return '' }
+    if ($Manifest.PSObject.Properties[$Name]) { return [string]$Manifest.$Name }
+    return ''
+}
 
 function Read-QuarantineManifestFile {
     param([string]$Path)
@@ -177,12 +191,48 @@ function Get-UsnChangeKind {
     return 'modified'
 }
 
+function Get-UsnEventKey {
+    param($Event)
+    $parts = @(
+        (Get-SysmonEventFieldValue -Event $Event -Name 'usn'),
+        (Get-SysmonEventFieldValue -Event $Event -Name 'timestamp'),
+        (Get-SysmonEventFieldValue -Event $Event -Name 'fileName'),
+        (($Event.reasons | ForEach-Object { [string]$_ }) -join ',')
+    )
+    return ($parts -join '|')
+}
+
+function Test-QuarantineVolatileRegistryEntry {
+    param($Entry)
+
+    $key = if ($Entry.key) { [string]$Entry.key } elseif ($Entry.k) { [string]$Entry.k } else { '' }
+    if ([string]::IsNullOrWhiteSpace($key)) { return $false }
+
+    $volatilePatterns = @(
+        '\\IrisService\\Cache\\',
+        '\\TaskCache\\Tasks\\\{',
+        '\\Explorer\\SessionInfo\\',
+        '\\ContentDeliveryManager\\',
+        '\\InstallService\\State',
+        '\\Volatile Environment\\',
+        '\\BackgroundActivityModerator\\',
+        '\\BAM\\State\\',
+        '\\DAM\\State\\'
+    )
+    foreach ($pattern in $volatilePatterns) {
+        if ($key -match $pattern) { return $true }
+    }
+    return $false
+}
+
 function Get-EventDerivedFileChanges {
     <#
     .SYNOPSIS
-      Build file added/removed/modified lists from USN + Sysmon on the To manifest (Option G).
+      Build file added/removed/modified lists from USN + Sysmon on the To manifest.
+      When Left is supplied, only events present in To but not in From are used (incremental diff).
     #>
     param(
+        [object]$Left,
         [Parameter(Mandatory)]
         [object]$Right,
         [hashtable]$ScannedFiles = @{}
@@ -191,8 +241,16 @@ function Get-EventDerivedFileChanges {
     $kinds = @{}
     $sources = @{}
 
+    $leftUsnKeys = @{}
+    if ($Left -and $Left.PSObject.Properties['usn'] -and $Left.usn -and $Left.usn.events) {
+        foreach ($ev in @($Left.usn.events)) {
+            $leftUsnKeys[(Get-UsnEventKey -Event $ev)] = $true
+        }
+    }
+
     if ($Right.PSObject.Properties['usn'] -and $Right.usn -and $Right.usn.available -eq $true -and $Right.usn.events) {
         foreach ($ev in @($Right.usn.events)) {
+            if ($Left -and $leftUsnKeys.ContainsKey((Get-UsnEventKey -Event $ev))) { continue }
             $path = Resolve-UsnEventPath -Event $ev
             if ([string]::IsNullOrWhiteSpace($path)) { continue }
             $kind = Get-UsnChangeKind -Reasons @($ev.reasons)
@@ -201,7 +259,15 @@ function Get-EventDerivedFileChanges {
         }
     }
 
+    $leftSysmonKeys = @{}
+    if ($Left) {
+        foreach ($ev in (Get-SysmonEventsFromManifest -Manifest $Left)) {
+            $leftSysmonKeys[(Get-SysmonEventKey -Event $ev)] = $true
+        }
+    }
+
     foreach ($ev in (Get-SysmonEventsFromManifest -Manifest $Right)) {
+        if ($Left -and $leftSysmonKeys.ContainsKey((Get-SysmonEventKey -Event $ev))) { continue }
         $eid = 0
         if ($ev.PSObject.Properties['eid']) { $eid = [int]$ev.eid }
         if ($eid -notin @(11, 23, 26)) { continue }
@@ -314,6 +380,14 @@ function Get-QuarantineManifestCompareWarnings {
     $warnings = New-Object System.Collections.Generic.List[string]
     if (-not $Left -or -not $Right) { return @() }
 
+    $fromSnapName = Get-ManifestStringProperty -Manifest $Left -Name 'snapshot'
+    $toSnapName = Get-ManifestStringProperty -Manifest $Right -Name 'snapshot'
+    if ($fromSnapName -match '^Evidence-' -and $toSnapName -match '^Evidence-') {
+        [void]$warnings.Add(
+            'Snapshot-pair compare: files, registry, Sysmon, and USN show changes in To that were not in From. Background OS activity between preserves may still appear.'
+        )
+    }
+
     $fromCount = if ($Left.PSObject.Properties['fileCount'] -and $null -ne $Left.fileCount) {
         [int]$Left.fileCount
     } else {
@@ -408,8 +482,14 @@ function Get-QuarantineManifestDiff {
         [string]$From,
 
         [Parameter(Mandatory)]
-        [string]$To
+        [string]$To,
+
+        [string]$ConfigPath
     )
+
+    if (-not $ConfigPath) {
+        $ConfigPath = Join-Path (Split-Path $PSScriptRoot -Parent) 'config\quarantine-vm.json'
+    }
 
     $left = Read-QuarantineManifestFile -Path $From
     $right = Read-QuarantineManifestFile -Path $To
@@ -516,6 +596,27 @@ function Get-QuarantineManifestDiff {
         }
     }
 
+    $registryVolatileFiltered = 0
+    if (-not $useRegshot) {
+        $filteredAdded = New-Object System.Collections.Generic.List[object]
+        foreach ($item in @($addedReg)) {
+            if (Test-QuarantineVolatileRegistryEntry -Entry $item) { $registryVolatileFiltered++ } else { $filteredAdded.Add($item) | Out-Null }
+        }
+        $addedReg = $filteredAdded.ToArray()
+
+        $filteredRemoved = New-Object System.Collections.Generic.List[object]
+        foreach ($item in @($removedReg)) {
+            if (Test-QuarantineVolatileRegistryEntry -Entry $item) { $registryVolatileFiltered++ } else { $filteredRemoved.Add($item) | Out-Null }
+        }
+        $removedReg = $filteredRemoved.ToArray()
+
+        $filteredModified = New-Object System.Collections.Generic.List[object]
+        foreach ($item in @($modifiedReg)) {
+            if (Test-QuarantineVolatileRegistryEntry -Entry $item) { $registryVolatileFiltered++ } else { $filteredModified.Add($item) | Out-Null }
+        }
+        $modifiedReg = $filteredModified.ToArray()
+    }
+
     $leftTasks = @{}
     foreach ($t in @($left.tasks)) {
         $parsed = ConvertFrom-TaskCsvLine -Line $t.line
@@ -577,7 +678,7 @@ function Get-QuarantineManifestDiff {
     if ($useEventFiles) {
         $eventFiles = $null
         try {
-            $eventFiles = Get-EventDerivedFileChanges -Right $right -ScannedFiles $rightFiles
+            $eventFiles = Get-EventDerivedFileChanges -Left $left -Right $right -ScannedFiles $rightFiles
         } catch {
             Write-Warning "Event-derived file diff failed: $($_.Exception.Message)"
             $eventFiles = [pscustomobject]@{ added = @(); removed = @(); modified = @() }
@@ -614,12 +715,15 @@ function Get-QuarantineManifestDiff {
         registryAdded     = @($addedReg).Count
         registryRemoved   = @($removedReg).Count
         registryModified  = @($modifiedReg).Count
+        registryVolatileFiltered = $registryVolatileFiltered
         registryDiffSource = $registryDiffSource
         tasksAdded        = @($addedTasks).Count
         tasksRemoved      = @($removedTasks).Count
         tasksModified     = @($modifiedTasks).Count
         tasksVolatileOnly = @($volatileTasks).Count
         sysmonAdded       = 0
+        dnsQueries        = 0
+        networkRequests   = 0
         fileDiffSource    = $fileDiffSource
     }
 
@@ -633,6 +737,77 @@ function Get-QuarantineManifestDiff {
     )
     $summary.sysmonAdded = @($addedSysmon).Count
 
+    $fromSnapName = Get-ManifestStringProperty -Manifest $left -Name 'snapshot'
+    $toSnapName = Get-ManifestStringProperty -Manifest $right -Name 'snapshot'
+    $isSnapshotPair = -not [string]::IsNullOrWhiteSpace($fromSnapName) -and -not [string]::IsNullOrWhiteSpace($toSnapName)
+    $compareMode = if ($isSnapshotPair) { 'snapshot-pair' } else { 'baseline-to-evidence' }
+
+    $leftUsnKeys = @{}
+    if ($left.PSObject.Properties['usn'] -and $left.usn -and $left.usn.events) {
+        foreach ($ev in @($left.usn.events)) {
+            $leftUsnKeys[(Get-UsnEventKey -Event $ev)] = $true
+        }
+    }
+    $rightUsn = if ($right.PSObject.Properties['usn']) { $right.usn } else { $null }
+    $addedUsn = @()
+    if ($rightUsn -and $rightUsn.available -eq $true -and $rightUsn.events) {
+        $addedUsn = @($rightUsn.events | Where-Object { -not $leftUsnKeys.ContainsKey((Get-UsnEventKey -Event $_)) })
+    }
+
+    $networkSection = $null
+    $fromCapturedText = Get-ManifestStringProperty -Manifest $left -Name 'capturedAt'
+    $toCapturedText = Get-ManifestStringProperty -Manifest $right -Name 'capturedAt'
+    $networkFrom = ConvertTo-QuarantineNetworkInstant -Text $fromCapturedText
+    $networkTo = ConvertTo-QuarantineNetworkInstant -Text $toCapturedText
+    if ($networkFrom -and $networkTo) {
+        try {
+            $networkEvidence = Get-QuarantineNetworkEvidence -ConfigPath $ConfigPath -From $networkFrom -To $networkTo
+            $dnsMerged = Merge-QuarantineSysmonDnsEvidence `
+                -DnsEntries @($networkEvidence.dns) `
+                -SysmonEvents @($addedSysmon) `
+                -From $networkFrom -To $networkTo
+            $dnsTruncated = [bool]$networkEvidence.truncated
+            $networkSection = [ordered]@{
+                available  = [bool]$networkEvidence.available -or (@($dnsMerged).Count -gt 0) -or (@($networkEvidence.requests).Count -gt 0)
+                message    = [string]$networkEvidence.message
+                windowFrom = [string]$networkEvidence.windowFrom
+                windowTo   = [string]$networkEvidence.windowTo
+                sources    = $networkEvidence.sources
+                dns        = @($dnsMerged)
+                requests   = @($networkEvidence.requests)
+                truncated  = [bool]($networkEvidence.truncated -or $dnsTruncated)
+            }
+            $summary.dnsQueries = @($dnsMerged).Count
+            $summary.networkRequests = @($networkEvidence.requests).Count
+        } catch {
+            $networkSection = [ordered]@{
+                available  = $false
+                message    = "Network evidence failed: $($_.Exception.Message)"
+                windowFrom = if ($networkFrom) { $networkFrom.ToUniversalTime().ToString('o') } else { '' }
+                windowTo   = if ($networkTo) { $networkTo.ToUniversalTime().ToString('o') } else { '' }
+                sources    = [ordered]@{ proxyLogs = @(); pcaps = @() }
+                dns        = @()
+                requests   = @()
+                truncated  = $false
+            }
+            $summary.dnsQueries = 0
+            $summary.networkRequests = 0
+        }
+    } else {
+        $networkSection = [ordered]@{
+            available  = $false
+            message    = 'Snapshot capture times missing; cannot correlate proxy/PCAP logs.'
+            windowFrom = ''
+            windowTo   = ''
+            sources    = [ordered]@{ proxyLogs = @(); pcaps = @() }
+            dns        = @()
+            requests   = @()
+            truncated  = $false
+        }
+        $summary.dnsQueries = 0
+        $summary.networkRequests = 0
+    }
+
     $rightSysmon = Get-SysmonSectionFromManifest -Manifest $right
     $compareWarnings = Get-QuarantineManifestCompareWarnings -Left $left -Right $right
     $fromFileCount = if ($left.PSObject.Properties['fileCount']) { [int]$left.fileCount } else { @($left.files).Count }
@@ -644,12 +819,12 @@ function Get-QuarantineManifestDiff {
         meta = [ordered]@{
             fromManifest = $From
             toManifest   = $To
-            fromSnapshot = [string]$left.snapshot
-            toSnapshot   = [string]$right.snapshot
-            fromCaptured = [string]$left.capturedAt
-            toCaptured   = [string]$right.capturedAt
-            fromComputer = [string]$left.computerName
-            toComputer   = [string]$right.computerName
+            fromSnapshot = Get-ManifestStringProperty -Manifest $left -Name 'snapshot'
+            toSnapshot   = Get-ManifestStringProperty -Manifest $right -Name 'snapshot'
+            fromCaptured = Get-ManifestStringProperty -Manifest $left -Name 'capturedAt'
+            toCaptured   = Get-ManifestStringProperty -Manifest $right -Name 'capturedAt'
+            fromComputer = Get-ManifestStringProperty -Manifest $left -Name 'computerName'
+            toComputer   = Get-ManifestStringProperty -Manifest $right -Name 'computerName'
             fromFileCount = $fromFileCount
             toFileCount   = $toFileCount
             fromScanMode  = $leftScanMode
@@ -658,6 +833,7 @@ function Get-QuarantineManifestDiff {
             registryDiffSource = $registryDiffSource
             fromUserRegistryCount = $fromHku
             toUserRegistryCount   = $toHku
+            compareMode   = $compareMode
             warnings      = @($compareWarnings)
         }
         summary = $summary
@@ -680,10 +856,34 @@ function Get-QuarantineManifestDiff {
         sysmon = [ordered]@{
             available  = if ($rightSysmon.PSObject.Properties['available']) { [bool]$rightSysmon.available } else { $false }
             message    = if ($rightSysmon.PSObject.Properties['message']) { [string]$rightSysmon.message } else { '' }
-            baselineAt = if ($rightSysmon.PSObject.Properties['baselineAt']) { [string]$rightSysmon.baselineAt } else { '' }
+            baselineAt = if ($isSnapshotPair) {
+                Get-ManifestStringProperty -Manifest $left -Name 'capturedAt'
+            } elseif ($rightSysmon.PSObject.Properties['baselineAt']) {
+                [string]$rightSysmon.baselineAt
+            } else { '' }
             recordedAt = if ($rightSysmon.PSObject.Properties['recordedAt']) { [string]$rightSysmon.recordedAt } else { '' }
             added      = @($addedSysmon)
         }
-        usn = if ($right.PSObject.Properties['usn']) { $right.usn } else { $null }
+        usn = if ($rightUsn) {
+            [ordered]@{
+                available  = if ($rightUsn.PSObject.Properties['available']) { [bool]$rightUsn.available } else { $false }
+                message    = if ($isSnapshotPair) {
+                    "USN events in To not in From ($fromSnapName → $toSnapName)."
+                } elseif ($rightUsn.PSObject.Properties['message']) {
+                    [string]$rightUsn.message
+                } else { '' }
+                volume     = if ($rightUsn.PSObject.Properties['volume']) { [string]$rightUsn.volume } else { 'C:' }
+                baselineAt = if ($isSnapshotPair) {
+                    Get-ManifestStringProperty -Manifest $left -Name 'capturedAt'
+                } elseif ($rightUsn.PSObject.Properties['baselineAt']) {
+                    [string]$rightUsn.baselineAt
+                } else { '' }
+                recordedAt = if ($rightUsn.PSObject.Properties['recordedAt']) { [string]$rightUsn.recordedAt } else { '' }
+                truncated  = if ($rightUsn.PSObject.Properties['truncated']) { [bool]$rightUsn.truncated } else { $false }
+                eventCount = @($addedUsn).Count
+                events     = @($addedUsn)
+            }
+        } else { $null }
+        network = $networkSection
     }
 }

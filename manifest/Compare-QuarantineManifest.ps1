@@ -15,6 +15,8 @@ param(
 
     [string]$JsonPath,
 
+    [string]$ConfigPath,
+
     [switch]$PassThru
 )
 
@@ -23,7 +25,7 @@ $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'Get-QuarantineManifestDiff.ps1')
 
-$diff = Get-QuarantineManifestDiff -From $From -To $To
+$diff = Get-QuarantineManifestDiff -From $From -To $To -ConfigPath $ConfigPath
 $left = Get-Content -LiteralPath $From -Raw -Encoding UTF8 | ConvertFrom-Json
 $right = Get-Content -LiteralPath $To -Raw -Encoding UTF8 | ConvertFrom-Json
 
@@ -78,6 +80,14 @@ Append-Section -Title 'Scheduled tasks (schedule noise only)' -Items $diff.tasks
 }
 Append-Section -Title 'Sysmon events (new in To snapshot)' -Items $diff.sysmon.added -Formatter {
     param($x) "  + [$($x.type)] $($x.t) $($x.summary)"
+}
+if ($diff.network) {
+    Append-Section -Title 'DNS lookups (proxy/PCAP/Sysmon)' -Items $diff.network.dns -Formatter {
+        param($x) "  + [$($x.source)] $($x.t) $($x.query)$(if ($x.type) { " ($($x.type))" })"
+    }
+    Append-Section -Title 'HTTP/proxy requests' -Items $diff.network.requests -Formatter {
+        param($x) "  + [$($x.source)] $($x.t) $($x.method) $($x.url)"
+    }
 }
 
 $text = $lines -join [Environment]::NewLine

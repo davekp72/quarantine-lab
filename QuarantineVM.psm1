@@ -274,7 +274,7 @@ function Get-QuarantineVMState {
     return 'unknown'
 }
 
-function Ensure-QuarantineVMMutable {
+function Initialize-QuarantineVMMutable {
     <#
     .SYNOPSIS
       VirtualBox cannot modifyvm while a VM is running or in saved (live snapshot) state.
@@ -420,9 +420,9 @@ function Set-QuarantineVMNormalBoot {
     ) | Out-Null
 
     if (-not $KeepIsoAttached) {
-        Ensure-QuarantineVMDvdDrive -VmName $VmName -Empty | Out-Null
+        Initialize-QuarantineVMDvdDrive -VmName $VmName -Empty | Out-Null
     } else {
-        Ensure-QuarantineVMDvdDrive -VmName $VmName | Out-Null
+        Initialize-QuarantineVMDvdDrive -VmName $VmName | Out-Null
     }
 }
 
@@ -467,7 +467,7 @@ function Get-VBoxGuestAdditionsIsoPath {
     return $null
 }
 
-function Ensure-QuarantineVMDvdDrive {
+function Initialize-QuarantineVMDvdDrive {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
@@ -524,7 +524,7 @@ function Mount-QuarantineVMGuestAdditions {
         throw "VM '$vmName' is in state '$state'; cannot mount Guest Additions."
     }
 
-    Ensure-QuarantineVMDvdDrive -VmName $vmName | Out-Null
+    Initialize-QuarantineVMDvdDrive -VmName $vmName | Out-Null
 
     $output = Invoke-VBoxManage -Arguments @(
         'storageattach', $vmName,
@@ -537,7 +537,7 @@ function Mount-QuarantineVMGuestAdditions {
 
     $text = if ($output) { ($output | Out-String).Trim() } else { '' }
     if ($text -match 'No drive attached') {
-        Ensure-QuarantineVMDvdDrive -VmName $vmName | Out-Null
+        Initialize-QuarantineVMDvdDrive -VmName $vmName | Out-Null
         Invoke-VBoxManage -Arguments @(
             'storageattach', $vmName,
             '--storagectl', 'SATA',
@@ -659,7 +659,7 @@ function Get-QuarantineVMInboxSettings {
     return [pscustomobject]$settings
 }
 
-function Ensure-QuarantineVMInboxDirectory {
+function Initialize-QuarantineVMInboxDirectory {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
@@ -776,7 +776,7 @@ function Write-QuarantineVMInboxTransferLog {
         [object[]]$Entries
     )
 
-    Ensure-QuarantineVMInboxDirectory -HostPath $LogDir -LogDir $LogDir
+    Initialize-QuarantineVMInboxDirectory -HostPath $LogDir -LogDir $LogDir
     $logPath = Join-Path $LogDir 'transfers.jsonl'
     foreach ($entry in $Entries) {
         ($entry | ConvertTo-Json -Compress) | Add-Content -LiteralPath $logPath -Encoding UTF8
@@ -801,7 +801,7 @@ function Push-QuarantineVMInbox {
     begin {
         $script:Config = Get-QuarantineVMConfig -ConfigPath $ConfigPath
         $settings = Get-QuarantineVMInboxSettings
-        Ensure-QuarantineVMInboxDirectory -HostPath $settings.hostPath -LogDir $settings.logDir
+        Initialize-QuarantineVMInboxDirectory -HostPath $settings.hostPath -LogDir $settings.logDir
         $pushed = @()
     }
 
@@ -871,7 +871,7 @@ function Open-QuarantineVMInbox {
         throw "Inbox open blocked: network mode '$mode' is not allowed while inbox.requireNetworkOff is true. Run: .\quarantine-vm.ps1 network none"
     }
 
-    Ensure-QuarantineVMInboxDirectory -HostPath $settings.hostPath -LogDir $settings.logDir
+    Initialize-QuarantineVMInboxDirectory -HostPath $settings.hostPath -LogDir $settings.logDir
 
     $files = @(Get-ChildItem -LiteralPath $settings.hostPath -File -ErrorAction SilentlyContinue)
     if ($files.Count -eq 0) {
@@ -1716,7 +1716,7 @@ function Set-QuarantineVMNetworkMode {
         throw "VM '$vmName' not found."
     }
 
-    Ensure-QuarantineVMMutable -ConfigPath $ConfigPath -VmName $vmName -Reason "set network mode to $Mode"
+    Initialize-QuarantineVMMutable -ConfigPath $ConfigPath -VmName $vmName -Reason "set network mode to $Mode"
 
     $network = [pscustomobject]@{
         mode              = $Mode
@@ -2697,11 +2697,188 @@ function Resolve-QuarantineVMSnapshotName {
     return $snap.Name
 }
 
-function Select-QuarantineVMSnapshot {
+function Get-QuarantineVMSnapshotTreeEntries {
     [CmdletBinding()]
     param(
         [Parameter()]
         [string]$ConfigPath
+    )
+
+    $script:Config = Get-QuarantineVMConfig -ConfigPath $ConfigPath
+    $vmName = $script:Config.vmName
+    $lines = Invoke-VBoxManage -Arguments @('snapshot', $vmName, 'list', '--machinereadable') -AllowFailure
+    if ($LASTEXITCODE -ne 0) { return @() }
+
+    $orderedSuffixes = [System.Collections.Generic.List[string]]::new()
+    $entries = @{}
+    foreach ($line in $lines) {
+        if ($line -match '^(SnapshotName|SnapshotUUID)((?:-[0-9]+)*)="(.*)"$') {
+            $field = $Matches[1]
+            $suffix = $Matches[2]
+            $value = $Matches[3]
+            if (-not $entries.ContainsKey($suffix)) {
+                $entries[$suffix] = @{}
+                $orderedSuffixes.Add($suffix) | Out-Null
+            }
+            $entries[$suffix][$field] = $value
+        }
+    }
+
+    $results = @()
+    foreach ($suffix in $orderedSuffixes) {
+        $entry = $entries[$suffix]
+        $results += [pscustomobject]@{
+            Suffix = $suffix
+            Name   = $entry['SnapshotName']
+            UUID   = $entry['SnapshotUUID']
+        }
+    }
+    return $results
+}
+
+function Get-QuarantineVMSnapshotDescendantUuids {
+    param(
+        [Parameter(Mandatory)][string]$TargetUuid,
+        [Parameter(Mandatory)][array]$TreeEntries
+    )
+
+    $target = @($TreeEntries | Where-Object { $_.UUID -eq $TargetUuid } | Select-Object -First 1)
+    if (-not $target) { return @() }
+
+    $parentSuffix = [string]$target.Suffix
+    $descendants = @($TreeEntries | Where-Object {
+        $_.Suffix -ne $parentSuffix -and $_.Suffix -like "$parentSuffix-*"
+    })
+    return @($descendants | ForEach-Object { $_.UUID })
+}
+
+function Remove-QuarantineVMSnapshot {
+    <#
+    .SYNOPSIS
+      Delete one snapshot (and optional descendants) plus host manifest sidecars.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter()]
+        [string]$ConfigPath,
+
+        [Parameter()]
+        [string]$SnapshotName,
+
+        [Parameter()]
+        [switch]$Force,
+
+        [Parameter()]
+        [switch]$KeepManifests
+    )
+
+    $script:Config = Get-QuarantineVMConfig -ConfigPath $ConfigPath
+    $vmName = $script:Config.vmName
+
+    if (-not (Test-QuarantineVMExists -VmName $vmName)) {
+        throw "VM '$vmName' not found."
+    }
+
+    if ([string]::IsNullOrWhiteSpace($SnapshotName)) {
+        $picked = Select-QuarantineVMSnapshot -ConfigPath $ConfigPath `
+            -Prompt 'Select snapshot to delete:' -CancelMessage 'Delete cancelled.'
+        $SnapshotName = $picked.Name
+    } else {
+        $SnapshotName = Resolve-QuarantineVMSnapshotName -Name $SnapshotName -ConfigPath $ConfigPath
+    }
+
+    $snapshots = @(Get-QuarantineVMSnapshotList -ConfigPath $ConfigPath)
+    $target = $snapshots | Where-Object { $_.Name -eq $SnapshotName } | Select-Object -First 1
+    if (-not $target) {
+        throw "Snapshot '$SnapshotName' not found."
+    }
+
+    $protected = @()
+    if ($script:Config.cleanSnapshotName) { $protected += [string]$script:Config.cleanSnapshotName }
+    if ($script:Config.manifest -and $script:Config.manifest.sessionBaselineSnapshot) {
+        $protected += [string]$script:Config.manifest.sessionBaselineSnapshot
+    }
+    $protected = @($protected | Select-Object -Unique)
+    if ($protected -contains $SnapshotName -and -not $Force) {
+        throw "Refusing to delete protected baseline '$SnapshotName'. Pass -Force if you really mean it."
+    }
+
+    $tree = @(Get-QuarantineVMSnapshotTreeEntries -ConfigPath $ConfigPath)
+    $childUuids = @(Get-QuarantineVMSnapshotDescendantUuids -TargetUuid $target.UUID -TreeEntries $tree)
+    $childNames = @($tree | Where-Object { $_.UUID -in $childUuids } | ForEach-Object { $_.Name })
+
+    if ($childNames.Count -gt 0 -and -not $Force) {
+        $childList = ($childNames | ForEach-Object { "  - $_" }) -join [Environment]::NewLine
+        throw @"
+Cannot delete '$SnapshotName' while child snapshots exist. Delete children first or pass -Force to delete the whole branch:
+
+$childList
+"@
+    }
+
+    $deleteUuids = @{ $target.UUID = $true }
+    foreach ($uuid in $childUuids) { $deleteUuids[$uuid] = $true }
+    $sortedDeletes = @(
+        $tree |
+            Where-Object { $deleteUuids.ContainsKey($_.UUID) } |
+            Sort-Object { $_.Suffix.Length } -Descending
+    )
+
+    if ($childNames.Count -gt 0) {
+        Write-Host "Deleting snapshot branch ($($sortedDeletes.Count) snapshot(s))..."
+    } else {
+        Write-Host "Deleting snapshot '$SnapshotName'..."
+    }
+
+    if (-not $Force) {
+        $reply = Read-Host 'Continue? [y/N]'
+        if ($reply -notmatch '^[yY](es)?$') {
+            Write-Host 'Cancelled.'
+            return
+        }
+    }
+
+    foreach ($entry in $sortedDeletes) {
+        $snapName = $entry.Name
+        $snapUuid = $entry.UUID
+        if ($PSCmdlet.ShouldProcess($vmName, "Delete snapshot '$snapName' ($snapUuid)")) {
+            Write-Host "Deleting '$snapName' ($snapUuid)..."
+            try {
+                Invoke-VBoxManage -Arguments @('snapshot', $vmName, 'delete', $snapUuid) | Out-Null
+            } catch {
+                throw "Failed to delete snapshot '$snapName': $($_.Exception.Message)"
+            }
+            if (-not $KeepManifests) {
+                try {
+                    $manifestModule = Join-Path $PSScriptRoot 'manifest\QuarantineManifest.psm1'
+                    if (Test-Path -LiteralPath $manifestModule) {
+                        Import-Module $manifestModule -Force -ErrorAction Stop
+                        $removed = @(Remove-QuarantineSnapshotManifestArtifacts -ConfigPath $ConfigPath -SnapshotName $snapName)
+                        foreach ($path in $removed) {
+                            Write-Host "  Removed manifest artifact: $path"
+                        }
+                    }
+                } catch {
+                    Write-Warning "Manifest cleanup failed for '$snapName': $($_.Exception.Message)"
+                }
+            }
+        }
+    }
+
+    Write-Host "Snapshot delete complete."
+}
+
+function Select-QuarantineVMSnapshot {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [string]$ConfigPath,
+
+        [Parameter()]
+        [string]$Prompt = 'Select snapshot to restore:',
+
+        [Parameter()]
+        [string]$CancelMessage = 'Restore cancelled.'
     )
 
     $snapshots = Get-QuarantineVMSnapshotList -ConfigPath $ConfigPath
@@ -2718,7 +2895,7 @@ Or wipe and recreate in one step (only if no snapshots exist):
     }
 
     Write-Host ''
-    Write-Host 'Select snapshot to restore:'
+    Write-Host $Prompt
     Write-Host ''
 
     for ($i = 0; $i -lt $snapshots.Count; $i++) {
@@ -2743,7 +2920,7 @@ Or wipe and recreate in one step (only if no snapshots exist):
     do {
         $choice = Read-Host 'Enter number'
         if ($choice -eq '0') {
-            throw 'Restore cancelled.'
+            throw $CancelMessage
         }
         if ($choice -match '^\d+$' -and [int]$choice -ge 1 -and [int]$choice -le $snapshots.Count) {
             return $snapshots[[int]$choice - 1]
@@ -3086,6 +3263,7 @@ Export-ModuleMember -Function @(
     'Clear-QuarantineVMSnapshots',
     'New-QuarantineVMBaseline',
     'Save-QuarantineVMSnapshot',
+    'Remove-QuarantineVMSnapshot',
     'Get-QuarantineVMSnapshotList',
     'Resolve-QuarantineVMSnapshot',
     'Resolve-QuarantineVMSnapshotName',
@@ -3119,5 +3297,5 @@ Export-ModuleMember -Function @(
     'Move-QuarantineVMHome',
     'Move-QuarantineVMStorage',
     'Get-QuarantineVMState',
-    'Ensure-QuarantineVMMutable'
+    'Initialize-QuarantineVMMutable'
 )

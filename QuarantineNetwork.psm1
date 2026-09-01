@@ -152,6 +152,30 @@ function Stop-QuarantineManagedProcess {
     }
 }
 
+function Stop-QuarantineListenerOnPort {
+    param(
+        [Parameter(Mandatory)]
+        [int]$Port,
+
+        [string[]]$AllowedProcessNames = @('mitmdump', 'python', 'python3')
+    )
+
+    $connections = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+    foreach ($conn in $connections) {
+        $proc = Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue
+        if (-not $proc) { continue }
+        if ($proc.ProcessName -notin $AllowedProcessNames) {
+            throw "Port $Port is in use by $($proc.ProcessName) (PID $($proc.Id)). Stop that process or change the proxy port in config/quarantine-vm.json."
+        }
+        try {
+            Stop-Process -Id $proc.Id -Force -ErrorAction Stop
+            Write-Host "Stopped stale $($proc.ProcessName) on port $Port (PID $($proc.Id))."
+        } catch {
+            Write-Warning "Could not stop process on port ${Port}: $_"
+        }
+    }
+}
+
 function Start-QuarantinePacServer {
     param(
         [Parameter(Mandatory)]
@@ -196,11 +220,24 @@ function Start-QuarantineProxy {
     $statePath = Get-QuarantineNetworkStatePath -LogRoot $logDir
     $state = Read-QuarantineNetworkState -StatePath $statePath
 
+    $listenHost = if ($proxy.listenHost) { $proxy.listenHost } else { '0.0.0.0' }
+    $listenPort = if ($proxy.listenPort) { [int]$proxy.listenPort } else { 8080 }
+    $pacPort = if ($proxy.pacPort) { [int]$proxy.pacPort } else { 8081 }
+
     $mitmPid = if ($state['mitmproxyPid']) { [int]$state['mitmproxyPid'] } else { 0 }
     if (Test-ProcessRunning -ProcessId $mitmPid) {
         Write-Host 'Quarantine proxy already running.'
         return
     }
+
+    if ($state['mitmproxyPid']) {
+        Stop-QuarantineManagedProcess -ProcessId ([int]$state['mitmproxyPid']) -Label 'mitmdump'
+    }
+    if ($state['pacPid']) {
+        Stop-QuarantineManagedProcess -ProcessId ([int]$state['pacPid']) -Label 'PAC server'
+    }
+    Stop-QuarantineListenerOnPort -Port $listenPort
+    Stop-QuarantineListenerOnPort -Port $pacPort
 
     $mitmdump = Find-MitmproxyCommand
     if (-not $mitmdump) {
@@ -214,11 +251,8 @@ function Start-QuarantineProxy {
     $flowsPath = Join-Path $sessionDir 'flows.mitm'
     $accessLog = Join-Path $sessionDir 'access.log'
     $errorLog = Join-Path $sessionDir 'errors.log'
+    $startupLog = Join-Path $sessionDir 'startup.log'
     $addon = Join-Path $script:NetworkRoot 'proxy\block_private.py'
-
-    $listenHost = if ($proxy.listenHost) { $proxy.listenHost } else { '0.0.0.0' }
-    $listenPort = if ($proxy.listenPort) { [int]$proxy.listenPort } else { 8080 }
-    $pacPort = if ($proxy.pacPort) { [int]$proxy.pacPort } else { 8081 }
     $pacPath = Join-Path $script:NetworkRoot 'proxy\quarantine.pac'
 
     $caPath = Publish-QuarantineProxyCA -LogDir $logDir
@@ -236,10 +270,17 @@ function Start-QuarantineProxy {
         '--set', 'block_global=false'
     )
 
-    $mitmProc = Start-Process -FilePath $mitmdump -ArgumentList $mitmArgs -PassThru -WindowStyle Hidden
+    $mitmProc = Start-Process -FilePath $mitmdump -ArgumentList $mitmArgs -PassThru -WindowStyle Hidden -RedirectStandardError $startupLog
     Start-Sleep -Milliseconds 800
     if ($mitmProc.HasExited) {
-        throw "mitmdump exited immediately (code $($mitmProc.ExitCode)). Check $errorLog"
+        $detail = ''
+        if (Test-Path -LiteralPath $startupLog) {
+            $detail = (Get-Content -LiteralPath $startupLog -Raw -ErrorAction SilentlyContinue).Trim()
+        }
+        if ($detail) {
+            throw "mitmdump exited immediately (code $($mitmProc.ExitCode)): $detail"
+        }
+        throw "mitmdump exited immediately (code $($mitmProc.ExitCode)). See $startupLog"
     }
 
     if (-not $caPath) {
@@ -293,6 +334,13 @@ function Stop-QuarantineProxy {
     if ($state['pacPid']) {
         Stop-QuarantineManagedProcess -ProcessId ([int]$state['pacPid']) -Label 'PAC server'
     }
+
+    $listenPort = [int]$cfg.network.proxy.listenPort
+    $pacPort = [int]$cfg.network.proxy.pacPort
+    if ($listenPort -le 0) { $listenPort = 8080 }
+    if ($pacPort -le 0) { $pacPort = 8081 }
+    Stop-QuarantineListenerOnPort -Port $listenPort
+    Stop-QuarantineListenerOnPort -Port $pacPort
 
     if (Test-Path -LiteralPath $statePath) {
         Remove-Item -LiteralPath $statePath -Force

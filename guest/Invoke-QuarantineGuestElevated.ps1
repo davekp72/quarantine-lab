@@ -74,8 +74,26 @@ $argText = ($ScriptArguments | ForEach-Object {
     if ($_ -match '\s|"') { '"{0}"' -f ($_ -replace '"', '""') } else { $_ }
 }) -join ' '
 
-$trCommand = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`""
-if ($argText) { $trCommand += " $argText" }
+$psExe = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
+$launcherDir = Split-Path -Parent $ScriptPath
+if ([string]::IsNullOrWhiteSpace($launcherDir)) {
+    $launcherDir = if ($env:TEMP) { $env:TEMP } else { 'C:\Windows\Temp' }
+}
+$launcherPath = Join-Path $launcherDir "qv-elev-$([guid]::NewGuid().ToString('N').Substring(0, 10)).ps1"
+$escapedScript = $ScriptPath.Replace("'", "''")
+$invokeLine = "& '$escapedScript'"
+if ($argText) { $invokeLine += " $argText" }
+@"
+Set-StrictMode -Version Latest
+`$ErrorActionPreference = 'Stop'
+$invokeLine
+"@ | Set-Content -LiteralPath $launcherPath -Encoding UTF8
+
+# schtasks /TR is limited to 261 characters — always run a short launcher script.
+$trCommand = "$psExe -NoProfile -ExecutionPolicy Bypass -File `"$launcherPath`""
+if ($trCommand.Length -gt 250) {
+    throw "Elevated launcher path is too long for schtasks /TR ($($trCommand.Length) chars): $launcherPath"
+}
 
 $startDate = (Get-Date).ToString('dd/MM/yyyy')
 $startTime = (Get-Date).AddMinutes(2).ToString('HH:mm')
@@ -121,4 +139,7 @@ try {
     Write-Output "ELEVATED_OK $ScriptPath"
 } finally {
     $null = Invoke-SchtasksSilently -ArgumentString "/Delete /TN `"$taskName`" /F"
+    if ($launcherPath -and (Test-Path -LiteralPath $launcherPath)) {
+        Remove-Item -LiteralPath $launcherPath -Force -ErrorAction SilentlyContinue
+    }
 }

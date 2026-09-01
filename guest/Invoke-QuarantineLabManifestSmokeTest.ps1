@@ -18,28 +18,38 @@
   .\Invoke-QuarantineLabManifestSmokeTest.ps1 -Part User
 
 .EXAMPLE
-  # From the host (see also Invoke-QuarantineLabSmokeTest.ps1):
-  .\quarantine-vm.ps1 guest copy guest\Invoke-QuarantineLabManifestSmokeTest.ps1
-  .\quarantine-vm.ps1 guest ps "& 'C:\Users\Public\Quarantine\Invoke-QuarantineLabManifestSmokeTest.ps1' -Part Admin"
-  .\quarantine-vm.ps1 payload ps "& 'C:\Users\Public\Quarantine\Invoke-QuarantineLabManifestSmokeTest.ps1' -Part User"
+  # From the host (recommended):
+  .\Invoke-QuarantineLabSmokeTest.ps1
 #>
 [CmdletBinding()]
 param(
     [ValidateSet('Admin', 'User', 'All')]
     [string]$Part = 'All',
 
-    [string]$Tag = (Get-Date -Format 'yyyyMMdd-HHmmss')
+    [string]$Tag = (Get-Date -Format 'yyyyMMdd-HHmmss'),
+
+    [string]$ResultFile = ''
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+$script:ResultFile = $ResultFile
 
 $LabKeyName = 'QuarantineLab'
 $TestKeyName = 'ManifestSmokeTest'
 
 function Write-SmokeResult {
     param([string]$Message)
-    Write-Output "SMOKE_OK $Message"
+    $line = "SMOKE_OK $Message"
+    Write-Output $line
+    if (-not [string]::IsNullOrWhiteSpace($script:ResultFile)) {
+        $dir = Split-Path -Parent $script:ResultFile
+        if ($dir -and -not (Test-Path -LiteralPath $dir)) {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        }
+        Set-Content -LiteralPath $script:ResultFile -Value $line -Encoding UTF8
+    }
 }
 
 function Set-SmokeRegValue {

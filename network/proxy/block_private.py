@@ -94,8 +94,14 @@ def load(loader):
     pac_path = os.environ.get("QUARANTINE_PAC_PATH", "")
     ca_path = os.environ.get("QUARANTINE_CA_PATH", "")
     if access:
+        parent = os.path.dirname(access)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         ACCESS_LOG = open(access, "a", encoding="utf-8")
     if errors:
+        parent = os.path.dirname(errors)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         ERROR_LOG = open(errors, "a", encoding="utf-8")
     if pac_path and os.path.isfile(pac_path):
         with open(pac_path, "r", encoding="utf-8") as pac_file:

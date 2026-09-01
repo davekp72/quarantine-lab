@@ -674,7 +674,7 @@ if ($RegistryEngine -eq 'legacy') {
 } elseif ($RegistryEngine -eq 'regshot') {
     [void]$userRegistryWarnings.Add('registryEngine=regshot: HKLM/HKU captured via Regshot compare at manifest diff time.')
 } else {
-    [void]$userRegistryWarnings.Add('registryEngine=cli: payload HKU captured live via reg.exe at snapshot/preserve; HKLM from offline manifest capture.')
+    [void]$userRegistryWarnings.Add('registryEngine=cli: payload HKU captured live via reg.exe at snapshot/preserve; HKLM captured via SYSTEM reg.exe export at snapshot/preserve.')
 }
 
 try {

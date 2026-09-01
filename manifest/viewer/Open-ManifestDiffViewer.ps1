@@ -48,52 +48,19 @@ function Remove-DiffFileContent {
 function Get-ViewerDiffObject {
     param(
         [object]$Diff,
-        [switch]$KeepContent,
-        [int]$MaxRowsPerBucket = 400
+        [switch]$KeepContent
     )
 
     if ($KeepContent) { return $Diff }
 
     $clone = $Diff | ConvertTo-Json -Depth 64 -Compress | ConvertFrom-Json
-    $truncated = $false
 
     foreach ($bucket in @('added', 'removed', 'modified')) {
         $list = $clone.files.$bucket
-        if ($list -and @($list).Count -gt $MaxRowsPerBucket) {
-            $clone.files.$bucket = @(@($list) | Select-Object -First $MaxRowsPerBucket)
-            $truncated = $true
-        }
         if ($list) {
-            foreach ($entry in @($clone.files.$bucket)) {
+            foreach ($entry in @($list)) {
                 Remove-DiffFileContent -Entry $entry
             }
-        }
-    }
-
-    foreach ($section in @('registry', 'tasks')) {
-        foreach ($bucket in @('added', 'removed', 'modified', 'volatileOnly')) {
-            $prop = $clone.$section.PSObject.Properties[$bucket]
-            if (-not $prop) { continue }
-            $list = $prop.Value
-            if ($list -and @($list).Count -gt $MaxRowsPerBucket) {
-                $clone.$section.$bucket = @(@($list) | Select-Object -First $MaxRowsPerBucket)
-                $truncated = $true
-            }
-        }
-    }
-
-    if ($clone.sysmon -and $clone.sysmon.added -and @($clone.sysmon.added).Count -gt $MaxRowsPerBucket) {
-        $clone.sysmon.added = @(@($clone.sysmon.added) | Select-Object -First $MaxRowsPerBucket)
-        $truncated = $true
-    }
-
-    if ($truncated) {
-        if (-not $clone.meta) { $clone | Add-Member -NotePropertyName meta -NotePropertyValue ([pscustomobject]@{}) -Force }
-        $note = "Viewer lists capped at $MaxRowsPerBucket rows per bucket. Full counts are in summary cards and diff JSON on disk."
-        if ($clone.meta.PSObject.Properties['warnings']) {
-            $clone.meta.warnings = @($clone.meta.warnings) + @($note)
-        } else {
-            $clone.meta | Add-Member -NotePropertyName warnings -NotePropertyValue @($note) -Force
         }
     }
 

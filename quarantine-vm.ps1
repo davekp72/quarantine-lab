@@ -30,7 +30,7 @@ param(
 
     [Parameter(Position = 0)]
 
-    [ValidateSet('create', 'install', 'start', 'stop', 'snapshot', 'snapshots', 'baseline', 'preserve', 'reset', 'status', 'mount-iso', 'guest-additions', 'relocate', 'consolidate', 'network', 'proxy', 'capture', 'clipboard', 'inbox', 'guest', 'payload', 'sysmon', 'regshot', 'manifest', 'help')]
+    [ValidateSet('create', 'install', 'start', 'stop', 'snapshot', 'snapshots', 'delete-snapshot', 'baseline', 'preserve', 'reset', 'status', 'mount-iso', 'guest-additions', 'relocate', 'consolidate', 'network', 'proxy', 'capture', 'clipboard', 'inbox', 'guest', 'payload', 'sysmon', 'regshot', 'manifest', 'help')]
 
     [string]$Action = 'help',
 
@@ -277,6 +277,18 @@ switch ($Action) {
     'snapshots' {
 
         Get-QuarantineVMSnapshots -ConfigPath $ConfigPath
+
+    }
+
+    'delete-snapshot' {
+
+        $deleteParams = @{ ConfigPath = $ConfigPath }
+
+        if (-not [string]::IsNullOrWhiteSpace($SnapshotName)) { $deleteParams.SnapshotName = $SnapshotName }
+
+        if ($Force) { $deleteParams.Force = $true }
+
+        Remove-QuarantineVMSnapshot @deleteParams
 
     }
 
@@ -776,6 +788,8 @@ Quarantine VM utility (VirtualBox)
   snapshot   Save a snapshot (-SnapshotName, -SnapshotDescription). Running VM = live (RAM + disk). Existing name prompts to replace; -Force replaces without prompt. -Offline for disk-only.
 
   snapshots  List saved snapshots (live = includes RAM / resume session)
+
+  delete-snapshot  Delete a snapshot (-SnapshotName, or interactive picker). Removes host manifest sidecars. -Force deletes child snapshots or protected baselines.
 
   baseline   Wipe all snapshots, merge current disk, save fresh disk-only Clean (VM is powered off)
 

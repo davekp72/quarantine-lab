@@ -46,6 +46,8 @@ function Get-QuarantineVMManifestSettings {
         SysmonScript = Join-Path $script:ManifestRoot 'Get-QuarantineGuestSysmonEvents.ps1'
         PayloadHkcuScript = Join-Path $script:ManifestRoot 'Export-QuarantineGuestPayloadHkcu.ps1'
         PayloadRegistryCliScript = Join-Path $script:ManifestRoot 'Export-QuarantineGuestPayloadRegistryCli.ps1'
+        HklmRegistryCliScript = Join-Path $script:ManifestRoot 'Export-QuarantineGuestHklmRegistryCli.ps1'
+        PrivilegedHklmExportScript = Join-Path $script:ProjectRoot 'guest\Invoke-QuarantinePrivilegedHklmRegistryExport.ps1'
         PrivModule = Join-Path $script:ManifestRoot 'QuarantineGuestPriv.psm1'
         PrivilegedWorkerScript = Join-Path $script:ProjectRoot 'guest\Invoke-QuarantinePrivilegedExportWorker.ps1'
         ElevatedRunnerScript = Join-Path $script:ProjectRoot 'guest\Invoke-QuarantineGuestElevated.ps1'
@@ -150,6 +152,26 @@ function Get-QuarantineVMPayloadRegistryRegHostDir {
     Join-Path $settings.LogDir "$safe-payload-registry"
 }
 
+function Get-QuarantineVMHklmRegistryHostPath {
+    param(
+        [string]$ConfigPath,
+        [Parameter(Mandatory)][string]$SnapshotName
+    )
+    $settings = Get-QuarantineVMManifestSettings -ConfigPath $ConfigPath
+    $safe = Get-SafeSnapshotFileName -Name $SnapshotName
+    Join-Path $settings.LogDir "$safe-hklm-registry.json"
+}
+
+function Get-QuarantineVMHklmRegistryRegHostDir {
+    param(
+        [string]$ConfigPath,
+        [Parameter(Mandatory)][string]$SnapshotName
+    )
+    $settings = Get-QuarantineVMManifestSettings -ConfigPath $ConfigPath
+    $safe = Get-SafeSnapshotFileName -Name $SnapshotName
+    Join-Path $settings.LogDir "$safe-hklm-registry"
+}
+
 function Get-QuarantineVMUsnDeltaHostPath {
     param(
         [string]$ConfigPath,
@@ -168,6 +190,75 @@ function Get-QuarantineVMSysmonHostPath {
     $settings = Get-QuarantineVMManifestSettings -ConfigPath $ConfigPath
     $safe = Get-SafeSnapshotFileName -Name $SnapshotName
     Join-Path $settings.LogDir "$safe-sysmon.json"
+}
+
+function Remove-QuarantineSnapshotManifestArtifacts {
+    <#
+    .SYNOPSIS
+      Remove host-side manifest JSON and sidecars for a snapshot name.
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$ConfigPath,
+        [Parameter(Mandatory)][string]$SnapshotName
+    )
+
+    Initialize-QuarantineManifestConfig -ConfigPath $ConfigPath
+    $settings = Get-QuarantineVMManifestSettings -ConfigPath $ConfigPath
+    $safe = Get-SafeSnapshotFileName -Name $SnapshotName
+    $logDir = $settings.LogDir
+    if (-not (Test-Path -LiteralPath $logDir)) { return @() }
+
+    $removed = New-Object System.Collections.Generic.List[string]
+
+    $paths = @(
+        (Get-QuarantineVMManifestHostPath -ConfigPath $ConfigPath -SnapshotName $SnapshotName),
+        (Get-QuarantineVMManifestBaselineHostPath -ConfigPath $ConfigPath -SnapshotName $SnapshotName),
+        (Get-QuarantineVMPayloadRegistryHostPath -ConfigPath $ConfigPath -SnapshotName $SnapshotName),
+        (Get-QuarantineVMHklmRegistryHostPath -ConfigPath $ConfigPath -SnapshotName $SnapshotName),
+        (Get-QuarantineVMUsnDeltaHostPath -ConfigPath $ConfigPath -SnapshotName $SnapshotName),
+        (Get-QuarantineVMSysmonHostPath -ConfigPath $ConfigPath -SnapshotName $SnapshotName),
+        (Join-Path $settings.LogDir "$safe-regshot.hivu"),
+        (Join-Path $settings.LogDir "$safe-regshot-compare.txt")
+    )
+    foreach ($path in $paths) {
+        if ($path -and (Test-Path -LiteralPath $path)) {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+            $removed.Add($path) | Out-Null
+        }
+    }
+
+    $dirs = @(
+        (Get-QuarantineVMPayloadRegistryRegHostDir -ConfigPath $ConfigPath -SnapshotName $SnapshotName),
+        (Get-QuarantineVMHklmRegistryRegHostDir -ConfigPath $ConfigPath -SnapshotName $SnapshotName)
+    )
+    foreach ($dir in $dirs) {
+        if ($dir -and (Test-Path -LiteralPath $dir)) {
+            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+            $removed.Add($dir) | Out-Null
+        }
+    }
+
+    $leaf = "$safe.json"
+    Get-ChildItem -LiteralPath $logDir -Filter "$leaf.staging-*.json" -File -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+            $removed.Add($_.FullName) | Out-Null
+        }
+
+    $diffPatterns = @(
+        "diff-*-vs-$safe.diff.json",
+        "diff-$safe-vs-*.diff.json"
+    )
+    foreach ($pattern in $diffPatterns) {
+        Get-ChildItem -LiteralPath $logDir -Filter $pattern -File -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
+                $removed.Add($_.FullName) | Out-Null
+            }
+    }
+
+    return @($removed)
 }
 
 function Get-QuarantineVMSessionBaselineSnapshotName {
@@ -253,6 +344,7 @@ function Invoke-QuarantineLiveSnapshotEventCapture {
         [string]$ConfigPath,
         [Parameter(Mandatory)][string]$SnapshotName,
         [Parameter(Mandatory)][string]$FromBaselineSnapshotName,
+        [switch]$IncludeHklmRegistryCli,
         [int]$TimeoutMs = 900000
     )
 
@@ -274,9 +366,31 @@ function Invoke-QuarantineLiveSnapshotEventCapture {
     $hostUsn = Get-QuarantineVMUsnDeltaHostPath -ConfigPath $ConfigPath -SnapshotName $SnapshotName
     $hostSysmon = Get-QuarantineVMSysmonHostPath -ConfigPath $ConfigPath -SnapshotName $SnapshotName
 
+    $batchSteps = @(
+        [pscustomobject]@{
+            GuestScriptLeaf = (Split-Path -Leaf $settings.UsnDeltaScript)
+            GuestOutFile    = $guestUsnOut
+        },
+        [pscustomobject]@{
+            GuestScriptLeaf = (Split-Path -Leaf $settings.SysmonScript)
+            GuestOutFile    = $guestSysmonOut
+        }
+    )
+    if ($IncludeHklmRegistryCli) {
+        $guestHklmOut = Join-Path $guestDir 'hklm-registry-meta-host.json'
+        $batchSteps += [pscustomobject]@{
+            GuestScriptLeaf = (Split-Path -Leaf $settings.PrivilegedHklmExportScript)
+            GuestOutFile    = $guestHklmOut
+        }
+    }
+
     try {
-        Invoke-QuarantineGuestPrivilegedExportFromHost -ConfigPath $ConfigPath `
-            -GuestScriptLeaf (Split-Path -Leaf $settings.UsnDeltaScript) -GuestOutFile $guestUsnOut -TimeoutMs $TimeoutMs
+        Invoke-QuarantineGuestPrivilegedExportBatchFromHost -ConfigPath $ConfigPath -Steps $batchSteps -TimeoutMs $TimeoutMs
+    } catch {
+        Write-Warning "Privileged batch export failed: $($_.Exception.Message)"
+    }
+
+    try {
         Copy-QuarantineVMGuestFileFrom -GuestPath $guestUsnOut -HostPath $hostUsn -ConfigPath $ConfigPath -TimeoutMs $TimeoutMs
         Start-Sleep -Milliseconds 500
         if (Test-Path -LiteralPath $hostUsn) {
@@ -288,8 +402,6 @@ function Invoke-QuarantineLiveSnapshotEventCapture {
     }
 
     try {
-        Invoke-QuarantineGuestPrivilegedExportFromHost -ConfigPath $ConfigPath `
-            -GuestScriptLeaf (Split-Path -Leaf $settings.SysmonScript) -GuestOutFile $guestSysmonOut -TimeoutMs $TimeoutMs
         Copy-QuarantineVMGuestFileFrom -GuestPath $guestSysmonOut -HostPath $hostSysmon -ConfigPath $ConfigPath -TimeoutMs $TimeoutMs
         Start-Sleep -Milliseconds 500
         if (Test-Path -LiteralPath $hostSysmon) {
@@ -298,6 +410,15 @@ function Invoke-QuarantineLiveSnapshotEventCapture {
         }
     } catch {
         Write-Warning "Sysmon live capture failed: $($_.Exception.Message)"
+    }
+
+    if ($IncludeHklmRegistryCli) {
+        try {
+            Import-QuarantineHklmRegistryCliFromGuest -ConfigPath $ConfigPath -SnapshotName $SnapshotName `
+                -GuestMetaPath $guestHklmOut -TimeoutMs $TimeoutMs | Out-Null
+        } catch {
+            Write-Warning "HKLM registry import after batch failed: $($_.Exception.Message)"
+        }
     }
 
     return (Test-Path -LiteralPath $hostUsn) -or (Test-Path -LiteralPath $hostSysmon)
@@ -436,9 +557,10 @@ function Invoke-QuarantineLiveSnapshotManifestMark {
     $engine = Get-QuarantineRegistryEngine -ConfigPath $ConfigPath
 
     if ($isEvidence -and $FromBaselineSnapshotName) {
+        $includeHklm = ($engine -eq 'cli')
         Write-Host "Evidence capture vs baseline '$FromBaselineSnapshotName' (USN delta + Sysmon + registry)..."
         Invoke-QuarantineLiveSnapshotEventCapture -ConfigPath $ConfigPath -SnapshotName $SnapshotName `
-            -FromBaselineSnapshotName $FromBaselineSnapshotName -TimeoutMs $TimeoutMs | Out-Null
+            -FromBaselineSnapshotName $FromBaselineSnapshotName -IncludeHklmRegistryCli:$includeHklm -TimeoutMs $TimeoutMs | Out-Null
     } else {
         Set-QuarantineGuestUsnBaseline -ConfigPath $ConfigPath -SaveToHostForSnapshot $SnapshotName `
             -SkipGuestReadyWait -TimeoutMs $TimeoutMs | Out-Null
@@ -454,14 +576,18 @@ function Invoke-QuarantineLiveSnapshotManifestMark {
     } else {
         Invoke-QuarantinePayloadRegistryCliCapture -ConfigPath $ConfigPath -SnapshotName $SnapshotName `
             -TimeoutMs $TimeoutMs | Out-Null
+        if (-not ($isEvidence -and $FromBaselineSnapshotName -and $engine -eq 'cli')) {
+            Invoke-QuarantineHklmRegistryCliCapture -ConfigPath $ConfigPath -SnapshotName $SnapshotName `
+                -TimeoutMs $TimeoutMs | Out-Null
+        }
         if ($isEvidence) {
-            Write-Host "Live evidence captured for '$SnapshotName' (USN delta + Sysmon + reg.exe registry on host)."
+            Write-Host "Live evidence captured for '$SnapshotName' (USN delta + Sysmon + reg.exe HKU/HKLM on host)."
         } else {
-            Write-Host "Live baseline marked for '$SnapshotName' (USN + reg.exe registry on host)."
+            Write-Host "Live baseline marked for '$SnapshotName' (USN + reg.exe HKU/HKLM on host)."
         }
     }
 
-    Ensure-QuarantineGuestSysmonReady -ConfigPath $ConfigPath | Out-Null
+    Initialize-QuarantineGuestSysmonReady -ConfigPath $ConfigPath | Out-Null
 }
 
 function Invoke-QuarantineGuestRegshotCompareCapture {
@@ -751,7 +877,7 @@ function Merge-QuarantinePayloadUserRegistryIntoManifest {
         $merged.Add($entry) | Out-Null
     }
 
-    $manifest.registry = @($merged)
+    $manifest | Add-Member -NotePropertyName registry -NotePropertyValue ($merged.ToArray()) -Force
     $hkuCount = 0
     foreach ($entry in $merged) {
         if ($entry.k -match '^HKU:\\') { $hkuCount++ }
@@ -793,7 +919,7 @@ function Merge-QuarantinePayloadRegistryExportIntoManifest {
         $merged.Add($entry) | Out-Null
     }
 
-    $manifest.registry = @($merged)
+    $manifest | Add-Member -NotePropertyName registry -NotePropertyValue ($merged.ToArray()) -Force
     $hkuCount = 0
     foreach ($entry in $merged) {
         if ($entry.k -match '^HKU:\\') { $hkuCount++ }
@@ -907,6 +1033,167 @@ function Invoke-QuarantinePayloadRegistryCliCapture {
     $export | ConvertTo-Json -Depth 8 -Compress | Set-Content -LiteralPath $hostJson -Encoding UTF8
     Write-Host "Payload registry CLI saved for '$SnapshotName': $hostJson ($($ordered.Count) entries)"
     return $hostJson
+}
+
+function Merge-QuarantineHklmRegistryExportIntoManifest {
+    param(
+        [Parameter(Mandatory)][string]$HostManifestPath,
+        [Parameter(Mandatory)][object]$HklmExport
+    )
+
+    if (-not $HklmExport.registry -or @($HklmExport.registry).Count -eq 0) { return $false }
+    if (-not (Test-Path -LiteralPath $HostManifestPath)) { return $false }
+
+    $manifest = Get-Content -LiteralPath $HostManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $merged = New-Object System.Collections.Generic.List[object]
+    foreach ($entry in @($manifest.registry)) {
+        if ($entry.k -notmatch '^HKLM:\\') {
+            $merged.Add($entry) | Out-Null
+        }
+    }
+    foreach ($entry in @($HklmExport.registry)) {
+        $merged.Add($entry) | Out-Null
+    }
+
+    $manifest | Add-Member -NotePropertyName registry -NotePropertyValue ($merged.ToArray()) -Force
+    $hklmCount = 0
+    foreach ($entry in $merged) {
+        if ($entry.k -match '^HKLM:\\') { $hklmCount++ }
+    }
+    $manifest | Add-Member -NotePropertyName hklmRegistryCount -NotePropertyValue $hklmCount -Force
+    $manifest | Add-Member -NotePropertyName registryCount -NotePropertyValue $merged.Count -Force
+
+    $note = "Merged HKLM registry CLI: $(@($HklmExport.registry).Count) entries"
+    $warnings = if ($manifest.PSObject.Properties['userRegistryWarnings']) { @($manifest.userRegistryWarnings) } else { @() }
+    if ($warnings -notcontains $note) {
+        $manifest | Add-Member -NotePropertyName userRegistryWarnings -NotePropertyValue (@($warnings) + @($note)) -Force
+    }
+    if ($HklmExport.computerName) {
+        $manifest | Add-Member -NotePropertyName computerName -NotePropertyValue ([string]$HklmExport.computerName) -Force
+    }
+
+    Save-QuarantineManifestHostFile -Manifest $manifest -HostPath $HostManifestPath
+    Write-Host $note
+    return $true
+}
+
+function Import-QuarantineHklmRegistryCliFromGuest {
+    [CmdletBinding()]
+    param(
+        [string]$ConfigPath,
+        [Parameter(Mandatory)][string]$SnapshotName,
+        [Parameter(Mandatory)][string]$GuestMetaPath,
+        [int]$TimeoutMs = 900000
+    )
+
+    Initialize-QuarantineManifestConfig -ConfigPath $ConfigPath
+    $settings = Get-QuarantineVMManifestSettings -ConfigPath $ConfigPath
+    $cfg = $settings.Config
+    $guestDir = if ($cfg.guest.copyTargetDir) { [string]$cfg.guest.copyTargetDir } else { 'C:\Users\Public\Quarantine' }
+    $guestCliDir = Join-Path $guestDir 'hklm-registry-cli'
+
+    Start-Sleep -Milliseconds 500
+    $hostRegDir = Get-QuarantineVMHklmRegistryRegHostDir -ConfigPath $ConfigPath -SnapshotName $SnapshotName
+    if (-not (Test-Path -LiteralPath $hostRegDir)) {
+        New-Item -ItemType Directory -Path $hostRegDir -Force | Out-Null
+    }
+
+    $hostMeta = Join-Path $hostRegDir 'hklm-registry-meta.json'
+    Copy-QuarantineVMGuestFileFrom -GuestPath $GuestMetaPath -HostPath $hostMeta -ConfigPath $ConfigPath -TimeoutMs $TimeoutMs
+    if (-not (Test-Path -LiteralPath $hostMeta)) {
+        Write-Warning "HKLM registry CLI meta missing on host: $hostMeta"
+        return $null
+    }
+
+    $meta = Get-Content -LiteralPath $hostMeta -Raw -Encoding UTF8 | ConvertFrom-Json
+    $entryMap = @{}
+    $ordered = New-Object System.Collections.Generic.List[object]
+
+    foreach ($guestReg in @($meta.regFiles)) {
+        $leaf = Split-Path -Leaf $guestReg
+        $hostReg = Join-Path $hostRegDir $leaf
+        $guestRegPath = if ([string]$guestReg -like "$guestCliDir*") { $guestReg } else { Join-Path $guestCliDir $leaf }
+        Copy-QuarantineVMGuestFileFrom -GuestPath $guestRegPath -HostPath $hostReg -ConfigPath $ConfigPath -TimeoutMs $TimeoutMs
+        if (-not (Test-Path -LiteralPath $hostReg)) { continue }
+
+        $parsed = ConvertFrom-RegExportFile -Path $hostReg -Sid 'LOCAL_MACHINE' -UserName ''
+        foreach ($entry in @($parsed.registry)) {
+            $key = "$($entry.k)|$($entry.n)"
+            if (-not $entryMap.ContainsKey($key)) {
+                $entryMap[$key] = $true
+                $ordered.Add($entry) | Out-Null
+            }
+        }
+    }
+
+    $hostJson = Get-QuarantineVMHklmRegistryHostPath -ConfigPath $ConfigPath -SnapshotName $SnapshotName
+    $export = [ordered]@{
+        engine       = 'cli'
+        scope        = 'hklm'
+        capturedAt   = (Get-Date).ToUniversalTime().ToString('o')
+        snapshot     = $SnapshotName
+        computerName = if ($meta.computerName) { [string]$meta.computerName } else { '' }
+        entryCount   = $ordered.Count
+        regHostDir   = $hostRegDir
+        registry     = $ordered.ToArray()
+    }
+    $export | ConvertTo-Json -Depth 8 -Compress | Set-Content -LiteralPath $hostJson -Encoding UTF8
+    Write-Host "HKLM registry CLI saved for '$SnapshotName': $hostJson ($($ordered.Count) entries)"
+    return $hostJson
+}
+
+function Invoke-QuarantineHklmRegistryCliCapture {
+    [CmdletBinding()]
+    param(
+        [string]$ConfigPath,
+        [Parameter(Mandatory)][string]$SnapshotName,
+        [switch]$SkipPrivilegedExport,
+        [int]$TimeoutMs = 900000
+    )
+
+    Initialize-QuarantineManifestConfig -ConfigPath $ConfigPath
+    $settings = Get-QuarantineVMManifestSettings -ConfigPath $ConfigPath
+    $cfg = $settings.Config
+    $guestDir = if ($cfg.guest.copyTargetDir) { [string]$cfg.guest.copyTargetDir } else { 'C:\Users\Public\Quarantine' }
+
+    if (-not $SkipPrivilegedExport -and -not (Test-QuarantineGuestPrivilegedExportTaskReady -ConfigPath $ConfigPath)) {
+        Write-Warning 'HKLM registry CLI skipped: SYSTEM privileged export task not registered (run elevated grant in guest).'
+        return $null
+    }
+
+    Copy-QuarantineVMGuestFile -Path $settings.HklmRegistryCliScript -ConfigPath $ConfigPath -TargetDirectory $guestDir
+    Copy-QuarantineVMGuestFile -Path $settings.PrivilegedHklmExportScript -ConfigPath $ConfigPath -TargetDirectory $guestDir
+
+    $guestOut = Join-Path $guestDir 'hklm-registry-meta-host.json'
+
+    if (-not $SkipPrivilegedExport) {
+        try {
+            Invoke-QuarantineGuestPrivilegedExportFromHost -ConfigPath $ConfigPath `
+                -GuestScriptLeaf (Split-Path -Leaf $settings.PrivilegedHklmExportScript) `
+                -GuestOutFile $guestOut -TimeoutMs $TimeoutMs
+        } catch {
+            Write-Warning "HKLM registry CLI privileged export failed: $($_.Exception.Message)"
+            return $null
+        }
+    }
+
+    return Import-QuarantineHklmRegistryCliFromGuest -ConfigPath $ConfigPath -SnapshotName $SnapshotName `
+        -GuestMetaPath $guestOut -TimeoutMs $TimeoutMs
+}
+
+function Merge-QuarantineHklmRegistrySidecarIntoManifest {
+    param(
+        [string]$ConfigPath,
+        [Parameter(Mandatory)][string]$SnapshotName,
+        [Parameter(Mandatory)][string]$HostManifestPath
+    )
+
+    $sidecar = Get-QuarantineVMHklmRegistryHostPath -ConfigPath $ConfigPath -SnapshotName $SnapshotName
+    if (-not (Test-Path -LiteralPath $sidecar)) { return $false }
+    if (-not (Test-Path -LiteralPath $HostManifestPath)) { return $false }
+
+    $hklm = Get-Content -LiteralPath $sidecar -Raw -Encoding UTF8 | ConvertFrom-Json
+    return (Merge-QuarantineHklmRegistryExportIntoManifest -HostManifestPath $HostManifestPath -HklmExport $hklm)
 }
 
 function Merge-QuarantinePayloadRegistrySidecarIntoManifest {
@@ -1030,6 +1317,193 @@ function Wait-QuarantineVMGuestReady {
     throw 'Guest control did not become ready within timeout.'
 }
 
+function Test-QuarantineGuestPrivilegedExportTaskReady {
+    param([string]$ConfigPath)
+
+    $settings = Get-QuarantineVMManifestSettings -ConfigPath $ConfigPath
+    $guestDir = $settings.Config.guest.copyTargetDir
+    if (-not $guestDir) { $guestDir = 'C:\Users\Public\Quarantine' }
+    $probeHost = Join-Path $script:ProjectRoot 'guest\Test-QuarantineGuestPrivilegedExportTask.ps1'
+    if (-not (Test-Path -LiteralPath $probeHost)) { return $false }
+
+    Copy-QuarantineVMGuestFile -Path $probeHost -ConfigPath $ConfigPath -TargetDirectory $guestDir -ErrorAction SilentlyContinue | Out-Null
+    $probeGuest = Join-Path $guestDir (Split-Path -Leaf $probeHost)
+
+    try {
+        $out = Invoke-QuarantineVMGuestRun -ConfigPath $ConfigPath -TimeoutMs 30000 `
+            -Exe 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' `
+            -Command @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $probeGuest)
+        return (($out | Out-String) -match 'PRIV_TASK_OK')
+    } catch {
+        if ($_.Exception.Message -match 'PRIV_TASK_OK') { return $true }
+        return $false
+    }
+}
+
+function Clear-QuarantineGuestPrivilegedJobDone {
+    param(
+        [string]$ConfigPath,
+        [Parameter(Mandatory)][string]$DoneGuest,
+        [int]$TimeoutMs = 30000
+    )
+
+    try {
+        Invoke-QuarantineVMGuestRun -ConfigPath $ConfigPath -TimeoutMs $TimeoutMs `
+            -Exe 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' `
+            -Command @(
+                '-NoProfile',
+                '-Command',
+                "Remove-Item -LiteralPath '$DoneGuest' -Force -ErrorAction SilentlyContinue"
+            ) | Out-Null
+    } catch {
+        Write-Verbose "Could not clear privileged job done file: $($_.Exception.Message)"
+    }
+}
+
+function Copy-QuarantineGuestPrivilegedExportDependencies {
+    param(
+        [string]$ConfigPath,
+        [object]$Settings,
+        [string]$GuestDir,
+        [switch]$IncludeHklmRegistry
+    )
+
+    if (-not $Settings) {
+        $Settings = Get-QuarantineVMManifestSettings -ConfigPath $ConfigPath
+    }
+    if (-not $GuestDir) {
+        $GuestDir = $Settings.Config.guest.copyTargetDir
+        if (-not $GuestDir) { $GuestDir = 'C:\Users\Public\Quarantine' }
+    }
+
+    Copy-QuarantineVMGuestFile -Path $Settings.UsnDeltaScript -ConfigPath $ConfigPath -TargetDirectory $GuestDir -ErrorAction SilentlyContinue | Out-Null
+    Copy-QuarantineVMGuestFile -Path $Settings.SysmonScript -ConfigPath $ConfigPath -TargetDirectory $GuestDir -ErrorAction SilentlyContinue | Out-Null
+    if ($Settings.PrivModule -and (Test-Path -LiteralPath $Settings.PrivModule)) {
+        Copy-QuarantineVMGuestFile -Path $Settings.PrivModule -ConfigPath $ConfigPath -TargetDirectory $GuestDir
+    }
+    if ($Settings.PrivilegedWorkerScript -and (Test-Path -LiteralPath $Settings.PrivilegedWorkerScript)) {
+        Copy-QuarantineVMGuestFile -Path $Settings.PrivilegedWorkerScript -ConfigPath $ConfigPath -TargetDirectory $GuestDir
+    }
+    if ($IncludeHklmRegistry) {
+        Copy-QuarantineVMGuestFile -Path $Settings.HklmRegistryCliScript -ConfigPath $ConfigPath -TargetDirectory $GuestDir
+        Copy-QuarantineVMGuestFile -Path $Settings.PrivilegedHklmExportScript -ConfigPath $ConfigPath -TargetDirectory $GuestDir
+    }
+}
+
+function Start-QuarantineGuestPrivilegedExportTaskNow {
+    param([string]$ConfigPath)
+
+    try {
+        Invoke-QuarantineVMGuestRun -ConfigPath $ConfigPath -TimeoutMs 60000 `
+            -Exe 'C:\Windows\System32\schtasks.exe' `
+            -Command @('/Run', '/TN', 'QuarantineLabPrivilegedExport') | Out-Null
+    } catch {
+        Write-Verbose "Could not trigger privileged export task immediately: $($_.Exception.Message)"
+    }
+}
+
+function Wait-QuarantineGuestPrivilegedJobDone {
+    param(
+        [string]$ConfigPath,
+        [Parameter(Mandatory)][string]$DoneGuest,
+        [datetime]$WaitStarted,
+        [int]$TimeoutMs = 300000,
+        [string]$Label = 'privileged export'
+    )
+
+    $deadline = (Get-Date).AddMilliseconds($TimeoutMs)
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 750
+        try {
+            $hostDone = Join-Path $env:TEMP "privileged-done-$PID.txt"
+            if (Test-Path -LiteralPath $hostDone) { Remove-Item -LiteralPath $hostDone -Force -ErrorAction SilentlyContinue }
+            Copy-QuarantineVMGuestFileFrom -GuestPath $doneGuest -HostPath $hostDone -ConfigPath $ConfigPath -TimeoutMs 30000
+            if (Test-Path -LiteralPath $hostDone) {
+                $doneAt = (Get-Item -LiteralPath $hostDone).LastWriteTimeUtc
+                if ($doneAt -ge $WaitStarted.AddSeconds(-5)) {
+                    Remove-Item -LiteralPath $hostDone -Force -ErrorAction SilentlyContinue
+                    return
+                }
+                Remove-Item -LiteralPath $hostDone -Force -ErrorAction SilentlyContinue
+            }
+        } catch { }
+    }
+    throw "SYSTEM $Label timed out after ${TimeoutMs}ms."
+}
+
+function Invoke-QuarantineGuestPrivilegedExportBatchFromHost {
+    param(
+        [string]$ConfigPath,
+        [Parameter(Mandatory)]
+        [object[]]$Steps,
+        [int]$TimeoutMs = 300000
+    )
+
+    if (-not $Steps -or $Steps.Count -eq 0) {
+        throw 'Privileged export batch requires at least one step.'
+    }
+
+    $settings = Get-QuarantineVMManifestSettings -ConfigPath $ConfigPath
+    $guestDir = $settings.Config.guest.copyTargetDir
+    if (-not $guestDir) { $guestDir = 'C:\Users\Public\Quarantine' }
+
+    $includeHklm = $false
+    foreach ($step in $Steps) {
+        $leaf = if ($step.GuestScriptLeaf) { [string]$step.GuestScriptLeaf } else { Split-Path -Leaf ([string]$step.scriptPath) }
+        if ($leaf -match 'PrivilegedHklm|HklmRegistry') { $includeHklm = $true }
+    }
+    Copy-QuarantineGuestPrivilegedExportDependencies -ConfigPath $ConfigPath -Settings $settings -GuestDir $guestDir -IncludeHklmRegistry:$includeHklm
+
+    $taskName = 'QuarantineLabPrivilegedExport'
+    $doneGuest = Join-Path $guestDir 'privileged-job.done'
+    $taskPresent = Test-QuarantineGuestPrivilegedExportTaskReady -ConfigPath $ConfigPath
+
+    $jobSteps = @()
+    $labels = New-Object System.Collections.Generic.List[string]
+    foreach ($step in $Steps) {
+        $leaf = [string]$step.GuestScriptLeaf
+        $outFile = [string]$step.GuestOutFile
+        if ([string]::IsNullOrWhiteSpace($leaf) -or [string]::IsNullOrWhiteSpace($outFile)) {
+            throw 'Each privileged batch step requires GuestScriptLeaf and GuestOutFile.'
+        }
+        $scriptGuest = Join-Path $guestDir $leaf
+        $jobSteps += @{ scriptPath = $scriptGuest; outFile = $outFile }
+        $labels.Add($leaf) | Out-Null
+    }
+
+    if ($taskPresent) {
+        $uploadName = "privileged-job-upload-$([guid]::NewGuid().ToString('n')).json"
+        $hostJob = Join-Path $env:TEMP $uploadName
+        (@{ steps = $jobSteps } | ConvertTo-Json -Depth 6 -Compress) | Set-Content -LiteralPath $hostJob -Encoding UTF8
+        Copy-QuarantineVMGuestFile -Path $hostJob -ConfigPath $ConfigPath -TargetDirectory $guestDir
+        Remove-Item -LiteralPath $hostJob -Force -ErrorAction SilentlyContinue
+
+        $waitStarted = (Get-Date).ToUniversalTime()
+        Clear-QuarantineGuestPrivilegedJobDone -ConfigPath $ConfigPath -DoneGuest $doneGuest
+        Start-QuarantineGuestPrivilegedExportTaskNow -ConfigPath $ConfigPath
+
+        $labelText = ($labels -join ', ')
+        Write-Verbose "Waiting for SYSTEM task '$taskName' ($($Steps.Count) step(s): $labelText)..."
+        Wait-QuarantineGuestPrivilegedJobDone -ConfigPath $ConfigPath -DoneGuest $doneGuest `
+            -WaitStarted $waitStarted -TimeoutMs $TimeoutMs -Label "privileged batch ($labelText)"
+        Write-Host "Privileged export finished (SYSTEM task, $($Steps.Count) step(s)): $labelText"
+        return
+    }
+
+    foreach ($step in $Steps) {
+        $scriptGuest = Join-Path $guestDir ([string]$step.GuestScriptLeaf)
+        $outFile = [string]$step.GuestOutFile
+        $output = Invoke-QuarantineVMGuestRun -ConfigPath $ConfigPath -TimeoutMs $TimeoutMs `
+            -Exe 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' `
+            -Command @(
+                '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $scriptGuest,
+                '-OutFile', $outFile
+            )
+        if ($output) { $output | ForEach-Object { Write-Host $_ } }
+    }
+    Start-Sleep -Milliseconds 750
+}
+
 function Invoke-QuarantineGuestPrivilegedExportFromHost {
     param(
         [string]$ConfigPath,
@@ -1038,73 +1512,9 @@ function Invoke-QuarantineGuestPrivilegedExportFromHost {
         [int]$TimeoutMs = 300000
     )
 
-    $settings = Get-QuarantineVMManifestSettings -ConfigPath $ConfigPath
-    $guestDir = $settings.Config.guest.copyTargetDir
-    if (-not $guestDir) { $guestDir = 'C:\Users\Public\Quarantine' }
-    $scriptGuest = Join-Path $guestDir $GuestScriptLeaf
-    $privModule = Join-Path $script:ManifestRoot 'QuarantineGuestPriv.psm1'
-    $workerHost = Join-Path $script:ProjectRoot 'guest\Invoke-QuarantinePrivilegedExportWorker.ps1'
-
-    Copy-QuarantineVMGuestFile -Path $settings.UsnDeltaScript -ConfigPath $ConfigPath -TargetDirectory $guestDir -ErrorAction SilentlyContinue | Out-Null
-    Copy-QuarantineVMGuestFile -Path $settings.SysmonScript -ConfigPath $ConfigPath -TargetDirectory $guestDir -ErrorAction SilentlyContinue | Out-Null
-    if (Test-Path -LiteralPath $privModule) {
-        Copy-QuarantineVMGuestFile -Path $privModule -ConfigPath $ConfigPath -TargetDirectory $guestDir
-    }
-    if (Test-Path -LiteralPath $workerHost) {
-        Copy-QuarantineVMGuestFile -Path $workerHost -ConfigPath $ConfigPath -TargetDirectory $guestDir
-    }
-
-    $taskName = 'QuarantineLabPrivilegedExport'
-    $jobGuest = Join-Path $guestDir 'privileged-job.json'
-    $doneGuest = Join-Path $guestDir 'privileged-job.done'
-    $taskPresent = $false
-    try {
-        $taskCheck = Invoke-QuarantineVMGuestRun -ConfigPath $ConfigPath -TimeoutMs 30000 `
-            -Command @('schtasks.exe', '/Query', '/TN', $taskName)
-        if (($taskCheck | Out-String) -match 'QuarantineLabPrivilegedExport') {
-            $taskPresent = $true
-        }
-    } catch {
-        Write-Verbose "SYSTEM export task not registered; using direct guest script run."
-    }
-
-    if ($taskPresent) {
-        $hostJob = Join-Path $env:TEMP 'privileged-job.json'
-        (@{ scriptPath = $scriptGuest; outFile = $GuestOutFile } | ConvertTo-Json -Compress) | Set-Content -LiteralPath $hostJob -Encoding UTF8
-        Copy-QuarantineVMGuestFile -Path $hostJob -ConfigPath $ConfigPath -TargetDirectory $guestDir
-        $guestJobUploaded = Join-Path $guestDir (Split-Path -Leaf $hostJob)
-        Invoke-QuarantineVMGuestRun -ConfigPath $ConfigPath -TimeoutMs 60000 -Exe 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' `
-            -Command @('-NoProfile', '-Command', "Move-Item -LiteralPath '$guestJobUploaded' -Destination '$jobGuest' -Force; Remove-Item -LiteralPath '$doneGuest' -Force -ErrorAction SilentlyContinue") | Out-Null
-        Remove-Item -LiteralPath $hostJob -Force -ErrorAction SilentlyContinue
-
-        Invoke-QuarantineVMGuestRun -ConfigPath $ConfigPath -TimeoutMs 60000 `
-            -Command @('schtasks.exe', '/Run', '/TN', $taskName) | Out-Null
-
-        $deadline = (Get-Date).AddMilliseconds($TimeoutMs)
-        while ((Get-Date) -lt $deadline) {
-            Start-Sleep -Milliseconds 750
-            try {
-                $hostDone = Join-Path $env:TEMP "privileged-done-$PID.txt"
-                Copy-QuarantineVMGuestFileFrom -GuestPath $doneGuest -HostPath $hostDone -ConfigPath $ConfigPath -TimeoutMs 30000
-                if (Test-Path -LiteralPath $hostDone) {
-                    Remove-Item -LiteralPath $hostDone -Force -ErrorAction SilentlyContinue
-                    Write-Host "Privileged export finished (SYSTEM task): $GuestScriptLeaf"
-                    return
-                }
-            } catch { }
-        }
-        throw "SYSTEM privileged export timed out: $GuestScriptLeaf"
-    }
-
-    $output = Invoke-QuarantineVMGuestRun -ConfigPath $ConfigPath -TimeoutMs $TimeoutMs `
-        -Exe 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' `
-        -Command @(
-            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $scriptGuest,
-            '-OutFile', $GuestOutFile
-        )
-
-    if ($output) { $output | ForEach-Object { Write-Host $_ } }
-    Start-Sleep -Milliseconds 750
+    Invoke-QuarantineGuestPrivilegedExportBatchFromHost -ConfigPath $ConfigPath -TimeoutMs $TimeoutMs -Steps @(
+        [pscustomobject]@{ GuestScriptLeaf = $GuestScriptLeaf; GuestOutFile = $GuestOutFile }
+    )
 }
 
 function Invoke-QuarantineVMGuestManifestCapture {
@@ -1144,16 +1554,18 @@ function Invoke-QuarantineVMGuestManifestCapture {
             $usnOut = Join-Path $guestDir 'usn-delta-export.json'
             $sysmonOut = Join-Path $guestDir 'sysmon-events-export.json'
             try {
-                Invoke-QuarantineGuestPrivilegedExportFromHost -ConfigPath $ConfigPath `
-                    -GuestScriptLeaf (Split-Path -Leaf $settings.UsnDeltaScript) -GuestOutFile $usnOut -TimeoutMs $TimeoutMs
+                Invoke-QuarantineGuestPrivilegedExportBatchFromHost -ConfigPath $ConfigPath -TimeoutMs $TimeoutMs -Steps @(
+                    [pscustomobject]@{
+                        GuestScriptLeaf = (Split-Path -Leaf $settings.UsnDeltaScript)
+                        GuestOutFile    = $usnOut
+                    },
+                    [pscustomobject]@{
+                        GuestScriptLeaf = (Split-Path -Leaf $settings.SysmonScript)
+                        GuestOutFile    = $sysmonOut
+                    }
+                )
             } catch {
-                Write-Warning "USN privileged export skipped: $($_.Exception.Message)"
-            }
-            try {
-                Invoke-QuarantineGuestPrivilegedExportFromHost -ConfigPath $ConfigPath `
-                    -GuestScriptLeaf (Split-Path -Leaf $settings.SysmonScript) -GuestOutFile $sysmonOut -TimeoutMs $TimeoutMs
-            } catch {
-                Write-Warning "Sysmon privileged export skipped: $($_.Exception.Message)"
+                Write-Warning "Privileged export batch skipped: $($_.Exception.Message)"
             }
 
             $scanMode = if ($settings.ScanMode) { [string]$settings.ScanMode } else { 'events' }
@@ -1274,7 +1686,7 @@ try {
     return $false
 }
 
-function Ensure-QuarantineGuestSysmonReady {
+function Initialize-QuarantineGuestSysmonReady {
     <#
     .SYNOPSIS
       Ensure Sysmon is installed in the guest before manifest capture.
@@ -1413,7 +1825,7 @@ function Export-QuarantineVMManifestFromSnapshot {
 
         $hostPath = Get-QuarantineVMManifestHostPath -ConfigPath $ConfigPath -SnapshotName $SnapshotName
 
-        Ensure-QuarantineVMMutable -ConfigPath $ConfigPath -VmName $vmName -Reason 'capture manifest offline'
+        Initialize-QuarantineVMMutable -ConfigPath $ConfigPath -VmName $vmName -Reason 'capture manifest offline'
 
         Set-QuarantineVMManifestOfflineNetwork -ConfigPath $ConfigPath
 
@@ -1424,7 +1836,7 @@ function Export-QuarantineVMManifestFromSnapshot {
 
         Wait-QuarantineVMGuestReady -ConfigPath $ConfigPath
 
-        Ensure-QuarantineGuestSysmonReady -ConfigPath $ConfigPath | Out-Null
+        Initialize-QuarantineGuestSysmonReady -ConfigPath $ConfigPath | Out-Null
 
         if ($InjectBaselineHostPath) {
             $onlyIfGuestMissing = $true
@@ -1514,6 +1926,8 @@ function Publish-QuarantineManifestFromLiveSidecars {
         return $null
     }
 
+    $hklmPath = Get-QuarantineVMHklmRegistryHostPath -ConfigPath $ConfigPath -SnapshotName $SnapshotName
+
     $hostPath = Get-QuarantineVMManifestHostPath -ConfigPath $ConfigPath -SnapshotName $SnapshotName
     $baselinePath = Get-QuarantineVMManifestBaselineHostPath -ConfigPath $ConfigPath -SnapshotName $SnapshotName
     $usnPath = Get-QuarantineVMUsnDeltaHostPath -ConfigPath $ConfigPath -SnapshotName $SnapshotName
@@ -1559,38 +1973,40 @@ function Publish-QuarantineManifestFromLiveSidecars {
     if ($payload.capturedAt) {
         $manifest | Add-Member -NotePropertyName capturedAt -NotePropertyValue ([string]$payload.capturedAt) -Force
     }
+    if ($payload.PSObject.Properties['computerName'] -and $payload.computerName) {
+        $manifest | Add-Member -NotePropertyName computerName -NotePropertyValue ([string]$payload.computerName) -Force
+    }
+    $scanModeValue = if ($settings.ScanMode) { [string]$settings.ScanMode } else { 'events' }
     $manifest | Add-Member -NotePropertyName registryEngine -NotePropertyValue 'cli' -Force
-    $manifest | Add-Member -NotePropertyName scanMode -NotePropertyValue (if ($settings.ScanMode) { [string]$settings.ScanMode } else { 'events' }) -Force
+    $manifest | Add-Member -NotePropertyName scanMode -NotePropertyValue $scanModeValue -Force
     $manifest | Add-Member -NotePropertyName usn -NotePropertyValue $usn -Force
     $manifest | Add-Member -NotePropertyName sysmon -NotePropertyValue $sysmon -Force
-    $manifest | Add-Member -NotePropertyName liveCapture -NotePropertyValue ([ordered]@{
-        registrySidecar = $registryPath
-        usnSidecar      = if (Test-Path -LiteralPath $usnPath) { $usnPath } else { $null }
-        sysmonSidecar   = if (Test-Path -LiteralPath $sysmonPath) { $sysmonPath } else { $null }
-        usnBaseline     = if (Test-Path -LiteralPath $baselinePath) { $baselinePath } else { $null }
-        capturedAt      = if ($payload.capturedAt) { [string]$payload.capturedAt } else { $null }
-    }) -Force
+    $liveCaptureMeta = [ordered]@{
+        registrySidecar     = $registryPath
+        hklmRegistrySidecar = if (Test-Path -LiteralPath $hklmPath) { $hklmPath } else { $null }
+        usnSidecar          = if (Test-Path -LiteralPath $usnPath) { $usnPath } else { $null }
+        sysmonSidecar       = if (Test-Path -LiteralPath $sysmonPath) { $sysmonPath } else { $null }
+        usnBaseline         = if (Test-Path -LiteralPath $baselinePath) { $baselinePath } else { $null }
+        capturedAt          = if ($payload.capturedAt) { [string]$payload.capturedAt } else { $null }
+    }
+    $manifest | Add-Member -NotePropertyName liveCapture -NotePropertyValue $liveCaptureMeta -Force
 
     if (Test-Path -LiteralPath $hostPath) {
         Merge-QuarantinePayloadRegistryExportIntoManifest -HostManifestPath $hostPath -PayloadExport $payload | Out-Null
+        Merge-QuarantineHklmRegistrySidecarIntoManifest -ConfigPath $ConfigPath -SnapshotName $SnapshotName -HostManifestPath $hostPath | Out-Null
         $manifest = Get-Content -LiteralPath $hostPath -Raw -Encoding UTF8 | ConvertFrom-Json
         $manifest | Add-Member -NotePropertyName usn -NotePropertyValue $usn -Force
         $manifest | Add-Member -NotePropertyName sysmon -NotePropertyValue $sysmon -Force
-        $manifest | Add-Member -NotePropertyName liveCapture -NotePropertyValue ([ordered]@{
-            registrySidecar = $registryPath
-            usnSidecar      = if (Test-Path -LiteralPath $usnPath) { $usnPath } else { $null }
-            sysmonSidecar   = if (Test-Path -LiteralPath $sysmonPath) { $sysmonPath } else { $null }
-            usnBaseline     = if (Test-Path -LiteralPath $baselinePath) { $baselinePath } else { $null }
-            capturedAt      = if ($payload.capturedAt) { [string]$payload.capturedAt } else { $null }
-        }) -Force
+        $manifest | Add-Member -NotePropertyName liveCapture -NotePropertyValue $liveCaptureMeta -Force
         Save-QuarantineManifestHostFile -Manifest $manifest -HostPath $hostPath
     } else {
-        $manifest.registry = @($payload.registry)
+        $manifest | Add-Member -NotePropertyName registry -NotePropertyValue @($payload.registry) -Force
         $manifest | Add-Member -NotePropertyName registryCount -NotePropertyValue @($payload.registry).Count -Force
         $manifest | Add-Member -NotePropertyName userRegistryCount -NotePropertyValue @($payload.registry | Where-Object { $_.k -match '^HKU:\\' }).Count -Force
         $note = "Live sidecar registry ($($payload.userName), $($payload.sid)): $(@($payload.registry).Count) entries"
         $manifest | Add-Member -NotePropertyName userRegistryWarnings -NotePropertyValue @($note) -Force
         Save-QuarantineManifestHostFile -Manifest $manifest -HostPath $hostPath
+        Merge-QuarantineHklmRegistrySidecarIntoManifest -ConfigPath $ConfigPath -SnapshotName $SnapshotName -HostManifestPath $hostPath | Out-Null
     }
 
     return $hostPath
@@ -1658,9 +2074,11 @@ Restore that snapshot (or re-preserve) and run:
         if (Test-QuarantineCliRegistryEngine -ConfigPath $ConfigPath) {
             if (Test-Path -LiteralPath $fromPath) {
                 Merge-QuarantinePayloadRegistrySidecarIntoManifest -ConfigPath $ConfigPath -SnapshotName $fromSnap -HostManifestPath $fromPath | Out-Null
+                Merge-QuarantineHklmRegistrySidecarIntoManifest -ConfigPath $ConfigPath -SnapshotName $fromSnap -HostManifestPath $fromPath | Out-Null
             }
             if (Test-Path -LiteralPath $toPath) {
                 Merge-QuarantinePayloadRegistrySidecarIntoManifest -ConfigPath $ConfigPath -SnapshotName $toSnap -HostManifestPath $toPath | Out-Null
+                Merge-QuarantineHklmRegistrySidecarIntoManifest -ConfigPath $ConfigPath -SnapshotName $toSnap -HostManifestPath $toPath | Out-Null
             }
         }
 
@@ -1735,9 +2153,11 @@ Restore that snapshot (or re-preserve) and run:
     if (Test-QuarantineCliRegistryEngine -ConfigPath $ConfigPath) {
         if (Test-Path -LiteralPath $fromPath) {
             Merge-QuarantinePayloadRegistrySidecarIntoManifest -ConfigPath $ConfigPath -SnapshotName $fromSnap -HostManifestPath $fromPath | Out-Null
+            Merge-QuarantineHklmRegistrySidecarIntoManifest -ConfigPath $ConfigPath -SnapshotName $fromSnap -HostManifestPath $fromPath | Out-Null
         }
         if (Test-Path -LiteralPath $toPath) {
             Merge-QuarantinePayloadRegistrySidecarIntoManifest -ConfigPath $ConfigPath -SnapshotName $toSnap -HostManifestPath $toPath | Out-Null
+            Merge-QuarantineHklmRegistrySidecarIntoManifest -ConfigPath $ConfigPath -SnapshotName $toSnap -HostManifestPath $toPath | Out-Null
         }
     }
 
@@ -1790,7 +2210,7 @@ function Compare-QuarantineVMSnapshots {
     }
 
     $jsonPath = [System.IO.Path]::ChangeExtension($ReportPath, '.diff.json')
-    & $settings.CompareScript -From $fromPath -To $toPath -ReportPath $ReportPath -JsonPath $jsonPath
+    & $settings.CompareScript -From $fromPath -To $toPath -ReportPath $ReportPath -JsonPath $jsonPath -ConfigPath $ConfigPath
     return $ReportPath
 }
 
@@ -1807,7 +2227,9 @@ function Export-QuarantineManifestDiffJson {
         [Parameter(Mandatory)]
         [string]$ToPath,
 
-        [string]$JsonPath
+        [string]$JsonPath,
+
+        [string]$ConfigPath
     )
 
     if (-not $JsonPath) {
@@ -1816,12 +2238,15 @@ function Export-QuarantineManifestDiffJson {
         $JsonPath = Join-Path (Split-Path -Parent $FromPath) "diff-${fromLeaf}-vs-${toLeaf}.diff.json"
     }
 
-    $diff = Get-QuarantineManifestDiff -From $FromPath -To $ToPath
+    $diff = Get-QuarantineManifestDiff -From $FromPath -To $ToPath -ConfigPath $ConfigPath
     $jsonDir = Split-Path -Parent $JsonPath
     if ($jsonDir -and -not (Test-Path -LiteralPath $jsonDir)) {
         New-Item -ItemType Directory -Path $jsonDir -Force | Out-Null
     }
     $diff | ConvertTo-Json -Depth 8 -Compress | Set-Content -LiteralPath $JsonPath -Encoding UTF8
+    if (-not (Test-Path -LiteralPath $JsonPath)) {
+        throw "Diff JSON was not written: $JsonPath"
+    }
     return $JsonPath
 }
 
@@ -1860,6 +2285,7 @@ function Invoke-QuarantineManifestCaptureLive {
     }
 
     Invoke-QuarantinePayloadRegistryCliCapture -ConfigPath $ConfigPath -SnapshotName $snap -TimeoutMs $TimeoutMs | Out-Null
+    Invoke-QuarantineHklmRegistryCliCapture -ConfigPath $ConfigPath -SnapshotName $snap -TimeoutMs $TimeoutMs | Out-Null
     return (Publish-QuarantineManifestFromLiveSidecars -ConfigPath $ConfigPath -SnapshotName $snap)
 }
 
@@ -1900,7 +2326,7 @@ function Open-QuarantineManifestDiffViewer {
         $DiffJsonPath = Join-Path $settings.LogDir "diff-${safeFrom}-vs-${safeTo}.diff.json"
     }
 
-    $DiffJsonPath = Export-QuarantineManifestDiffJson -FromPath $fromPath -ToPath $toPath -JsonPath $DiffJsonPath
+    $DiffJsonPath = Export-QuarantineManifestDiffJson -FromPath $fromPath -ToPath $toPath -JsonPath $DiffJsonPath -ConfigPath $ConfigPath
     Write-Host "Diff JSON: $DiffJsonPath"
 
     $openScript = Join-Path $script:ManifestRoot 'viewer\Open-ManifestDiffViewer.ps1'
@@ -2096,8 +2522,16 @@ function Invoke-QuarantineGuestManifestProbe {
     $usnOut = Join-Path $guestDir 'probe-usn-host.json'
     $sysmonOut = Join-Path $guestDir 'probe-sysmon-host.json'
     try {
-        Invoke-QuarantineGuestPrivilegedExportFromHost -ConfigPath $ConfigPath `
-            -GuestScriptLeaf (Split-Path -Leaf $settings.UsnDeltaScript) -GuestOutFile $usnOut -TimeoutMs $TimeoutMs
+        Invoke-QuarantineGuestPrivilegedExportBatchFromHost -ConfigPath $ConfigPath -TimeoutMs $TimeoutMs -Steps @(
+            [pscustomobject]@{
+                GuestScriptLeaf = (Split-Path -Leaf $settings.UsnDeltaScript)
+                GuestOutFile    = $usnOut
+            },
+            [pscustomobject]@{
+                GuestScriptLeaf = (Split-Path -Leaf $settings.SysmonScript)
+                GuestOutFile    = $sysmonOut
+            }
+        )
         $hostUsn = Join-Path $env:TEMP 'quarantine-probe-usn.json'
         Copy-QuarantineVMGuestFileFrom -GuestPath $usnOut -HostPath $hostUsn -ConfigPath $ConfigPath -TimeoutMs $TimeoutMs
         Start-Sleep -Milliseconds 500
@@ -2107,8 +2541,6 @@ function Invoke-QuarantineGuestManifestProbe {
         Write-Warning "HOST_ELEV_USN_FAIL $($_.Exception.Message)"
     }
     try {
-        Invoke-QuarantineGuestPrivilegedExportFromHost -ConfigPath $ConfigPath `
-            -GuestScriptLeaf (Split-Path -Leaf $settings.SysmonScript) -GuestOutFile $sysmonOut -TimeoutMs $TimeoutMs
         $hostSysmon = Join-Path $env:TEMP 'quarantine-probe-sysmon.json'
         Copy-QuarantineVMGuestFileFrom -GuestPath $sysmonOut -HostPath $hostSysmon -ConfigPath $ConfigPath -TimeoutMs $TimeoutMs
         Start-Sleep -Milliseconds 500
@@ -2123,6 +2555,7 @@ function Invoke-QuarantineGuestManifestProbe {
 Export-ModuleMember -Function @(
     'Get-QuarantineVMManifestSettings',
     'Get-QuarantineVMManifestHostPath',
+    'Remove-QuarantineSnapshotManifestArtifacts',
     'Get-QuarantineVMManifestBaselineHostPath',
     'Copy-QuarantineVMGuestFileFrom',
     'Invoke-QuarantineVMGuestManifestCapture',
@@ -2140,8 +2573,12 @@ Export-ModuleMember -Function @(
     'Invoke-QuarantineLiveSnapshotManifestMark',
     'Invoke-QuarantineManifestCaptureLive',
     'Invoke-QuarantinePayloadRegistryCliCapture',
+    'Invoke-QuarantineHklmRegistryCliCapture',
     'Get-QuarantineRegistryEngine',
     'Wait-QuarantineVMGuestReady',
-    'Ensure-QuarantineGuestSysmonReady',
+    'Test-QuarantineGuestPrivilegedExportTaskReady',
+    'Invoke-QuarantineGuestPrivilegedExportFromHost',
+    'Invoke-QuarantineGuestPrivilegedExportBatchFromHost',
+    'Initialize-QuarantineGuestSysmonReady',
     'Invoke-QuarantineGuestManifestProbe'
 )

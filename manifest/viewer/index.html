@@ -28,6 +28,7 @@
         <option value="registry">Registry only</option>
         <option value="tasks">Tasks only</option>
         <option value="sysmon">Sysmon only</option>
+        <option value="network">Network only</option>
       </select>
       <select id="changeFilter">
         <option value="all">All changes</option>
@@ -47,6 +48,7 @@
       <button class="tab" data-tab="registry">Registry</button>
       <button class="tab" data-tab="tasks">Tasks</button>
       <button class="tab" data-tab="sysmon">Sysmon</button>
+      <button class="tab" data-tab="network">Network</button>
       <button class="tab" data-tab="usn">USN journal</button>
     </div>
 
@@ -55,6 +57,7 @@
     <div id="panel-registry" class="panel"></div>
     <div id="panel-tasks" class="panel"></div>
     <div id="panel-sysmon" class="panel"></div>
+    <div id="panel-network" class="panel"></div>
     <div id="panel-usn" class="panel"></div>
 
     <aside id="detail-panel" class="detail-panel hidden" aria-label="Change detail">

@@ -166,8 +166,9 @@ function Register-QuarantinePrivilegedExportTask {
     }
 
     $taskName = 'QuarantineLabPrivilegedExport'
+    $marker = Join-Path $guestDir 'privileged-export-task.ok'
     $tr = "`"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`" -NoProfile -ExecutionPolicy Bypass -File `"$worker`""
-    $args = "/Create /TN `"$taskName`" /TR `"$tr`" /SC ONSTART /RU SYSTEM /RL HIGHEST /F"
+    $args = "/Create /TN `"$taskName`" /TR `"$tr`" /SC MINUTE /MO 1 /RU SYSTEM /RL HIGHEST /F"
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = 'schtasks.exe'
     $psi.Arguments = $args
@@ -186,7 +187,21 @@ function Register-QuarantinePrivilegedExportTask {
     return $true
 }
 
-Register-QuarantinePrivilegedExportTask | Out-Null
+$taskRegistered = Register-QuarantinePrivilegedExportTask
+$guestDir = 'C:\Users\Public\Quarantine'
+$markerPath = Join-Path $guestDir 'privileged-export-task.ok'
+if ($taskRegistered) {
+    try {
+        $null = Get-ScheduledTask -TaskName 'QuarantineLabPrivilegedExport' -ErrorAction Stop
+        Set-Content -LiteralPath $markerPath -Value (Get-Date).ToUniversalTime().ToString('o') -Encoding ASCII
+        Write-Host "Wrote privileged export marker: $markerPath"
+    } catch {
+        Remove-Item -LiteralPath $markerPath -Force -ErrorAction SilentlyContinue
+        Write-Warning "SYSTEM task registration reported success but Get-ScheduledTask failed: $($_.Exception.Message)"
+    }
+} else {
+    Remove-Item -LiteralPath $markerPath -Force -ErrorAction SilentlyContinue
+}
 
 try {
     $null = Get-WinEvent -LogName $LogName -MaxEvents 1 -ErrorAction Stop

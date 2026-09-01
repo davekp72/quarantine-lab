@@ -123,10 +123,36 @@ header h1 {
 .panel { display: none; padding: 1rem 1.5rem 2rem; }
 .panel.active { display: block; }
 
+.table-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
   font-size: 0.85rem;
+}
+
+table.diff-table {
+  table-layout: fixed;
+  min-width: 720px;
+}
+
+table.diff-table .col-change {
+  width: 6.5rem;
+  white-space: nowrap;
+}
+
+table.diff-table .col-key {
+  width: 44%;
+  min-width: 16rem;
+}
+
+table.diff-table .col-value {
+  width: auto;
+  overflow-wrap: anywhere;
+  word-break: normal;
 }
 
 th, td {
@@ -149,7 +175,17 @@ th {
 
 tbody tr:hover { background: var(--surface); }
 
-.path, .mono { font-family: var(--mono); font-size: 0.8rem; word-break: break-all; }
+.path, .mono { font-family: var(--mono); font-size: 0.8rem; line-height: 1.45; }
+
+.path {
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+
+.mono {
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
 
 .badge {
   display: inline-block;
@@ -352,6 +388,189 @@ tbody tr.selected {
 .diff-line-del { background: rgba(248, 81, 73, 0.12); display: block; }
 .diff-line-same { display: block; color: var(--muted); }
 
+.registry-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.registry-subkeys-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.registry-browser {
+  display: grid;
+  grid-template-columns: minmax(260px, 36%) 1fr;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--surface);
+  min-height: 420px;
+}
+
+.registry-tree-panel {
+  border-right: 1px solid var(--border);
+  background: var(--bg);
+  overflow: auto;
+  max-height: 70vh;
+}
+
+.registry-values-panel {
+  overflow: auto;
+  max-height: 70vh;
+  padding: 0.75rem 1rem 1.25rem;
+  background: var(--bg);
+}
+
+.registry-panel-title {
+  padding: 0.65rem 0.85rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.registry-tree {
+  padding: 0.35rem 0 0.75rem;
+}
+
+.registry-tree-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  min-width: 0;
+}
+
+.registry-tree-toggle {
+  flex: 0 0 1.35rem;
+  border: none;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.7rem;
+  padding: 0.35rem 0;
+}
+
+.registry-tree-toggle:disabled {
+  cursor: default;
+  opacity: 0.35;
+}
+
+.registry-tree-node {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex: 1;
+  min-width: 0;
+  padding: 0.3rem 0.55rem 0.3rem 0;
+  border: none;
+  background: none;
+  color: var(--text);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  line-height: 1.35;
+  text-align: left;
+}
+
+.registry-tree-node:hover { background: var(--surface2); }
+.registry-tree-node.selected {
+  background: rgba(88, 166, 255, 0.15);
+  color: var(--accent);
+}
+
+.registry-tree-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.registry-node-count {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 0.68rem;
+  color: var(--muted);
+  background: var(--surface2);
+  border-radius: 999px;
+  padding: 0.05rem 0.4rem;
+}
+
+.registry-key-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  line-height: 1.45;
+  margin-bottom: 0.35rem;
+  overflow-wrap: anywhere;
+}
+
+.registry-value-note {
+  padding: 0 0 0.65rem;
+  margin: 0;
+}
+
+.network-subtoolbar {
+  display: flex;
+  gap: 0.35rem;
+  margin: 0.5rem 0 0.75rem;
+}
+
+.network-subtab {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 0.3rem 0.75rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.network-subtab:hover { color: var(--text); border-color: var(--accent); }
+.network-subtab.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(88, 166, 255, 0.12);
+}
+
+.network-section-heading { margin-top: 1.5rem; }
+.network-sources { padding-top: 0; margin-top: -0.25rem; }
+
+.display-cap-note { margin-top: 0.65rem; }
+
+.display-cap-btn {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--accent);
+  border-radius: 6px;
+  padding: 0.2rem 0.55rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+  margin: 0 0.15rem;
+}
+
+.display-cap-btn:hover { border-color: var(--accent); }
+
 @media (max-width: 900px) {
   .content-grid { grid-template-columns: 1fr; }
+  .registry-browser { grid-template-columns: 1fr; }
+  .registry-tree-panel {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    max-height: 40vh;
+  }
 }
