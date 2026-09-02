@@ -2,6 +2,8 @@
 
 PowerShell utility to create and manage an **isolated VirtualBox Windows guest** for opening suspicious email, malware samples, and other quarantine work.
 
+> **Go rewrite:** A Go + Wails implementation lives in [`go/`](go/README.md). Launch with `.\quarantine-go.ps1` (builds `go/quarantine.exe` on first run). Same config and sidecar layout; Wails UI replaces static `session.html` for dynamic diff browsing and on-demand snapshot disk reads.
+
 The VM is configured with conservative defaults: host→guest clipboard (one-way paste), no drag-drop, USB disabled, recording off, and **internal networking (`intnet`)** so the guest has no host or internet access unless you change that.
 
 ## Prerequisites

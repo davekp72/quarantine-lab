@@ -1,0 +1,21 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "quarantine-lab",
+  "outputfilename": "quarantine",
+  "frontend:dir": "frontend",
+  "frontend:install": "cmd /c exit 0",
+  "frontend:build": "cmd /c exit 0",
+  "frontend:dev:watcher": "",
+  "frontend:dev:serverUrl": "",
+  "author": {
+    "name": "Quarantine Lab"
+  },
+  "info": {
+    "companyName": "Quarantine Lab",
+    "productName": "Quarantine Lab",
+    "productVersion": "1.0.0"
+  },
+  "wailsjsdir": "./frontend/dist",
+  "assetdir": "./frontend/dist",
+  "reloaddirs": "./frontend/dist"
+}

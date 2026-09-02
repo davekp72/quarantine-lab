@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Quarantine Lab</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <h1>Quarantine Lab</h1>
+      <div id="vm-status" class="muted">Loading...</div>
+
+      <section class="side-block">
+        <h2>Snapshots</h2>
+        <button id="btn-refresh-snaps" type="button">Refresh list</button>
+        <ul id="snap-list" class="snap-list"></ul>
+        <div class="take-form">
+          <p class="muted snap-hint">Select a snapshot in the list. Double-click to launch.</p>
+          <div class="btn-row">
+            <button id="btn-launch-snap" type="button" class="btn-primary">Launch selected</button>
+            <button id="btn-take-snap" type="button">Take snapshot</button>
+            <button id="btn-preserve" type="button">Preserve evidence</button>
+            <button id="btn-delete-snap" type="button" class="btn-danger">Delete selected</button>
+          </div>
+          <p id="snap-action-msg" class="muted action-msg"></p>
+          <div class="btn-row agent-row">
+            <button id="btn-install-agent" type="button">Install VM agent</button>
+            <span id="agent-status" class="muted"></span>
+          </div>
+        </div>
+      </section>
+    </aside>
+
+    <div class="main-col">
+      <section class="controls">
+        <label>From
+          <select id="from-snap"></select>
+        </label>
+        <label>To
+          <select id="to-snap"></select>
+        </label>
+        <label class="check"><input type="checkbox" id="refresh" checked /> Refresh</label>
+        <label class="check"><input type="checkbox" id="hideNoise" checked /> Hide routine noise</label>
+        <button id="btn-compare" type="button">Compare</button>
+        <button id="btn-load-file" type="button">Load diff file</button>
+        <button id="btn-toggle-log" type="button" class="btn-log-toggle">Log</button>
+      </section>
+      <nav class="tabs">
+        <button data-tab="overview" class="active" type="button">Overview</button>
+        <button data-tab="files" type="button">Files</button>
+        <button data-tab="registry" type="button">Registry</button>
+        <button data-tab="sysmon" type="button">Sysmon</button>
+        <button data-tab="usn" type="button">USN</button>
+        <button data-tab="network" type="button">Network</button>
+      </nav>
+      <main>
+        <div id="panel-overview" class="panel active"></div>
+        <div id="panel-files" class="panel">
+          <nav class="file-tabs">
+            <button data-file-tab="added" class="active" type="button">New <span id="file-count-added" class="tab-count"></span></button>
+            <button data-file-tab="removed" type="button">Deleted <span id="file-count-removed" class="tab-count"></span></button>
+            <button data-file-tab="modified" type="button">Changed <span id="file-count-modified" class="tab-count"></span></button>
+          </nav>
+          <div class="split">
+            <div id="file-tree" class="tree"></div>
+            <pre id="file-preview" class="preview">Select a file path</pre>
+          </div>
+        </div>
+        <div id="panel-registry" class="panel">
+          <div class="split">
+            <div id="registry-tree" class="tree"></div>
+            <div id="registry-values" class="preview"></div>
+          </div>
+        </div>
+        <div id="panel-sysmon" class="panel"></div>
+        <div id="panel-usn" class="panel"></div>
+        <div id="panel-network" class="panel"></div>
+      </main>
+      <section id="log-drawer" class="log-drawer hidden" aria-label="Log window">
+        <div class="log-toolbar">
+          <span class="log-title">Log</span>
+          <label class="log-source-label">Source
+            <select id="log-source">
+              <option value="activity">Activity</option>
+            </select>
+          </label>
+          <button id="btn-log-refresh" type="button">Refresh</button>
+          <button id="btn-log-clear" type="button">Clear</button>
+          <label class="check log-check"><input type="checkbox" id="log-autoscroll" checked /> Auto-scroll</label>
+          <button id="btn-log-close" type="button" class="log-close" title="Hide log">×</button>
+        </div>
+        <pre id="log-view" class="log-view"></pre>
+      </section>
+    </div>
+  </div>
+  <script src="wailsjs/runtime/runtime.js"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

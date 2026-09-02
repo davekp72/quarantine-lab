@@ -262,43 +262,70 @@ function Export-QuarantineGuestUsnDelta {
 
 
         $header = $null
+        $colUsn = 4
+        $colTimestamp = 5
+        $colReason = 6
+        $colFileName = 10
 
         foreach ($line in $lines) {
 
             if ([string]::IsNullOrWhiteSpace($line)) { continue }
 
-            if ($line -match '^Major Version,') { $header = $line; continue }
+            if ($line -match '^Major Version,') {
+                $header = $line
+                $cols = $line -split ',(?=(?:[^"]*"[^"]*")*[^"]*$)'
+                for ($i = 0; $i -lt $cols.Count; $i++) {
+                    $label = $cols[$i].Trim('"').ToLowerInvariant()
+                    if ($label -match '^usn$') { $colUsn = $i }
+                    elseif ($label -match 'time.?stamp') { $colTimestamp = $i }
+                    elseif ($label -match '^reason$') { $colReason = $i }
+                    elseif ($label -match 'file name') { $colFileName = $i }
+                }
+                continue
+            }
 
             if (-not $header) { continue }
 
 
 
             $cols = $line -split ',(?=(?:[^"]*"[^"]*")*[^"]*$)'
+            if ($cols.Count -lt 8) { continue }
 
-            # fsutil csv: Major, Minor, FileRef, ParentRef, Usn, TimeStamp, Reason, SourceInfo, SecurityId, Attributes, FileName (11 cols)
-            if ($cols.Count -lt 11) { continue }
+            $fileName = $cols[$colFileName].Trim('"')
+            if ([string]::IsNullOrWhiteSpace($fileName) -or $fileName -eq '0x00000000' -or $fileName -match '^(?i)source info|file name|reason$') {
+                $fileName = $cols[$cols.Count - 1].Trim('"')
+            }
+            if ([string]::IsNullOrWhiteSpace($fileName) -or $fileName -eq '0x00000000') { continue }
 
-            $fileName = $cols[10].Trim('"')
-            if ([string]::IsNullOrWhiteSpace($fileName)) { continue }
+            $usnVal = $cols[$colUsn].Trim('"')
+            if ($usnVal -match '\|' -or $usnVal -match '^(?i)reason$') {
+                $usnVal = ($cols | Where-Object { $_ -match '^"?0x[0-9a-fA-F]{8,}' } | Select-Object -First 1)
+                if ($usnVal) { $usnVal = $usnVal.Trim('"') } else { continue }
+            }
 
             $reasonLabels = @()
-            try {
-                $reasonLabels = Get-UsnReasonLabels -ReasonHex $cols[6].Trim('"')
-            } catch {
-                $reasonLabels = @($cols[6].Trim('"'))
+            $reasonRaw = $cols[$colReason].Trim('"')
+            if ($reasonRaw -match '\|') {
+                $reasonLabels = @($reasonRaw -split '\|' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+            } else {
+                try {
+                    $reasonLabels = Get-UsnReasonLabels -ReasonHex $reasonRaw
+                } catch {
+                    $reasonLabels = @($reasonRaw)
+                }
             }
 
             [void]$events.Add([pscustomobject][ordered]@{
 
-                usn        = $cols[4].Trim('"')
+                usn        = $usnVal
 
-                timestamp  = $cols[5].Trim('"')
+                timestamp  = $cols[$colTimestamp].Trim('"')
 
                 reasons    = @($reasonLabels)
 
                 fileName   = $fileName
 
-                attributes = $cols[9].Trim('"')
+                attributes = if ($cols.Count -gt 9) { $cols[9].Trim('"') } else { '' }
 
             })
 

@@ -169,7 +169,7 @@ function Get-QuarantinePcapDnsQueries {
     )
 
     $output = & $TsharkPath @argList 2>$null
-    if (-not $output) { return @() }
+    if ($LASTEXITCODE -ne 0 -and -not $output) { return @() }
 
     $results = @()
     foreach ($line in @($output)) {
@@ -353,18 +353,21 @@ function Merge-QuarantineSysmonDnsEvidence {
     foreach ($entry in @($DnsEntries)) { $merged += $entry }
 
     foreach ($ev in @($SysmonEvents)) {
-        if ([string]$ev.type -ne 'DnsQuery' -and [int]$ev.eid -ne 22) { continue }
-        $query = if ($ev.queryName) { [string]$ev.queryName } else { '' }
+        $eid = if ($ev.PSObject.Properties['eid']) { [int]$ev.eid } else { 0 }
+        $kind = if ($ev.PSObject.Properties['t']) { [string]$ev.t } elseif ($ev.PSObject.Properties['type']) { [string]$ev.type } else { '' }
+        if ($eid -ne 22 -and $kind -ne 'DnsQuery') { continue }
+        $query = if ($ev.PSObject.Properties['queryName']) { [string]$ev.queryName } else { '' }
         if ([string]::IsNullOrWhiteSpace($query)) { continue }
 
-        $ts = ConvertTo-QuarantineNetworkInstant -Text ([string]$ev.t)
+        $timeText = if ($ev.PSObject.Properties['t']) { [string]$ev.t } elseif ($ev.PSObject.Properties['time']) { [string]$ev.time } else { '' }
+        $ts = ConvertTo-QuarantineNetworkInstant -Text $timeText
         if ($ts) {
             if ($From -and $ts -lt $From) { continue }
             if ($To -and $ts -gt $To) { continue }
         }
 
         $merged += [pscustomobject]@{
-            t      = if ($ts) { $ts.ToUniversalTime().ToString('o') } else { [string]$ev.t }
+            t      = if ($ts) { $ts.ToUniversalTime().ToString('o') } else { $timeText }
             query  = $query.TrimEnd('.')
             type   = ''
             source = 'sysmon'

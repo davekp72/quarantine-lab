@@ -85,5 +85,13 @@
   "regshot": {
     "guestDir": "C:\\Users\\Public\\Quarantine\\regshot",
     "hostToolsDir": "tools\\regshot"
+  },
+  "agent": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 9443,
+    "tokenFile": "D:\\Vbox\\LabVM\\secrets\\agent-token.txt",
+    "natRuleName": "quarantine-agent",
+    "installPath": "C:\\Users\\Public\\Quarantine\\quarantine-agent.exe"
   }
 }
