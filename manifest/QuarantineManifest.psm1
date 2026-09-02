@@ -6,6 +6,7 @@ $script:ProjectRoot = Split-Path $PSScriptRoot -Parent
 . (Join-Path $script:ManifestRoot 'Get-QuarantineManifestDiff.ps1')
 . (Join-Path $script:ManifestRoot 'ConvertFrom-RegshotCompareLog.ps1')
 . (Join-Path $script:ManifestRoot 'ConvertFrom-RegExportFile.ps1')
+. (Join-Path $script:ManifestRoot 'Get-QuarantineChangedPathsFromEventSidecars.ps1')
 
 function Initialize-QuarantineManifestConfig {
     param([string]$ConfigPath)
@@ -44,6 +45,8 @@ function Get-QuarantineVMManifestSettings {
         UsnBaselineScript = Join-Path $script:ManifestRoot 'Set-QuarantineGuestUsnBaseline.ps1'
         UsnDeltaScript = Join-Path $script:ManifestRoot 'Get-QuarantineGuestUsnDelta.ps1'
         SysmonScript = Join-Path $script:ManifestRoot 'Get-QuarantineGuestSysmonEvents.ps1'
+        ServiceInstallScript = Join-Path $script:ManifestRoot 'Get-QuarantineGuestServiceInstallEvents.ps1'
+        ChangedFilesScript = Join-Path $script:ManifestRoot 'Export-QuarantineGuestChangedFiles.ps1'
         PayloadHkcuScript = Join-Path $script:ManifestRoot 'Export-QuarantineGuestPayloadHkcu.ps1'
         PayloadRegistryCliScript = Join-Path $script:ManifestRoot 'Export-QuarantineGuestPayloadRegistryCli.ps1'
         HklmRegistryCliScript = Join-Path $script:ManifestRoot 'Export-QuarantineGuestHklmRegistryCli.ps1'
@@ -192,6 +195,26 @@ function Get-QuarantineVMSysmonHostPath {
     Join-Path $settings.LogDir "$safe-sysmon.json"
 }
 
+function Get-QuarantineVMServiceInstallHostPath {
+    param(
+        [string]$ConfigPath,
+        [Parameter(Mandatory)][string]$SnapshotName
+    )
+    $settings = Get-QuarantineVMManifestSettings -ConfigPath $ConfigPath
+    $safe = Get-SafeSnapshotFileName -Name $SnapshotName
+    Join-Path $settings.LogDir "$safe-service-installs.json"
+}
+
+function Get-QuarantineVMChangedFilesHostPath {
+    param(
+        [string]$ConfigPath,
+        [Parameter(Mandatory)][string]$SnapshotName
+    )
+    $settings = Get-QuarantineVMManifestSettings -ConfigPath $ConfigPath
+    $safe = Get-SafeSnapshotFileName -Name $SnapshotName
+    Join-Path $settings.LogDir "$safe-changed-files.json"
+}
+
 function Remove-QuarantineSnapshotManifestArtifacts {
     <#
     .SYNOPSIS
@@ -218,6 +241,8 @@ function Remove-QuarantineSnapshotManifestArtifacts {
         (Get-QuarantineVMHklmRegistryHostPath -ConfigPath $ConfigPath -SnapshotName $SnapshotName),
         (Get-QuarantineVMUsnDeltaHostPath -ConfigPath $ConfigPath -SnapshotName $SnapshotName),
         (Get-QuarantineVMSysmonHostPath -ConfigPath $ConfigPath -SnapshotName $SnapshotName),
+        (Get-QuarantineVMServiceInstallHostPath -ConfigPath $ConfigPath -SnapshotName $SnapshotName),
+        (Get-QuarantineVMChangedFilesHostPath -ConfigPath $ConfigPath -SnapshotName $SnapshotName),
         (Join-Path $settings.LogDir "$safe-regshot.hivu"),
         (Join-Path $settings.LogDir "$safe-regshot-compare.txt")
     )
@@ -336,6 +361,151 @@ function Save-QuarantineBaselineEventMarkerSidecars {
         events      = @()
     }
     $sysmonMarker | ConvertTo-Json -Depth 6 -Compress | Set-Content -LiteralPath $sysmonPath -Encoding UTF8
+
+    $serviceInstallPath = Get-QuarantineVMServiceInstallHostPath -ConfigPath $ConfigPath -SnapshotName $SnapshotName
+    $serviceInstallMarker = [ordered]@{
+        available   = $true
+        eventCount  = 0
+        message     = 'Baseline snapshot — service install events start after this point.'
+        baselineAt  = $recordedAt
+        recordedAt  = $recordedAt
+        events      = @()
+    }
+    $serviceInstallMarker | ConvertTo-Json -Depth 6 -Compress | Set-Content -LiteralPath $serviceInstallPath -Encoding UTF8
+}
+
+function Invoke-QuarantineGuestChangedFilesCapture {
+    [CmdletBinding()]
+    param(
+        [string]$ConfigPath,
+        [Parameter(Mandatory)][string]$SnapshotName,
+        [int]$TimeoutMs = 900000
+    )
+
+    Initialize-QuarantineManifestConfig -ConfigPath $ConfigPath
+    $settings = Get-QuarantineVMManifestSettings -ConfigPath $ConfigPath
+    $guestDir = $settings.Config.guest.copyTargetDir
+    if (-not $guestDir) { $guestDir = 'C:\Users\Public\Quarantine' }
+
+    $guestOut = Join-Path $guestDir 'changed-files-export.json'
+    $hostOut = Get-QuarantineVMChangedFilesHostPath -ConfigPath $ConfigPath -SnapshotName $SnapshotName
+
+    Copy-QuarantineGuestPrivilegedExportDependencies -ConfigPath $ConfigPath -Settings $settings -GuestDir $guestDir -IncludeHklmRegistry:$false
+
+    try {
+        Invoke-QuarantineGuestPrivilegedExportBatchFromHost -ConfigPath $ConfigPath -Steps @(
+            [pscustomobject]@{
+                GuestScriptLeaf = (Split-Path -Leaf $settings.ChangedFilesScript)
+                GuestOutFile    = $guestOut
+            }
+        ) -TimeoutMs $TimeoutMs
+    } catch {
+        Write-Warning "Changed files privileged export failed: $($_.Exception.Message)"
+        return $false
+    }
+
+    try {
+        Copy-QuarantineVMGuestFileFrom -GuestPath $guestOut -HostPath $hostOut -ConfigPath $ConfigPath -TimeoutMs $TimeoutMs
+        Start-Sleep -Milliseconds 500
+        if (Test-Path -LiteralPath $hostOut) {
+            $changed = Read-QuarantineGuestJsonHostFile -HostPath $hostOut
+            Write-Host "Changed files saved for '$SnapshotName': $hostOut ($($changed.fileCount) files, $($changed.pathCount) paths)"
+            return $true
+        }
+    } catch {
+        Write-Warning "Changed files capture failed: $($_.Exception.Message)"
+    }
+
+    return $false
+}
+
+function Merge-QuarantineChangedFilesSidecarIntoManifest {
+    param(
+        [Parameter(Mandatory)][string]$HostManifestPath,
+        [Parameter(Mandatory)]$ChangedExport
+    )
+
+    if (-not (Test-Path -LiteralPath $HostManifestPath)) { return $false }
+    if (-not $ChangedExport) { return $false }
+    if ($ChangedExport.PSObject.Properties['available'] -and $ChangedExport.available -eq $false) {
+        $msg = if ($ChangedExport.PSObject.Properties['message']) { [string]$ChangedExport.message } else { 'changed-files export unavailable' }
+        Write-Warning "Changed files sidecar skipped: $msg"
+        return $false
+    }
+    if (-not $ChangedExport.PSObject.Properties['files']) { return $false }
+
+    $changedFiles = @($ChangedExport.files | Where-Object { $_ })
+    if ($changedFiles.Count -eq 0) { return $false }
+
+    $changedPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($entry in $changedFiles) {
+        if ($entry.p) { [void]$changedPaths.Add([string]$entry.p) }
+    }
+
+    $manifest = Get-Content -LiteralPath $HostManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $merged = New-Object System.Collections.Generic.List[object]
+    $existingFiles = if ($manifest.PSObject.Properties['files'] -and $manifest.files) { @($manifest.files) } else { @() }
+    foreach ($entry in $existingFiles) {
+        $key = if ($entry.p) { [string]$entry.p } elseif ($entry.path) { [string]$entry.path } else { '' }
+        if ($key -and $changedPaths.Contains($key)) { continue }
+        $merged.Add($entry) | Out-Null
+    }
+    foreach ($entry in $changedFiles) {
+        $merged.Add($entry) | Out-Null
+    }
+
+    $manifest | Add-Member -NotePropertyName files -NotePropertyValue ($merged.ToArray()) -Force
+    $manifest | Add-Member -NotePropertyName fileCount -NotePropertyValue $merged.Count -Force
+    Save-QuarantineManifestHostFile -Manifest $manifest -HostPath $HostManifestPath
+    Write-Host "Merged changed files into manifest: $($changedFiles.Count) entries"
+    return $true
+}
+
+function Merge-QuarantineChangedFilesSidecarFromHost {
+    param(
+        [string]$ConfigPath,
+        [Parameter(Mandatory)][string]$SnapshotName,
+        [Parameter(Mandatory)][string]$HostManifestPath
+    )
+
+    $changed = $null
+    $sidecar = Get-QuarantineVMChangedFilesHostPath -ConfigPath $ConfigPath -SnapshotName $SnapshotName
+    if (Test-Path -LiteralPath $sidecar) {
+        $changed = Read-QuarantineGuestJsonHostFile -HostPath $sidecar
+    }
+
+    $fileCount = 0
+    if ($changed -and $changed.PSObject.Properties['files'] -and $changed.files) {
+        $fileCount = @($changed.files | Where-Object { $_ }).Count
+    }
+
+    $needsRebuild = $false
+    if (-not $changed) {
+        $needsRebuild = $true
+    } elseif ($changed.PSObject.Properties['available'] -and $changed.available -eq $false) {
+        $needsRebuild = $true
+    } elseif ($fileCount -eq 0) {
+        $needsRebuild = $true
+    }
+
+    if ($needsRebuild) {
+        $usnPath = Get-QuarantineVMUsnDeltaHostPath -ConfigPath $ConfigPath -SnapshotName $SnapshotName
+        $sysmonPath = Get-QuarantineVMSysmonHostPath -ConfigPath $ConfigPath -SnapshotName $SnapshotName
+        $usn = if (Test-Path -LiteralPath $usnPath) { Read-QuarantineGuestJsonHostFile -HostPath $usnPath } else { $null }
+        $sysmon = if (Test-Path -LiteralPath $sysmonPath) { Read-QuarantineGuestJsonHostFile -HostPath $sysmonPath } else { $null }
+        if ((Test-QuarantineSidecarHasEvents -Sidecar $usn) -or (Test-QuarantineSidecarHasEvents -Sidecar $sysmon)) {
+            $changed = New-QuarantineChangedFilesExportFromEventSidecars -Usn $usn -Sysmon $sysmon
+            Write-Host "Rebuilt changed-file paths from event sidecars for '$SnapshotName': $($changed.fileCount) paths"
+        } elseif ($changed -and $changed.PSObject.Properties['available'] -and $changed.available -eq $false -and $changed.message) {
+            Write-Warning "Changed files sidecar skipped: $($changed.message)"
+            return $false
+        } else {
+            return $false
+        }
+    }
+
+    if (-not $changed) { return $false }
+    return (Merge-QuarantineChangedFilesSidecarIntoManifest -HostManifestPath $HostManifestPath -ChangedExport $changed)
 }
 
 function Invoke-QuarantineLiveSnapshotEventCapture {
@@ -363,8 +533,10 @@ function Invoke-QuarantineLiveSnapshotEventCapture {
 
     $guestUsnOut = Join-Path $guestDir 'usn-delta-export.json'
     $guestSysmonOut = Join-Path $guestDir 'sysmon-events-export.json'
+    $guestServiceInstallOut = Join-Path $guestDir 'service-install-events-export.json'
     $hostUsn = Get-QuarantineVMUsnDeltaHostPath -ConfigPath $ConfigPath -SnapshotName $SnapshotName
     $hostSysmon = Get-QuarantineVMSysmonHostPath -ConfigPath $ConfigPath -SnapshotName $SnapshotName
+    $hostServiceInstall = Get-QuarantineVMServiceInstallHostPath -ConfigPath $ConfigPath -SnapshotName $SnapshotName
 
     $batchSteps = @(
         [pscustomobject]@{
@@ -374,6 +546,14 @@ function Invoke-QuarantineLiveSnapshotEventCapture {
         [pscustomobject]@{
             GuestScriptLeaf = (Split-Path -Leaf $settings.SysmonScript)
             GuestOutFile    = $guestSysmonOut
+        },
+        [pscustomobject]@{
+            GuestScriptLeaf = (Split-Path -Leaf $settings.ServiceInstallScript)
+            GuestOutFile    = $guestServiceInstallOut
+        },
+        [pscustomobject]@{
+            GuestScriptLeaf = (Split-Path -Leaf $settings.ChangedFilesScript)
+            GuestOutFile    = (Join-Path $guestDir 'changed-files-export.json')
         }
     )
     if ($IncludeHklmRegistryCli) {
@@ -394,7 +574,7 @@ function Invoke-QuarantineLiveSnapshotEventCapture {
         Copy-QuarantineVMGuestFileFrom -GuestPath $guestUsnOut -HostPath $hostUsn -ConfigPath $ConfigPath -TimeoutMs $TimeoutMs
         Start-Sleep -Milliseconds 500
         if (Test-Path -LiteralPath $hostUsn) {
-            $usn = Get-Content -LiteralPath $hostUsn -Raw -Encoding UTF8 | ConvertFrom-Json
+            $usn = Read-QuarantineGuestJsonHostFile -HostPath $hostUsn
             Write-Host "USN delta saved for '$SnapshotName': $hostUsn ($($usn.eventCount) events)"
         }
     } catch {
@@ -405,11 +585,38 @@ function Invoke-QuarantineLiveSnapshotEventCapture {
         Copy-QuarantineVMGuestFileFrom -GuestPath $guestSysmonOut -HostPath $hostSysmon -ConfigPath $ConfigPath -TimeoutMs $TimeoutMs
         Start-Sleep -Milliseconds 500
         if (Test-Path -LiteralPath $hostSysmon) {
-            $sysmon = Get-Content -LiteralPath $hostSysmon -Raw -Encoding UTF8 | ConvertFrom-Json
+            $sysmon = Read-QuarantineGuestJsonHostFile -HostPath $hostSysmon
             Write-Host "Sysmon events saved for '$SnapshotName': $hostSysmon ($($sysmon.eventCount) events)"
         }
     } catch {
         Write-Warning "Sysmon live capture failed: $($_.Exception.Message)"
+    }
+
+    try {
+        Copy-QuarantineVMGuestFileFrom -GuestPath $guestServiceInstallOut -HostPath $hostServiceInstall -ConfigPath $ConfigPath -TimeoutMs $TimeoutMs
+        Start-Sleep -Milliseconds 500
+        if (Test-Path -LiteralPath $hostServiceInstall) {
+            $svcInstall = Read-QuarantineGuestJsonHostFile -HostPath $hostServiceInstall
+            if ($svcInstall.available -eq $false -and $svcInstall.message) {
+                Write-Warning "Service install capture: $($svcInstall.message)"
+            }
+            Write-Host "Service install events saved for '$SnapshotName': $hostServiceInstall ($($svcInstall.eventCount) events)"
+        }
+    } catch {
+        Write-Warning "Service install event capture failed: $($_.Exception.Message)"
+    }
+
+    $hostChanged = Get-QuarantineVMChangedFilesHostPath -ConfigPath $ConfigPath -SnapshotName $SnapshotName
+    $guestChangedOut = Join-Path $guestDir 'changed-files-export.json'
+    try {
+        Copy-QuarantineVMGuestFileFrom -GuestPath $guestChangedOut -HostPath $hostChanged -ConfigPath $ConfigPath -TimeoutMs $TimeoutMs
+        Start-Sleep -Milliseconds 500
+        if (Test-Path -LiteralPath $hostChanged) {
+            $changed = Read-QuarantineGuestJsonHostFile -HostPath $hostChanged
+            Write-Host "Changed files saved for '$SnapshotName': $hostChanged ($($changed.fileCount) files, $($changed.pathCount) paths)"
+        }
+    } catch {
+        Write-Warning "Changed files capture failed: $($_.Exception.Message)"
     }
 
     if ($IncludeHklmRegistryCli) {
@@ -421,7 +628,8 @@ function Invoke-QuarantineLiveSnapshotEventCapture {
         }
     }
 
-    return (Test-Path -LiteralPath $hostUsn) -or (Test-Path -LiteralPath $hostSysmon)
+    return (Test-Path -LiteralPath $hostUsn) -or (Test-Path -LiteralPath $hostSysmon) `
+        -or (Test-Path -LiteralPath $hostServiceInstall) -or (Test-Path -LiteralPath $hostChanged)
 }
 
 function Get-QuarantineRegshotGuestDir {
@@ -558,7 +766,7 @@ function Invoke-QuarantineLiveSnapshotManifestMark {
 
     if ($isEvidence -and $FromBaselineSnapshotName) {
         $includeHklm = ($engine -eq 'cli')
-        Write-Host "Evidence capture vs baseline '$FromBaselineSnapshotName' (USN delta + Sysmon + registry)..."
+        Write-Host "Evidence capture vs baseline '$FromBaselineSnapshotName' (USN delta + Sysmon + service installs + registry)..."
         Invoke-QuarantineLiveSnapshotEventCapture -ConfigPath $ConfigPath -SnapshotName $SnapshotName `
             -FromBaselineSnapshotName $FromBaselineSnapshotName -IncludeHklmRegistryCli:$includeHklm -TimeoutMs $TimeoutMs | Out-Null
     } else {
@@ -581,7 +789,7 @@ function Invoke-QuarantineLiveSnapshotManifestMark {
                 -TimeoutMs $TimeoutMs | Out-Null
         }
         if ($isEvidence) {
-            Write-Host "Live evidence captured for '$SnapshotName' (USN delta + Sysmon + reg.exe HKU/HKLM on host)."
+            Write-Host "Live evidence captured for '$SnapshotName' (USN delta + Sysmon + service installs + reg.exe HKU/HKLM on host)."
         } else {
             Write-Host "Live baseline marked for '$SnapshotName' (USN + reg.exe HKU/HKLM on host)."
         }
@@ -1378,6 +1586,8 @@ function Copy-QuarantineGuestPrivilegedExportDependencies {
 
     Copy-QuarantineVMGuestFile -Path $Settings.UsnDeltaScript -ConfigPath $ConfigPath -TargetDirectory $GuestDir -ErrorAction SilentlyContinue | Out-Null
     Copy-QuarantineVMGuestFile -Path $Settings.SysmonScript -ConfigPath $ConfigPath -TargetDirectory $GuestDir -ErrorAction SilentlyContinue | Out-Null
+    Copy-QuarantineVMGuestFile -Path $Settings.ServiceInstallScript -ConfigPath $ConfigPath -TargetDirectory $GuestDir -ErrorAction SilentlyContinue | Out-Null
+    Copy-QuarantineVMGuestFile -Path $Settings.ChangedFilesScript -ConfigPath $ConfigPath -TargetDirectory $GuestDir -ErrorAction SilentlyContinue | Out-Null
     if ($Settings.PrivModule -and (Test-Path -LiteralPath $Settings.PrivModule)) {
         Copy-QuarantineVMGuestFile -Path $Settings.PrivModule -ConfigPath $ConfigPath -TargetDirectory $GuestDir
     }
@@ -1388,6 +1598,18 @@ function Copy-QuarantineGuestPrivilegedExportDependencies {
         Copy-QuarantineVMGuestFile -Path $Settings.HklmRegistryCliScript -ConfigPath $ConfigPath -TargetDirectory $GuestDir
         Copy-QuarantineVMGuestFile -Path $Settings.PrivilegedHklmExportScript -ConfigPath $ConfigPath -TargetDirectory $GuestDir
     }
+}
+
+function Deploy-QuarantineGuestManifestScripts {
+    [CmdletBinding()]
+    param([string]$ConfigPath)
+
+    Initialize-QuarantineManifestConfig -ConfigPath $ConfigPath
+    $settings = Get-QuarantineVMManifestSettings -ConfigPath $ConfigPath
+    $guestDir = $settings.Config.guest.copyTargetDir
+    if (-not $guestDir) { $guestDir = 'C:\Users\Public\Quarantine' }
+    Copy-QuarantineGuestPrivilegedExportDependencies -ConfigPath $ConfigPath -Settings $settings -GuestDir $guestDir -IncludeHklmRegistry
+    Write-Host "Manifest guest scripts deployed to $guestDir"
 }
 
 function Start-QuarantineGuestPrivilegedExportTaskNow {
@@ -1553,6 +1775,7 @@ function Invoke-QuarantineVMGuestManifestCapture {
 
             $usnOut = Join-Path $guestDir 'usn-delta-export.json'
             $sysmonOut = Join-Path $guestDir 'sysmon-events-export.json'
+            $serviceInstallOut = Join-Path $guestDir 'service-install-events-export.json'
             try {
                 Invoke-QuarantineGuestPrivilegedExportBatchFromHost -ConfigPath $ConfigPath -TimeoutMs $TimeoutMs -Steps @(
                     [pscustomobject]@{
@@ -1562,6 +1785,10 @@ function Invoke-QuarantineVMGuestManifestCapture {
                     [pscustomobject]@{
                         GuestScriptLeaf = (Split-Path -Leaf $settings.SysmonScript)
                         GuestOutFile    = $sysmonOut
+                    },
+                    [pscustomobject]@{
+                        GuestScriptLeaf = (Split-Path -Leaf $settings.ServiceInstallScript)
+                        GuestOutFile    = $serviceInstallOut
                     }
                 )
             } catch {
@@ -1712,11 +1939,14 @@ function Initialize-QuarantineGuestSysmonReady {
     Write-Host 'Sysmon not detected in guest - deploying...'
     $hostExeCandidates = @()
     $cfg = Get-QuarantineVMConfig -ConfigPath $ConfigPath
-    if ($cfg.sysmon -and $cfg.sysmon.hostSysmonExe) {
-        $configured = if ([IO.Path]::IsPathRooted($cfg.sysmon.hostSysmonExe)) {
-            $cfg.sysmon.hostSysmonExe
+    $hostSysmonExeRel = if ($cfg.sysmon -and $cfg.sysmon.PSObject.Properties['hostSysmonExe']) {
+        [string]$cfg.sysmon.hostSysmonExe
+    } else { '' }
+    if ($hostSysmonExeRel) {
+        $configured = if ([IO.Path]::IsPathRooted($hostSysmonExeRel)) {
+            $hostSysmonExeRel
         } else {
-            Join-Path $script:ProjectRoot ($cfg.sysmon.hostSysmonExe -replace '\\', [IO.Path]::DirectorySeparatorChar)
+            Join-Path $script:ProjectRoot ($hostSysmonExeRel -replace '\\', [IO.Path]::DirectorySeparatorChar)
         }
         $hostExeCandidates += $configured
     }
@@ -1932,6 +2162,8 @@ function Publish-QuarantineManifestFromLiveSidecars {
     $baselinePath = Get-QuarantineVMManifestBaselineHostPath -ConfigPath $ConfigPath -SnapshotName $SnapshotName
     $usnPath = Get-QuarantineVMUsnDeltaHostPath -ConfigPath $ConfigPath -SnapshotName $SnapshotName
     $sysmonPath = Get-QuarantineVMSysmonHostPath -ConfigPath $ConfigPath -SnapshotName $SnapshotName
+    $serviceInstallPath = Get-QuarantineVMServiceInstallHostPath -ConfigPath $ConfigPath -SnapshotName $SnapshotName
+    $changedFilesPath = Get-QuarantineVMChangedFilesHostPath -ConfigPath $ConfigPath -SnapshotName $SnapshotName
     $payload = Get-Content -LiteralPath $registryPath -Raw -Encoding UTF8 | ConvertFrom-Json
 
     if (-not ($payload.registry -and @($payload.registry).Count -gt 0)) {
@@ -1950,6 +2182,13 @@ function Publish-QuarantineManifestFromLiveSidecars {
         $sysmon = Get-Content -LiteralPath $sysmonPath -Raw -Encoding UTF8 | ConvertFrom-Json
     } else {
         $sysmon = [pscustomobject]@{ available = $false; eventCount = 0; message = 'Sysmon sidecar missing.'; events = @() }
+    }
+
+    $serviceInstalls = $null
+    if (Test-Path -LiteralPath $serviceInstallPath) {
+        $serviceInstalls = Get-Content -LiteralPath $serviceInstallPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    } else {
+        $serviceInstalls = [pscustomobject]@{ available = $false; eventCount = 0; message = 'Service install sidecar missing.'; events = @() }
     }
 
     $manifest = if (Test-Path -LiteralPath $hostPath) {
@@ -1981,11 +2220,14 @@ function Publish-QuarantineManifestFromLiveSidecars {
     $manifest | Add-Member -NotePropertyName scanMode -NotePropertyValue $scanModeValue -Force
     $manifest | Add-Member -NotePropertyName usn -NotePropertyValue $usn -Force
     $manifest | Add-Member -NotePropertyName sysmon -NotePropertyValue $sysmon -Force
+    $manifest | Add-Member -NotePropertyName serviceInstalls -NotePropertyValue $serviceInstalls -Force
     $liveCaptureMeta = [ordered]@{
         registrySidecar     = $registryPath
         hklmRegistrySidecar = if (Test-Path -LiteralPath $hklmPath) { $hklmPath } else { $null }
         usnSidecar          = if (Test-Path -LiteralPath $usnPath) { $usnPath } else { $null }
         sysmonSidecar       = if (Test-Path -LiteralPath $sysmonPath) { $sysmonPath } else { $null }
+        serviceInstallSidecar = if (Test-Path -LiteralPath $serviceInstallPath) { $serviceInstallPath } else { $null }
+        changedFilesSidecar  = if (Test-Path -LiteralPath $changedFilesPath) { $changedFilesPath } else { $null }
         usnBaseline         = if (Test-Path -LiteralPath $baselinePath) { $baselinePath } else { $null }
         capturedAt          = if ($payload.capturedAt) { [string]$payload.capturedAt } else { $null }
     }
@@ -1994,9 +2236,11 @@ function Publish-QuarantineManifestFromLiveSidecars {
     if (Test-Path -LiteralPath $hostPath) {
         Merge-QuarantinePayloadRegistryExportIntoManifest -HostManifestPath $hostPath -PayloadExport $payload | Out-Null
         Merge-QuarantineHklmRegistrySidecarIntoManifest -ConfigPath $ConfigPath -SnapshotName $SnapshotName -HostManifestPath $hostPath | Out-Null
+        Merge-QuarantineChangedFilesSidecarFromHost -ConfigPath $ConfigPath -SnapshotName $SnapshotName -HostManifestPath $hostPath | Out-Null
         $manifest = Get-Content -LiteralPath $hostPath -Raw -Encoding UTF8 | ConvertFrom-Json
         $manifest | Add-Member -NotePropertyName usn -NotePropertyValue $usn -Force
         $manifest | Add-Member -NotePropertyName sysmon -NotePropertyValue $sysmon -Force
+        $manifest | Add-Member -NotePropertyName serviceInstalls -NotePropertyValue $serviceInstalls -Force
         $manifest | Add-Member -NotePropertyName liveCapture -NotePropertyValue $liveCaptureMeta -Force
         Save-QuarantineManifestHostFile -Manifest $manifest -HostPath $hostPath
     } else {
@@ -2007,6 +2251,7 @@ function Publish-QuarantineManifestFromLiveSidecars {
         $manifest | Add-Member -NotePropertyName userRegistryWarnings -NotePropertyValue @($note) -Force
         Save-QuarantineManifestHostFile -Manifest $manifest -HostPath $hostPath
         Merge-QuarantineHklmRegistrySidecarIntoManifest -ConfigPath $ConfigPath -SnapshotName $SnapshotName -HostManifestPath $hostPath | Out-Null
+        Merge-QuarantineChangedFilesSidecarFromHost -ConfigPath $ConfigPath -SnapshotName $SnapshotName -HostManifestPath $hostPath | Out-Null
     }
 
     return $hostPath
@@ -2580,5 +2825,6 @@ Export-ModuleMember -Function @(
     'Invoke-QuarantineGuestPrivilegedExportFromHost',
     'Invoke-QuarantineGuestPrivilegedExportBatchFromHost',
     'Initialize-QuarantineGuestSysmonReady',
-    'Invoke-QuarantineGuestManifestProbe'
+    'Invoke-QuarantineGuestManifestProbe',
+    'Deploy-QuarantineGuestManifestScripts'
 )

@@ -1,13 +1,13 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Copy Sysmon config + installer to guest and run install as lab admin.
+  Copy Sysmon config + binaries to the guest. Apply config manually in elevated guest PowerShell (one-time).
 #>
 [CmdletBinding()]
 param(
     [string]$ConfigPath,
     [string]$SysmonHostZip,
-    [switch]$SkipInstall
+    [switch]$ShowGuestInstructions
 )
 
 Set-StrictMode -Version Latest
@@ -17,7 +17,6 @@ $projectRoot = Split-Path $PSScriptRoot -Parent
 if (-not (Get-Command Copy-QuarantineVMGuestFile -ErrorAction SilentlyContinue)) {
     Import-Module (Join-Path $projectRoot 'QuarantineVM.psm1')
 }
-# Do not Import-Module QuarantineManifest.psm1 here — -Force reload breaks the caller session.
 
 if (-not $ConfigPath) {
     $ConfigPath = Join-Path $projectRoot 'config\quarantine-vm.json'
@@ -43,6 +42,30 @@ function Wait-QuarantineGuestDeployReady {
     throw 'Guest control did not become ready within timeout.'
 }
 
+function Write-QuarantineSysmonGuestInstructions {
+    param(
+        [Parameter(Mandatory)][string]$GuestDir,
+        [Parameter(Mandatory)][string]$GuestConfigName
+    )
+
+    $guestExe = Join-Path $guestDir 'Sysmon64.exe'
+    $guestConfig = Join-Path $guestDir $GuestConfigName
+    $guestInstall = Join-Path $guestDir 'Install-QuarantineSysmon.ps1'
+
+    Write-Host ''
+    Write-Host 'Next: one-time step in the guest (elevated PowerShell / Administrator):'
+    Write-Host ''
+    Write-Host "  & '$guestExe' -c '$guestConfig'"
+    Write-Host ''
+    Write-Host 'If Sysmon is not installed yet, use the installer script instead:'
+    Write-Host ''
+    Write-Host "  & '$guestInstall'"
+    Write-Host ''
+    Write-Host 'Verify:'
+    Write-Host '  Get-WinEvent -LogName Microsoft-Windows-Sysmon/Operational -MaxEvents 5'
+    Write-Host ''
+}
+
 Initialize-QuarantineVMContext -ConfigPath $ConfigPath | Out-Null
 $cfg = Get-QuarantineVMConfig -ConfigPath $ConfigPath
 
@@ -58,7 +81,7 @@ $hostConfig = if ([IO.Path]::IsPathRooted($hostConfigRel)) {
 }
 
 $guestDir = $cfg.sysmon.guestDir
-$guestConfigName = $cfg.sysmon.guestConfigName
+$guestConfigName = if ($cfg.sysmon.PSObject.Properties['guestConfigName']) { [string]$cfg.sysmon.guestConfigName } else { 'quarantine-lab.xml' }
 $installScript = Join-Path $PSScriptRoot 'Install-QuarantineSysmon.ps1'
 
 if (-not (Test-Path -LiteralPath $hostConfig)) {
@@ -73,21 +96,22 @@ Wait-QuarantineGuestDeployReady -ConfigPath $ConfigPath
 Copy-QuarantineVMGuestFile -Path $hostConfig -ConfigPath $ConfigPath -TargetDirectory $guestDir
 Copy-QuarantineVMGuestFile -Path $installScript -ConfigPath $ConfigPath -TargetDirectory $guestDir
 
-$guestExe = if ($cfg.sysmon.guestSysmonExe) { $cfg.sysmon.guestSysmonExe } else { Join-Path $guestDir 'Sysmon64.exe' }
-$guestExeName = Split-Path -Leaf $guestExe
+$hostSysmonExeRel = if ($cfg.sysmon.PSObject.Properties['hostSysmonExe']) { [string]$cfg.sysmon.hostSysmonExe } else { '' }
 $hostExe = $null
-if ($cfg.sysmon.hostSysmonExe) {
-    $hostExe = if ([IO.Path]::IsPathRooted($cfg.sysmon.hostSysmonExe)) {
-        $cfg.sysmon.hostSysmonExe
+if ($hostSysmonExeRel) {
+    $hostExe = if ([IO.Path]::IsPathRooted($hostSysmonExeRel)) {
+        $hostSysmonExeRel
     } else {
-        Join-Path $projectRoot ($cfg.sysmon.hostSysmonExe -replace '\\', [IO.Path]::DirectorySeparatorChar)
+        Join-Path $projectRoot ($hostSysmonExeRel -replace '\\', [IO.Path]::DirectorySeparatorChar)
     }
 }
 
+$binaryCopied = $false
 if ($hostExe -and (Test-Path -LiteralPath $hostExe)) {
     Copy-QuarantineVMGuestFile -Path $hostExe -ConfigPath $ConfigPath -TargetDirectory $guestDir
-    Write-Host "Copied Sysmon binary to guest: $guestExeName"
-} elseif (-not (Test-Path -LiteralPath $guestExe)) {
+    Write-Host "Copied Sysmon binary to guest from $hostExe"
+    $binaryCopied = $true
+} else {
     foreach ($candidate in @(
         (Join-Path $projectRoot 'tools\Sysmon64.exe'),
         (Join-Path $projectRoot 'sysmon\Sysmon64.exe')
@@ -95,6 +119,7 @@ if ($hostExe -and (Test-Path -LiteralPath $hostExe)) {
         if (Test-Path -LiteralPath $candidate) {
             Copy-QuarantineVMGuestFile -Path $candidate -ConfigPath $ConfigPath -TargetDirectory $guestDir
             Write-Host "Copied Sysmon binary to guest from $candidate"
+            $binaryCopied = $true
             break
         }
     }
@@ -108,29 +133,12 @@ if ($SysmonHostZip) {
     Write-Host "Copied Sysmon zip to guest. Extract Sysmon64.exe to $guestDir on the guest if needed."
 }
 
-if ($SkipInstall) {
-    Write-Host "Files copied to guest:$guestDir"
-    Write-Host "Run as admin in guest: powershell -ExecutionPolicy Bypass -File $guestDir\Install-QuarantineSysmon.ps1"
-    return
+if (-not $binaryCopied) {
+    Write-Warning "Sysmon64.exe was not copied from the host. Place tools\Sysmon64.exe on the host or copy Sysmon64.exe to $guestDir in the guest."
 }
 
-$guestExePath = Join-Path $guestDir $guestExeName
-if (-not (Test-Path -LiteralPath $guestExePath)) {
-    throw @"
-Sysmon64.exe not found in guest after copy.
+Write-Host "Sysmon files copied to guest: $guestDir"
 
-Place Sysmon64.exe on the host at one of:
-  config sysmon.hostSysmonExe (e.g. tools\Sysmon64.exe)
-  $projectRoot\tools\Sysmon64.exe
-
-Then rerun: .\quarantine-vm.ps1 sysmon install
-"@
+if ($ShowGuestInstructions) {
+    Write-QuarantineSysmonGuestInstructions -GuestDir $guestDir -GuestConfigName $guestConfigName
 }
-
-$guestInstall = Join-Path $guestDir (Split-Path -Leaf $installScript)
-$output = Invoke-QuarantineVMGuestRun -ConfigPath $ConfigPath -TimeoutMs 180000 `
-    -Exe 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' `
-    -Command @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $guestInstall)
-
-if ($output) { $output | ForEach-Object { Write-Host $_ } }
-Write-Host 'Sysmon deploy complete. Take a Clean snapshot after verifying events in Event Viewer.'

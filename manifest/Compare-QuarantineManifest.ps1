@@ -81,6 +81,9 @@ Append-Section -Title 'Scheduled tasks (schedule noise only)' -Items $diff.tasks
 Append-Section -Title 'Sysmon events (new in To snapshot)' -Items $diff.sysmon.added -Formatter {
     param($x) "  + [$($x.type)] $($x.t) $($x.summary)"
 }
+Append-Section -Title 'Service installs (System 7045, new in To snapshot)' -Items $diff.serviceInstalls.added -Formatter {
+    param($x) "  + $($x.t) $($x.serviceName) -> $($x.imagePath)"
+}
 if ($diff.network) {
     Append-Section -Title 'DNS lookups (proxy/PCAP/Sysmon)' -Items $diff.network.dns -Formatter {
         param($x) "  + [$($x.source)] $($x.t) $($x.query)$(if ($x.type) { " ($($x.type))" })"

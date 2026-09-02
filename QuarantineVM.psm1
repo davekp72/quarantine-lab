@@ -2159,10 +2159,12 @@ function Clear-QuarantineVMSnapshots {
     }
 }
 
-function Remove-QuarantineVMSnapshotsByName {
+function Remove-QuarantineVMSnapshotsByUuid {
     <#
     .SYNOPSIS
-      Delete all snapshots with the given name (by UUID, deepest in tree first).
+      Delete specific snapshots by UUID (deepest in tree first). Pass descendant UUIDs as
+      well when replacing a branch — VirtualBox cannot delete a snapshot with more than
+      one child, or the current snapshot while it still has children.
     #>
     [CmdletBinding(SupportsShouldProcess)]
     param(
@@ -2170,34 +2172,60 @@ function Remove-QuarantineVMSnapshotsByName {
         [string]$VmName,
 
         [Parameter(Mandatory)]
-        [string]$Name,
+        [string[]]$Uuid,
 
         [Parameter()]
-        [string]$ConfigPath
+        [string]$ConfigPath,
+
+        [Parameter()]
+        [string]$SkipUuid,
+
+        [Parameter()]
+        [switch]$RemoveManifests
     )
 
-    $all = @(Get-QuarantineVMSnapshotList -ConfigPath $ConfigPath)
-    $targets = @($all | Where-Object { $_.Name -eq $Name })
-    if ($targets.Count -eq 0) {
+    $wanted = @($Uuid | Where-Object { $_ -and $_ -ne $SkipUuid } | Select-Object -Unique)
+    if ($wanted.Count -eq 0) {
         return
     }
 
-    for ($i = $all.Count - 1; $i -ge 0; $i--) {
-        $s = $all[$i]
-        if ($s.Name -ne $Name) { continue }
-        if ($PSCmdlet.ShouldProcess($VmName, "Delete snapshot '$($s.Name)' ($($s.UUID))")) {
-            Write-Host "Deleting snapshot '$($s.Name)' ($($s.UUID))..."
+    $tree = @(Get-QuarantineVMSnapshotTreeEntries -ConfigPath $ConfigPath)
+    $wantedSet = @{}
+    foreach ($id in $wanted) { $wantedSet[$id] = $true }
+
+    $sorted = @(
+        $tree |
+            Where-Object { $wantedSet.ContainsKey($_.UUID) } |
+            Sort-Object { $_.Suffix.Length } -Descending
+    )
+    foreach ($id in $wanted) {
+        if (-not ($sorted | Where-Object { $_.UUID -eq $id })) {
+            $sorted += [pscustomobject]@{ Suffix = ''; Name = $id; UUID = $id }
+        }
+    }
+
+    $manifestModule = Join-Path $PSScriptRoot 'manifest\QuarantineManifest.psm1'
+    foreach ($entry in $sorted) {
+        if ($SkipUuid -and $entry.UUID -eq $SkipUuid) { continue }
+        if ($PSCmdlet.ShouldProcess($VmName, "Delete snapshot '$($entry.Name)' ($($entry.UUID))")) {
+            Write-Host "Deleting snapshot '$($entry.Name)' ($($entry.UUID))..."
             try {
-                Invoke-VBoxManage -Arguments @('snapshot', $VmName, 'delete', $s.UUID) | Out-Null
+                Invoke-VBoxManage -Arguments @('snapshot', $VmName, 'delete', $entry.UUID) | Out-Null
             } catch {
-                throw @"
-Failed to delete snapshot '$($s.Name)' ($($s.UUID)).
-
-VirtualBox may block deletion while child snapshots exist (for example Evidence-* under this snapshot).
-Delete those first in the VirtualBox GUI or run: .\quarantine-vm.ps1 snapshots
-
-$($_.Exception.Message)
-"@
+                throw "Failed to delete snapshot '$($entry.Name)' ($($entry.UUID)). $($_.Exception.Message)"
+            }
+            if ($RemoveManifests) {
+                try {
+                    if (Test-Path -LiteralPath $manifestModule) {
+                        Import-Module $manifestModule -Force -ErrorAction Stop
+                        $removed = @(Remove-QuarantineSnapshotManifestArtifacts -ConfigPath $ConfigPath -SnapshotName $entry.Name)
+                        foreach ($path in $removed) {
+                            Write-Host "  Removed manifest artifact: $path"
+                        }
+                    }
+                } catch {
+                    Write-Warning "Manifest cleanup failed for '$($entry.Name)': $($_.Exception.Message)"
+                }
             }
         }
     }
@@ -2293,6 +2321,7 @@ function Save-QuarantineVMSnapshot {
     $existing = @(Get-QuarantineVMSnapshotList -ConfigPath $ConfigPath | Where-Object {
         $_.Name -eq $snapshotName
     })
+    $replaceUuids = @()
     if ($existing.Count -gt 0) {
         $details = ($existing | ForEach-Object {
             $when = if ($_.TakenAt -ne [datetime]::MinValue) {
@@ -2304,9 +2333,32 @@ function Save-QuarantineVMSnapshot {
             "  $($_.Name)  $when  $kind  $($_.UUID)"
         }) -join [Environment]::NewLine
 
+        $tree = @(Get-QuarantineVMSnapshotTreeEntries -ConfigPath $ConfigPath)
+        $replaceUuidSet = @{}
+        $childNames = [System.Collections.Generic.List[string]]::new()
+        foreach ($snap in $existing) {
+            $replaceUuidSet[$snap.UUID] = $true
+            foreach ($descUuid in @(Get-QuarantineVMSnapshotDescendantUuids -TargetUuid $snap.UUID -TreeEntries $tree)) {
+                $replaceUuidSet[$descUuid] = $true
+            }
+        }
+        foreach ($entry in $tree) {
+            if (-not $replaceUuidSet.ContainsKey($entry.UUID)) { continue }
+            if ($entry.Name -ne $snapshotName -and $childNames -notcontains $entry.Name) {
+                $childNames.Add($entry.Name) | Out-Null
+            }
+        }
+        $replaceUuids = @($replaceUuidSet.Keys)
+
         if (-not $Force) {
             Write-Host "Snapshot '$snapshotName' already exists ($($existing.Count)):"
             Write-Host $details
+            if ($childNames.Count -gt 0) {
+                Write-Host 'Child snapshots will be deleted:'
+                foreach ($childName in $childNames) {
+                    Write-Host "  $childName"
+                }
+            }
             $newKind = if ($includesRam) { 'live (RAM + disk)' } else { 'disk-only' }
             $reply = Read-Host "Replace with a new $newKind snapshot? [y/N]"
             if ($reply -notmatch '^[yY](es)?$') {
@@ -2315,16 +2367,23 @@ function Save-QuarantineVMSnapshot {
             }
         } else {
             Write-Host "Replacing $($existing.Count) existing snapshot(s) named '$snapshotName' (-Force)..."
-        }
-
-        Remove-QuarantineVMSnapshotsByName -ConfigPath $ConfigPath -VmName $vmName -Name $snapshotName
-        $state = Get-QuarantineVMState -VmName $vmName
-        if (-not $Offline) {
-            $includesRam = $state -in $liveStates
+            if ($childNames.Count -gt 0) {
+                Write-Host ('Deleting child snapshot(s): ' + ($childNames -join ', '))
+            }
         }
     }
 
     if ($PSCmdlet.ShouldProcess($vmName, "Snapshot '$snapshotName'")) {
+        if ($replaceUuids.Count -gt 0) {
+            Write-Host "Deleting previous '$snapshotName' branch ($($replaceUuids.Count) snapshot(s))..."
+            Remove-QuarantineVMSnapshotsByUuid -ConfigPath $ConfigPath -VmName $vmName `
+                -Uuid $replaceUuids -RemoveManifests
+            $state = Get-QuarantineVMState -VmName $vmName
+            if (-not $Offline) {
+                $includesRam = $state -in $liveStates
+            }
+        }
+
         if ($includesRam) {
             if ($state -in @('running', 'paused')) {
                 Write-Host "Taking live snapshot (RAM + disk). VM pauses briefly, then keeps running..."

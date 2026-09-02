@@ -48,9 +48,11 @@ if (-not $service) {
     if (-not $service) {
         throw 'Sysmon service not found after install.'
     }
+} else {
+    Write-Host 'Sysmon64 service already installed — applying config only.'
 }
 
-Write-Host 'Step 2/2: Applying quarantine lab config...'
+Write-Host 'Applying quarantine lab config...'
 $step2 = Invoke-Sysmon -Arguments @('-c', $ConfigFile)
 if ($step2.ExitCode -ne 0) {
     throw @"

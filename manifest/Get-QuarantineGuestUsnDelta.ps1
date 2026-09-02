@@ -36,6 +36,20 @@ if (Test-Path -LiteralPath $privModule) {
 
 
 
+function Get-UsnJournalValue {
+    param(
+        [hashtable]$Info,
+        [Parameter(Mandatory)][string[]]$Names
+    )
+
+    foreach ($name in $Names) {
+        if ($Info.ContainsKey($name)) {
+            return [string]$Info[$name]
+        }
+    }
+    return ''
+}
+
 function Get-UsnJournalInfo {
 
     param([string]$Vol)
@@ -70,9 +84,14 @@ function ConvertFrom-HexUsn {
 
     $v = $Value.Trim()
 
-    if ($v.StartsWith('0x')) { return [uint64]::Parse($v.Substring(2), 'AllowHexSpecifier') }
-
-    return [uint64]::Parse($v, 'AllowHexSpecifier')
+    try {
+        if ($v.StartsWith('0x', [System.StringComparison]::OrdinalIgnoreCase)) {
+            return [uint64]::Parse($v.Substring(2), [System.Globalization.NumberStyles]::AllowHexSpecifier, $null)
+        }
+        return [uint64]::Parse($v, [System.Globalization.NumberStyles]::Integer, $null)
+    } catch {
+        return $null
+    }
 
 }
 
@@ -84,67 +103,49 @@ function Get-UsnReasonLabels {
 
     $labels = New-Object System.Collections.Generic.List[string]
 
-    try {
-
-        $reason = [uint32]::Parse($ReasonHex.Trim().Replace('0x', ''), 'AllowHexSpecifier')
-
-    } catch {
-
-        return @($ReasonHex)
-
+    if ([string]::IsNullOrWhiteSpace($ReasonHex)) {
+        return @()
     }
 
-
+    try {
+        $raw = $ReasonHex.Trim().Trim('"')
+        if ($raw.StartsWith('0x', [System.StringComparison]::OrdinalIgnoreCase)) {
+            $reason = [int64]::Parse($raw.Substring(2), [System.Globalization.NumberStyles]::AllowHexSpecifier, $null)
+        } else {
+            $reason = [int64]::Parse($raw, [System.Globalization.NumberStyles]::Integer, $null)
+        }
+    } catch {
+        return @($ReasonHex)
+    }
 
     $map = [ordered]@{
-
         0x00000001 = 'data_extend'
-
         0x00000002 = 'data_truncation'
-
         0x00000004 = 'named_data_overwrite'
-
         0x00000010 = 'data_overwrite'
-
         0x00000100 = 'file_create'
-
         0x00000200 = 'file_delete'
-
         0x00000400 = 'ea_change'
-
         0x00000800 = 'security_change'
-
         0x00001000 = 'rename_old_name'
-
         0x00002000 = 'rename_new_name'
-
         0x00004000 = 'indexable_change'
-
         0x00008000 = 'basic_info_change'
-
         0x00010000 = 'hard_link_change'
-
         0x00020000 = 'compression_change'
-
         0x00080000 = 'reparse_point_change'
-
         0x00100000 = 'stream_change'
-
         0x00200000 = 'close'
-
     }
 
-
-
     foreach ($entry in $map.GetEnumerator()) {
-
-        if (($reason -band $entry.Key) -ne 0) { [void]$labels.Add($entry.Value) }
-
+        $flag = [int64]$entry.Key
+        if (($reason -band $flag) -ne 0) { [void]$labels.Add($entry.Value) }
     }
 
     if ($labels.Count -eq 0) { [void]$labels.Add($ReasonHex) }
 
-    return @($labels)
+    return @($labels.ToArray())
 
 }
 
@@ -214,7 +215,7 @@ function Export-QuarantineGuestUsnDelta {
 
 
 
-        $endUsn = [string]$current.NextUsn
+        $endUsn = Get-UsnJournalValue -Info $current -Names @('NextUsn', 'NextUSN')
 
         $startVal = ConvertFrom-HexUsn -Value $startUsn
 
@@ -222,7 +223,7 @@ function Export-QuarantineGuestUsnDelta {
 
 
 
-        if ($null -ne $startVal -and $null -ne $endVal -and $endVal -le $startVal) {
+        if ($null -ne $startVal -and $null -ne $endVal -and ([uint64]$endVal -le [uint64]$startVal)) {
 
             return [pscustomobject]@{
 
@@ -274,17 +275,18 @@ function Export-QuarantineGuestUsnDelta {
 
             $cols = $line -split ',(?=(?:[^"]*"[^"]*")*[^"]*$)'
 
-            if ($cols.Count -lt 12) { continue }
+            # fsutil csv: Major, Minor, FileRef, ParentRef, Usn, TimeStamp, Reason, SourceInfo, SecurityId, Attributes, FileName (11 cols)
+            if ($cols.Count -lt 11) { continue }
 
-
-
-            $fileName = $cols[11].Trim('"')
-
+            $fileName = $cols[10].Trim('"')
             if ([string]::IsNullOrWhiteSpace($fileName)) { continue }
 
-
-
-            $reasonLabels = Get-UsnReasonLabels -ReasonHex $cols[6].Trim('"')
+            $reasonLabels = @()
+            try {
+                $reasonLabels = Get-UsnReasonLabels -ReasonHex $cols[6].Trim('"')
+            } catch {
+                $reasonLabels = @($cols[6].Trim('"'))
+            }
 
             [void]$events.Add([pscustomobject][ordered]@{
 
@@ -296,7 +298,7 @@ function Export-QuarantineGuestUsnDelta {
 
                 fileName   = $fileName
 
-                attributes = $cols[10].Trim('"')
+                attributes = $cols[9].Trim('"')
 
             })
 
@@ -306,7 +308,9 @@ function Export-QuarantineGuestUsnDelta {
 
         }
 
-
+        if ($events.Count -eq 0 -and $null -ne $startVal -and $null -ne $endVal -and ([uint64]$endVal -gt [uint64]$startVal)) {
+            Write-Warning "USN journal advanced ($startUsn -> $endUsn) but readjournal returned 0 parsed rows."
+        }
 
         return [pscustomobject]@{
 
@@ -326,7 +330,7 @@ function Export-QuarantineGuestUsnDelta {
 
             truncated  = ($events.Count -ge $MaxEventCount)
 
-            events     = @($events)
+            events     = $events.ToArray()
 
         }
 

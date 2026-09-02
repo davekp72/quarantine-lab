@@ -29,6 +29,7 @@ $keys = @(
     'HKLM\Software\Microsoft\Windows\CurrentVersion\RunOnce',
     'HKLM\Software\WOW6432Node\Microsoft\Windows\CurrentVersion',
     'HKLM\Software\Microsoft\Windows NT\CurrentVersion',
+    'HKLM\SYSTEM\CurrentControlSet\Services',
     'HKLM\SYSTEM\CurrentControlSet\Control\Session Manager',
     'HKLM\Software\Oracle\VirtualBox Guest Additions'
 )
@@ -64,8 +65,8 @@ $meta = [ordered]@{
     scope      = 'hklm'
     capturedAt = (Get-Date).ToUniversalTime().ToString('o')
     computerName = $env:COMPUTERNAME
-    regFiles   = @($regFiles)
-    errors     = @($errors)
+    regFiles   = $regFiles.ToArray()
+    errors     = $errors.ToArray()
 }
 
 if ([string]::IsNullOrWhiteSpace($OutMetaFile)) {

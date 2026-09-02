@@ -38,7 +38,7 @@ param(
 
     [Parameter(Position = 1)]
 
-    [ValidateSet('start', 'stop', 'status', 'export-ca', 'quarantine', 'offline', 'nat', 'intnet', 'none', 'hostonly', 'hosttoguest', 'guesttohost', 'bidirectional', 'disabled', 'push', 'open', 'close', 'clear', 'run', 'copy', 'test', 'ps', 'hosts', 'install', 'capture', 'capture-live', 'diff', 'view', 'mark', 'list', 'enrich', 'probe', 'grant')]
+    [ValidateSet('start', 'stop', 'status', 'export-ca', 'quarantine', 'offline', 'nat', 'intnet', 'none', 'hostonly', 'hosttoguest', 'guesttohost', 'bidirectional', 'disabled', 'push', 'open', 'close', 'clear', 'run', 'copy', 'test', 'ps', 'hosts', 'install', 'capture', 'capture-live', 'diff', 'view', 'mark', 'list', 'enrich', 'probe', 'grant', 'deploy')]
 
     [string]$SubAction,
 
@@ -587,11 +587,11 @@ Tip: Mark USN + payload registry baseline before making test changes:
         switch ($SubAction) {
 
             'install' {
-                & (Join-Path $PSScriptRoot 'guest\Deploy-QuarantineSysmon.ps1') -ConfigPath $ConfigPath
+                & (Join-Path $PSScriptRoot 'guest\Deploy-QuarantineSysmon.ps1') -ConfigPath $ConfigPath -ShowGuestInstructions
             }
 
             'copy' {
-                & (Join-Path $PSScriptRoot 'guest\Deploy-QuarantineSysmon.ps1') -ConfigPath $ConfigPath -SkipInstall
+                & (Join-Path $PSScriptRoot 'guest\Deploy-QuarantineSysmon.ps1') -ConfigPath $ConfigPath
             }
 
             'grant' {
@@ -617,11 +617,12 @@ Then snapshot Clean and re-run manifest view -Refresh.
             default {
                 throw @'
 Usage:
-  .\quarantine-vm.ps1 sysmon copy      Copy config + installer to guest
-  .\quarantine-vm.ps1 sysmon install   Copy and install (needs Sysmon64.exe in guest sysmon folder)
+  .\quarantine-vm.ps1 sysmon copy      Copy config + Sysmon64.exe to guest
+  .\quarantine-vm.ps1 sysmon install   Copy files, then show one-time guest apply command
   .\quarantine-vm.ps1 sysmon grant     Copy one-time privilege grant script (run elevated in guest GUI)
 
-Place Sysmon64.exe in C:\Users\Public\Quarantine\sysmon\ (copy zip from Sysinternals first).
+Place Sysmon64.exe at tools\Sysmon64.exe on the host (Sysinternals zip).
+After copy/install, apply config once in elevated guest PowerShell (see install output).
 '@
             }
 
@@ -745,11 +746,18 @@ Optional GUI: Regshot-x64-Unicode.exe from https://github.com/Seabreg/Regshot
 
             }
 
+            'deploy' {
+
+                Deploy-QuarantineGuestManifestScripts -ConfigPath $ConfigPath
+
+            }
+
             default {
 
                 throw @'
 Usage:
-  .\quarantine-vm.ps1 manifest capture [-SnapshotName Clean] [-StopAfter]
+  .\quarantine-vm.ps1 manifest deploy              Copy latest manifest/USN scripts to guest
+  .\quarantine-vm.ps1 manifest capture-live -SnapshotName Evidence-... [-FromSnapshot CleanSession]
   .\quarantine-vm.ps1 manifest diff -FromSnapshot Clean -ToSnapshot Evidence-... [-UseCache] [-SkipMark] [-StopAfter]
   .\quarantine-vm.ps1 manifest view -FromSnapshot Clean -ToSnapshot Evidence-... [-UseCache] [-SkipMark] [-StopAfter]
   .\quarantine-vm.ps1 manifest enrich -SnapshotName mydif [-SkipRestore] [-DiffJsonPath path]
@@ -785,7 +793,7 @@ Quarantine VM utility (VirtualBox)
 
   stop       Stop the VM (-Force for power off)
 
-  snapshot   Save a snapshot (-SnapshotName, -SnapshotDescription). Running VM = live (RAM + disk). Existing name prompts to replace; -Force replaces without prompt. -Offline for disk-only.
+  snapshot   Save a snapshot (-SnapshotName, -SnapshotDescription). Running VM = live (RAM + disk). Existing name prompts to replace (child snapshots such as Evidence-* are deleted); -Force replaces without prompt. -Offline for disk-only.
 
   snapshots  List saved snapshots (live = includes RAM / resume session)
 

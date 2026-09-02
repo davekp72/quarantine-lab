@@ -66,8 +66,8 @@ $meta = [ordered]@{
     capturedAt = (Get-Date).ToUniversalTime().ToString('o')
     userName   = $userName
     sid        = $sid
-    regFiles   = @($regFiles)
-    errors     = @($errors)
+    regFiles   = $regFiles.ToArray()
+    errors     = $errors.ToArray()
 }
 
 if ([string]::IsNullOrWhiteSpace($OutMetaFile)) {

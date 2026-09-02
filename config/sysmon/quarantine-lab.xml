@@ -77,6 +77,7 @@
         <TargetObject condition="contains">CurrentVersion\RunOnce</TargetObject>
         <TargetObject condition="contains">Winlogon</TargetObject>
         <TargetObject condition="contains">Software\Microsoft\Feeds</TargetObject>
+        <TargetObject condition="contains">CurrentControlSet\Services</TargetObject>
       </RegistryEvent>
     </RuleGroup>
 

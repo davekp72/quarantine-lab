@@ -1,11 +1,42 @@
 (function () {
   'use strict';
 
+  const HIGH_SIGNAL_FILE_EXTENSIONS = /\.(exe|dll|sys|ps1|bat|cmd|vbs|js|hta|lnk)$/i;
+
+  /** WebView2/Chromium churn under Client.CBS — narrow paths only, not the whole package. */
+  const EBWEBVIEW_NOISE_PATTERNS = [
+    /\\EBWebView\\Default\\[^\\]+\.tmp$/i,
+    /\\EBWebView\\Default\\Cache\\/i,
+    /\\EBWebView\\Default\\Code Cache\\/i,
+    /\\EBWebView\\Default\\GPUCache\\/i,
+    /\\EBWebView\\Default\\Service Worker\\CacheStorage\\/i
+  ];
+
+  const EBWEBVIEW_PATH = /\\EBWebView\\/i;
+  const LARGE_WEBVIEW_FILE_BYTES = 2 * 1024 * 1024;
+
+  /** Windows Error Reporting report queue/archive churn (not malware-relevant). */
+  const WER_NOISE_PATTERNS = [
+    /\\ProgramData\\Microsoft\\Windows\\WER\\/i,
+    /\\Microsoft\\Windows\\WER\\/i
+  ];
+
+  const PERSISTENCE_REGISTRY_KEY_PATTERNS = [
+    /\\CurrentVersion\\Run$/i,
+    /\\CurrentVersion\\RunOnce/i,
+    /\\Policies\\Explorer\\Run/i,
+    /\\Winlogon\\/i,
+    /\\Services\\/i,
+    /\\StartupApproved\\Run/i
+  ];
+
+  let persistenceReferencedPaths = new Set();
+
   const NOISE_PATTERNS = [
     /\\Microsoft\\EdgeUpdate\\/i,
     /\\Microsoft\\OneDrive\\ListSync/i,
-    /\\Microsoft\\Windows\\WER\\/i,
     /\\Microsoft\\Windows\\AppRepository\\/i,
+    /\\Microsoft\\InstallService\\/i,
     /\\Users\\Public\\Quarantine\\/i,
     /\\Windows Security Health\\/i,
     /\\PowerGrid\\/i,
@@ -19,6 +50,51 @@
     /\\svchost\.exe/i,
     /\\MsMpEng\.exe/i,
     /\\SecurityHealthService\.exe/i
+  ];
+
+  const NETWORK_HOST_SUFFIXES = [
+    'msftconnecttest.com',
+    'microsoft.com',
+    'microsoft.net',
+    'msn.com',
+    'bing.com',
+    'windowsupdate.com',
+    'office.com',
+    'office365.com',
+    'live.com',
+    'microsoftpersonalcontent.com',
+    'onedrive.com',
+    'sharepoint.com',
+    'skype.com',
+    'windows.com',
+    'xboxlive.com',
+    'xboxab.com',
+    'azure.com',
+    'azureedge.net',
+    'trafficmanager.net',
+    'msedge.net',
+    'msauth.net',
+    'msidentity.com',
+    'hotmail.com',
+    'outlook.com',
+    'visualstudio.com',
+    'digicert.com',
+    'akamaihd.net',
+    'akamaiedge.net',
+    'akamai.net',
+    'aspnetcdn.com',
+    'windows.net',
+    'officeapps.live.com',
+    'mp.microsoft.com',
+    'events.data.microsoft.com',
+    'data.microsoft.com',
+    'telemetry.microsoft.com',
+    'msftncsi.com',
+    'cloud.microsoft',
+    'office.net',
+    'sfx.ms',
+    's-microsoft.com',
+    'akamaized.net'
   ];
 
   const NETWORK_NOISE_PATTERNS = [
@@ -72,7 +148,8 @@
     RegistryEvent: 'Registry',
     DnsQuery: 'DNS',
     FileDelete: 'File delete',
-    FileDeleteDetected: 'File delete'
+    FileDeleteDetected: 'File delete',
+    ServiceInstall: 'Service install'
   };
 
   const DISPLAY_ROW_LIMIT = 400;
@@ -92,16 +169,145 @@
   const dropzone = $('#dropzone');
   const detailPanel = $('#detail-panel');
 
+  function normalizePath(path) {
+    return String(path || '').replace(/\//g, '\\');
+  }
+
+  function isHighSignalFilePath(path) {
+    return HIGH_SIGNAL_FILE_EXTENSIONS.test(normalizePath(path));
+  }
+
+  function extractPathsFromText(text) {
+    const found = [];
+    const s = String(text || '');
+    const re = /[A-Za-z]:\\[^"\s]+/g;
+    let m;
+    while ((m = re.exec(s)) !== null) {
+      found.push(normalizePath(m[0]).toLowerCase());
+    }
+    return found;
+  }
+
+  function rebuildPersistencePathIndex() {
+    persistenceReferencedPaths = new Set();
+    if (!diff) return;
+
+    const addRef = (raw) => {
+      extractPathsFromText(raw).forEach((p) => persistenceReferencedPaths.add(p));
+    };
+
+    (diff.registry?.added || []).forEach((r) => {
+      if (PERSISTENCE_REGISTRY_KEY_PATTERNS.some((re) => re.test(r.key || ''))) {
+        addRef(r.value);
+        addRef(r.key);
+      }
+    });
+    (diff.registry?.modified || []).forEach((r) => {
+      if (PERSISTENCE_REGISTRY_KEY_PATTERNS.some((re) => re.test(r.key || ''))) {
+        addRef(r.value);
+        addRef(r.toValue || r.value);
+      }
+    });
+
+    const taskBuckets = [
+      ...(diff.tasks?.added || []),
+      ...(diff.tasks?.modified || []),
+      ...(diff.tasks?.volatileOnly || [])
+    ];
+    taskBuckets.forEach((t) => {
+      addRef(t.TaskToRun || t.taskToRun || t.command || '');
+    });
+
+    (diff.sysmon?.added || []).forEach((ev) => {
+      const blob = `${ev.targetObject || ''} ${ev.image || ''} ${ev.commandLine || ''}`;
+      if (/\\CurrentVersion\\Run/i.test(blob) || /\\RunOnce/i.test(blob) || /\\CurrentControlSet\\Services/i.test(blob)) {
+        addRef(blob);
+      }
+    });
+
+    (diff.serviceInstalls?.added || []).forEach((ev) => {
+      addRef(ev.imagePath || ev.image || '');
+      addRef(ev.serviceName || '');
+    });
+  }
+
+  function isPersistenceReferencedPath(path) {
+    const norm = normalizePath(path).toLowerCase();
+    if (!norm || persistenceReferencedPaths.size === 0) return false;
+    if (persistenceReferencedPaths.has(norm)) return true;
+    for (const ref of persistenceReferencedPaths) {
+      if (ref.length < 8) continue;
+      if (norm === ref || norm.startsWith(ref + '\\') || ref.startsWith(norm + '\\')) return true;
+      if (norm.length >= 16 && ref.length >= 16 && (norm.includes(ref) || ref.includes(norm))) return true;
+    }
+    return false;
+  }
+
+  function isWerNoisePath(path) {
+    const norm = normalizePath(path);
+    return WER_NOISE_PATTERNS.some((re) => re.test(norm));
+  }
+
+  function isEbWebViewNoisePath(path, file) {
+    const norm = normalizePath(path);
+    if (!EBWEBVIEW_PATH.test(norm)) return false;
+    if (!EBWEBVIEW_NOISE_PATTERNS.some((re) => re.test(norm))) return false;
+
+    const size = Number(file?.size ?? file?.toSize ?? file?.fromSize);
+    if (Number.isFinite(size) && size >= LARGE_WEBVIEW_FILE_BYTES) return false;
+
+    return true;
+  }
+
+  function isPathNoise(path) {
+    if (!path) return false;
+    const normalized = normalizePath(path);
+    return NOISE_PATTERNS.some((re) => re.test(normalized));
+  }
+
+  function isFileNoise(fileOrPath) {
+    const f = typeof fileOrPath === 'string' ? { path: fileOrPath } : normalizeFile(fileOrPath);
+    const path = f.path || '';
+    if (!path) return false;
+
+    if (isHighSignalFilePath(path)) return false;
+    if (isPersistenceReferencedPath(path)) return false;
+    if (isWerNoisePath(path)) return true;
+    if (isEbWebViewNoisePath(path, f)) return true;
+
+    return isPathNoise(path);
+  }
+
+  function extractNetworkHost(text) {
+    const raw = String(text || '').trim().toLowerCase();
+    if (!raw) return '';
+    try {
+      if (raw.includes('://')) {
+        return new URL(raw).hostname.toLowerCase();
+      }
+    } catch (_) { /* plain hostname */ }
+    return raw.split('/')[0].split('?')[0].split(':')[0];
+  }
+
+  function isNetworkHostNoise(text) {
+    const host = extractNetworkHost(text);
+    if (!host) return false;
+    return NETWORK_HOST_SUFFIXES.some((suffix) => host === suffix || host.endsWith('.' + suffix));
+  }
+
   function isNoise(text) {
     if (!text) return false;
-    const normalized = String(text).replace(/\//g, '\\');
-    return NOISE_PATTERNS.some((re) => re.test(normalized))
+    const normalized = normalizePath(text);
+    if (isNetworkHostNoise(normalized)) return true;
+    return isPathNoise(normalized)
       || NETWORK_NOISE_PATTERNS.some((re) => re.test(normalized));
   }
 
   function normalizeFile(item) {
     if (!item) return { path: '' };
     if (typeof item === 'string') return { path: item };
+    if (item.path) return item;
+    if (item.p) return { ...item, path: item.p };
     return item;
   }
 
@@ -293,7 +499,7 @@
       const src = f.source ? ` · ${f.source}` : '';
       rows.push({
         id: `file:added:${f.path}`,
-        category: 'files', kind: 'added', noise: isNoise(f.path),
+        category: 'files', kind: 'added', noise: isFileNoise(f),
         searchText: f.path, label: f.path, fileDetail: f, selectable: true,
         cells: [badge('added', 'added'), f.path, fmtBytes(f.size), (f.hash || '—').slice(0, 16) + src]
       });
@@ -303,7 +509,7 @@
       const src = f.source ? ` · ${f.source}` : '';
       rows.push({
         id: `file:removed:${f.path}`,
-        category: 'files', kind: 'removed', noise: isNoise(f.path),
+        category: 'files', kind: 'removed', noise: isFileNoise(f),
         searchText: f.path, label: f.path, fileDetail: f, selectable: true,
         cells: [badge('removed', 'removed'), f.path, fmtBytes(f.size), (f.hash || '—').slice(0, 16) + src]
       });
@@ -312,7 +518,7 @@
       const src = f.source ? ` · ${f.source}` : '';
       rows.push({
         id: `file:modified:${f.path}`,
-        category: 'files', kind: 'modified', noise: isNoise(f.path),
+        category: 'files', kind: 'modified', noise: isFileNoise(f),
         searchText: `${f.path} ${f.fromHash} ${f.toHash}`,
         label: f.path, fileDetail: f, selectable: true,
         cells: [
@@ -423,6 +629,27 @@
       });
     });
 
+    (diff.serviceInstalls?.added || []).forEach((ev, idx) => {
+      const label = ev.summary || `${ev.serviceName || 'Service'} -> ${ev.imagePath || '?'}`;
+      const typeLabel = SYSMON_TYPE_LABELS.ServiceInstall;
+      rows.push({
+        id: `service-install:added:${ev.id || idx}:${ev.t}`,
+        category: 'sysmon',
+        kind: 'added',
+        noise: false,
+        searchText: `${typeLabel} ${label} ${ev.serviceName || ''} ${ev.imagePath || ''} ${ev.accountName || ''}`,
+        label,
+        sysmonDetail: ev,
+        selectable: true,
+        cells: [
+          badge('added', typeLabel),
+          label,
+          ev.t || '—',
+          ev.accountName || ev.startType || '—'
+        ]
+      });
+    });
+
     (diff.network?.dns || []).forEach((d, idx) => {
       const label = d.query || '(unknown)';
       rows.push({
@@ -430,7 +657,7 @@
         category: 'network',
         networkKind: 'dns',
         kind: 'added',
-        noise: isNoise(`${label} ${d.image || ''}`),
+        noise: isNetworkHostNoise(label) || isNoise(`${label} ${d.image || ''}`),
         searchText: `${label} ${d.type || ''} ${d.source || ''} ${d.image || ''}`,
         label,
         networkDetail: d,
@@ -451,7 +678,7 @@
         category: 'network',
         networkKind: 'request',
         kind: 'added',
-        noise: isNoise(`${label} ${r.host || ''}`),
+        noise: isNetworkHostNoise(r.host || label) || isNoise(`${label} ${r.host || ''}`),
         searchText: `${r.method || ''} ${label} ${r.host || ''} ${r.source || ''}`,
         label,
         networkDetail: r,
@@ -593,6 +820,7 @@
       ['tasks', 'modified', 'Tasks modified', 'modified'],
       ['tasks', 'volatile', 'Task schedule noise', 'volatile'],
       ['sysmon', 'added', 'Sysmon events', 'added'],
+      ['sysmon', 'added', 'Service installs', 'service-installs'],
       ['network', 'added', 'DNS lookups', 'dns'],
       ['network', 'added', 'HTTP requests', 'requests']
     ];
@@ -603,6 +831,10 @@
         val = rows.filter((r) => r.category === 'network' && r.networkKind === 'dns' && (!filters.hideNoise || !r.noise)).length;
       } else if (cat === 'network' && filterKind === 'requests') {
         val = rows.filter((r) => r.category === 'network' && r.networkKind === 'request' && (!filters.hideNoise || !r.noise)).length;
+      } else if (cat === 'sysmon' && filterKind === 'service-installs') {
+        val = rows.filter((r) => r.category === 'sysmon' && r.id.startsWith('service-install:') && (!filters.hideNoise || !r.noise)).length;
+      } else if (cat === 'sysmon' && filterKind === 'added') {
+        val = rows.filter((r) => r.category === 'sysmon' && !r.id.startsWith('service-install:') && (!filters.hideNoise || !r.noise)).length;
       }
       const card = document.createElement('div');
       card.className = 'stat-card';
@@ -970,8 +1202,11 @@
     if (!panel) return;
 
     const sysmon = diff.sysmon;
-    if (!sysmon || sysmon.available === false) {
-      panel.innerHTML = `<div class="empty">${sysmon?.message || 'Sysmon not captured. Install Sysmon in the guest and re-capture with -Refresh.'}</div>`;
+    const serviceInstalls = diff.serviceInstalls;
+    const sysmonCount = (sysmon?.added || []).length;
+    const serviceInstallCount = (serviceInstalls?.added || []).length;
+    if ((!sysmon || sysmon.available === false) && serviceInstallCount === 0) {
+      panel.innerHTML = `<div class="empty">${sysmon?.message || serviceInstalls?.message || 'Sysmon not captured. Install Sysmon in the guest and re-capture with -Refresh.'}</div>`;
       return;
     }
 
@@ -981,10 +1216,11 @@
     const header = document.createElement('p');
     header.className = 'content-note';
     const isSnapshotPair = diff.meta?.compareMode === 'snapshot-pair';
+    const totalEvents = sysmonCount + serviceInstallCount;
     let headerText = isSnapshotPair
-      ? `Events in To (${diff.meta?.toSnapshot || 'To'}) not in From (${diff.meta?.fromSnapshot || 'From'}) · ${(diff.sysmon.added || []).length} new`
-      : `Events in the To snapshot not present in From · ${(diff.sysmon.added || []).length} new`;
-    if (!isSnapshotPair && sysmon.baselineAt) {
+      ? `Events in To (${diff.meta?.toSnapshot || 'To'}) not in From (${diff.meta?.fromSnapshot || 'From'}) · ${totalEvents} new (${sysmonCount} Sysmon, ${serviceInstallCount} service install)`
+      : `Events in the To snapshot not present in From · ${totalEvents} new (${sysmonCount} Sysmon, ${serviceInstallCount} service install)`;
+    if (!isSnapshotPair && sysmon?.baselineAt) {
       headerText += ` · from baseline ${sysmon.baselineAt}`;
     }
     header.textContent = headerText;
@@ -1236,6 +1472,7 @@
 
   function showDiff(data) {
     diff = data;
+    rebuildPersistencePathIndex();
     selectedRowId = null;
     selectedRegistryKey = null;
     expandedRegistryPaths.clear();

@@ -162,6 +162,37 @@ function Get-SysmonSectionFromManifest {
     return $Manifest.sysmon
 }
 
+function Get-ServiceInstallEventsFromManifest {
+    param($Manifest)
+    if (-not $Manifest) { return @() }
+    if (-not $Manifest.PSObject.Properties['serviceInstalls']) { return @() }
+    $section = $Manifest.serviceInstalls
+    if (-not $section) { return @() }
+    if ($section.PSObject.Properties['available'] -and $section.available -eq $false) { return @() }
+    if (-not $section.PSObject.Properties['events']) { return @() }
+    return @($section.events)
+}
+
+function Get-ServiceInstallEventKey {
+    param($Event)
+    $parts = foreach ($name in @('eid', 't', 'serviceName', 'imagePath', 'summary', 'id')) {
+        Get-SysmonEventFieldValue -Event $Event -Name $name
+    }
+    $key = ($parts -join '|')
+    if ([string]::IsNullOrWhiteSpace($key)) {
+        return ('service-install|{0}' -f [guid]::NewGuid().ToString('n'))
+    }
+    return $key
+}
+
+function Get-ServiceInstallSectionFromManifest {
+    param($Manifest)
+    if (-not $Manifest -or -not $Manifest.PSObject.Properties['serviceInstalls']) {
+        return [pscustomobject]@{ available = $false; message = 'Service install events not captured in manifest.'; events = @() }
+    }
+    return $Manifest.serviceInstalls
+}
+
 function Get-ManifestScanMode {
     param($Manifest)
     if (-not $Manifest) { return 'full' }
@@ -179,6 +210,7 @@ function Resolve-UsnEventPath {
     if ([string]::IsNullOrWhiteSpace($name)) { return $null }
     if ($name -match '^[A-Za-z]:\\') { return $name }
     if ($name.StartsWith('\')) { return "C:$name" }
+    if ($name -match '(^|\\)hosts$') { return 'C:\Windows\System32\drivers\etc\hosts' }
     return "C:\$name"
 }
 
@@ -235,7 +267,8 @@ function Get-EventDerivedFileChanges {
         [object]$Left,
         [Parameter(Mandatory)]
         [object]$Right,
-        [hashtable]$ScannedFiles = @{}
+        [hashtable]$ScannedFiles = @{},
+        [hashtable]$LeftScannedFiles = @{}
     )
 
     $kinds = @{}
@@ -318,18 +351,23 @@ function Get-EventDerivedFileChanges {
                 }) | Out-Null
             }
         } else {
-            if ($scan) {
+            $leftScan = if ($LeftScannedFiles.ContainsKey($path)) { $LeftScannedFiles[$path] } else { $null }
+            $rightScan = if ($ScannedFiles.ContainsKey($path)) { $ScannedFiles[$path] } else { $null }
+            if ($leftScan -or $rightScan) {
                 $item = [ordered]@{
                     path      = $path
-                    fromSize  = $null
-                    toSize    = [int64]$scan.s
-                    fromHash  = $null
-                    toHash    = [string]$scan.h
-                    toMtime   = [string]$scan.m
+                    fromSize  = if ($leftScan) { [int64]$leftScan.s } else { $null }
+                    toSize    = if ($rightScan) { [int64]$rightScan.s } else { $null }
+                    fromHash  = if ($leftScan) { [string]$leftScan.h } else { $null }
+                    toHash    = if ($rightScan) { [string]$rightScan.h } else { $null }
+                    fromMtime = if ($leftScan) { [string]$leftScan.m } else { $null }
+                    toMtime   = if ($rightScan) { [string]$rightScan.m } else { $null }
                     source    = $src
                 }
-                if ($scan.PSObject.Properties['c']) { $item.toContentEncoding = [string]$scan.c }
-                if ($scan.PSObject.Properties['d']) { $item.toContent = [string]$scan.d }
+                if ($leftScan -and $leftScan.PSObject.Properties['c']) { $item.fromContentEncoding = [string]$leftScan.c }
+                if ($leftScan -and $leftScan.PSObject.Properties['d']) { $item.fromContent = [string]$leftScan.d }
+                if ($rightScan -and $rightScan.PSObject.Properties['c']) { $item.toContentEncoding = [string]$rightScan.c }
+                if ($rightScan -and $rightScan.PSObject.Properties['d']) { $item.toContent = [string]$rightScan.d }
                 $modified.Add([pscustomobject]$item) | Out-Null
             } else {
                 $modified.Add([pscustomobject]@{
@@ -678,7 +716,7 @@ function Get-QuarantineManifestDiff {
     if ($useEventFiles) {
         $eventFiles = $null
         try {
-            $eventFiles = Get-EventDerivedFileChanges -Left $left -Right $right -ScannedFiles $rightFiles
+            $eventFiles = Get-EventDerivedFileChanges -Left $left -Right $right -ScannedFiles $rightFiles -LeftScannedFiles $leftFiles
         } catch {
             Write-Warning "Event-derived file diff failed: $($_.Exception.Message)"
             $eventFiles = [pscustomobject]@{ added = @(); removed = @(); modified = @() }
@@ -722,6 +760,7 @@ function Get-QuarantineManifestDiff {
         tasksModified     = @($modifiedTasks).Count
         tasksVolatileOnly = @($volatileTasks).Count
         sysmonAdded       = 0
+        serviceInstallsAdded = 0
         dnsQueries        = 0
         networkRequests   = 0
         fileDiffSource    = $fileDiffSource
@@ -736,6 +775,16 @@ function Get-QuarantineManifestDiff {
             Where-Object { -not $leftSysmonKeys.ContainsKey((Get-SysmonEventKey -Event $_)) }
     )
     $summary.sysmonAdded = @($addedSysmon).Count
+
+    $leftServiceInstallKeys = @{}
+    foreach ($event in (Get-ServiceInstallEventsFromManifest -Manifest $left)) {
+        $leftServiceInstallKeys[(Get-ServiceInstallEventKey -Event $event)] = $true
+    }
+    $addedServiceInstalls = @(
+        Get-ServiceInstallEventsFromManifest -Manifest $right |
+            Where-Object { -not $leftServiceInstallKeys.ContainsKey((Get-ServiceInstallEventKey -Event $_)) }
+    )
+    $summary.serviceInstallsAdded = @($addedServiceInstalls).Count
 
     $fromSnapName = Get-ManifestStringProperty -Manifest $left -Name 'snapshot'
     $toSnapName = Get-ManifestStringProperty -Manifest $right -Name 'snapshot'
@@ -809,6 +858,7 @@ function Get-QuarantineManifestDiff {
     }
 
     $rightSysmon = Get-SysmonSectionFromManifest -Manifest $right
+    $rightServiceInstalls = Get-ServiceInstallSectionFromManifest -Manifest $right
     $compareWarnings = Get-QuarantineManifestCompareWarnings -Left $left -Right $right
     $fromFileCount = if ($left.PSObject.Properties['fileCount']) { [int]$left.fileCount } else { @($left.files).Count }
     $toFileCount = if ($right.PSObject.Properties['fileCount']) { [int]$right.fileCount } else { @($right.files).Count }
@@ -863,6 +913,17 @@ function Get-QuarantineManifestDiff {
             } else { '' }
             recordedAt = if ($rightSysmon.PSObject.Properties['recordedAt']) { [string]$rightSysmon.recordedAt } else { '' }
             added      = @($addedSysmon)
+        }
+        serviceInstalls = [ordered]@{
+            available  = if ($rightServiceInstalls.PSObject.Properties['available']) { [bool]$rightServiceInstalls.available } else { $false }
+            message    = if ($rightServiceInstalls.PSObject.Properties['message']) { [string]$rightServiceInstalls.message } else { '' }
+            baselineAt = if ($isSnapshotPair) {
+                Get-ManifestStringProperty -Manifest $left -Name 'capturedAt'
+            } elseif ($rightServiceInstalls.PSObject.Properties['baselineAt']) {
+                [string]$rightServiceInstalls.baselineAt
+            } else { '' }
+            recordedAt = if ($rightServiceInstalls.PSObject.Properties['recordedAt']) { [string]$rightServiceInstalls.recordedAt } else { '' }
+            added      = @($addedServiceInstalls)
         }
         usn = if ($rightUsn) {
             [ordered]@{

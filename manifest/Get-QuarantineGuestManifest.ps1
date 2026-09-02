@@ -687,6 +687,7 @@ try {
 $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $usnOut = Join-Path $scriptDir 'usn-delta-export.json'
 $sysmonOut = Join-Path $scriptDir 'sysmon-events-export.json'
+$serviceInstallOut = Join-Path $scriptDir 'service-install-events-export.json'
 
 $privModule = Join-Path $scriptDir 'QuarantineGuestPriv.psm1'
 if (Test-Path -LiteralPath $privModule) {
@@ -704,12 +705,16 @@ function Read-QuarantineGuestJsonExport {
 
 $usnDelta = Read-QuarantineGuestJsonExport -Path $usnOut
 $sysmonEvents = Read-QuarantineGuestJsonExport -Path $sysmonOut
+$serviceInstallEvents = Read-QuarantineGuestJsonExport -Path $serviceInstallOut
 
 if (-not $usnDelta) {
     $usnDelta = [pscustomobject]@{ available = $false; eventCount = 0; message = 'USN export missing (host privileged export failed).'; events = @() }
 }
 if (-not $sysmonEvents) {
     $sysmonEvents = [pscustomobject]@{ available = $false; eventCount = 0; message = 'Sysmon export missing (host privileged export failed).'; events = @() }
+}
+if (-not $serviceInstallEvents) {
+    $serviceInstallEvents = [pscustomobject]@{ available = $false; eventCount = 0; message = 'Service install export missing (host privileged export failed).'; events = @() }
 }
 
 $manifest = [ordered]@{
@@ -728,6 +733,7 @@ $manifest = [ordered]@{
     userRegistryWarnings = @($userRegistryWarnings)
     usn          = $usnDelta
     sysmon       = $sysmonEvents
+    serviceInstalls = $serviceInstallEvents
     files        = $files
     registry     = $registry
     tasks        = $tasks

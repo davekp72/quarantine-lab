@@ -42,7 +42,7 @@ The VM is configured with conservative defaults: host→guest clipboard (one-way
 | `install` | Start VM for first-time Windows setup |
 | `start` | Boot quarantine VM |
 | `stop` | ACPI shutdown (`-Force` power off) |
-| `snapshot` | Live snapshot if VM is running. Existing name prompts to replace; `-Force` replaces without prompt. `-Offline` for disk-only. |
+| `snapshot` | Live snapshot if VM is running. Existing name prompts to replace (child snapshots are deleted); `-Force` replaces without prompt. `-Offline` for disk-only. |
 | `snapshots` | List snapshots (`live` = resume session, `disk` = cold boot) |
 | `reset` | Restore and start; live snapshots skip POST/login. `-Clean` / `-SnapshotName` |
 | `status` | Show VM name and power state |
@@ -79,7 +79,7 @@ VirtualBox calls this an *online snapshot*: pause briefly, write disk + RAM (`.s
    ```powershell
    .\quarantine-vm.ps1 snapshot -SnapshotName "Before-Outlook" -SnapshotDescription "Baseline with Outlook installed"
    ```
-   If that name already exists, you are prompted to replace it. Use `-Force` to replace without prompting:
+   If that name already exists, you are prompted to replace it. Child snapshots such as `Evidence-*` under that name are deleted first (VirtualBox cannot replace a snapshot that still has children). Use `-Force` to replace without prompting:
    ```powershell
    .\quarantine-vm.ps1 snapshot -SnapshotName CleanSession -Force
    ```
