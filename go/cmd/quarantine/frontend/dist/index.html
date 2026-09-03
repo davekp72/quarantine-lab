@@ -69,6 +69,11 @@
           </div>
         </div>
         <div id="panel-registry" class="panel">
+          <nav class="file-tabs reg-tabs">
+            <button data-reg-tab="added" class="active" type="button">New <span id="reg-count-added" class="tab-count"></span></button>
+            <button data-reg-tab="removed" type="button">Deleted <span id="reg-count-removed" class="tab-count"></span></button>
+            <button data-reg-tab="modified" type="button">Changed <span id="reg-count-modified" class="tab-count"></span></button>
+          </nav>
           <div class="split">
             <div id="registry-tree" class="tree"></div>
             <div id="registry-values" class="preview"></div>

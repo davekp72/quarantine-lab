@@ -1,6 +1,8 @@
 package disk
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
@@ -98,15 +100,23 @@ func (r *Reader) EnsureFlattened(snapshotName string) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if cached, ok := r.cache[entry.UUID]; ok {
-		if _, err := os.Stat(cached); err == nil {
+		if _, err := os.Stat(cached); err == nil && isUsableFlattenCache(cached) {
 			return cached, nil
 		}
 	}
 	uuidClean := strings.Trim(entry.UUID, "{}")
-	out := filepath.Join(r.CacheDir(), uuidClean+".vdi")
+	out := filepath.Join(r.CacheDir(), uuidClean+".raw")
 	if _, err := os.Stat(out); err == nil {
-		r.cache[entry.UUID] = out
-		return out, nil
+		if isUsableFlattenCache(out) {
+			r.cache[entry.UUID] = out
+			return out, nil
+		}
+		_ = os.Remove(out)
+	}
+	// Legacy dynamic VDI caches are not linear and cannot be read by go-ntfs.
+	legacyVDI := filepath.Join(r.CacheDir(), uuidClean+".vdi")
+	if _, err := os.Stat(legacyVDI); err == nil {
+		_ = os.Remove(legacyVDI)
 	}
 	medium := entry.DiskMediumUUID
 	if medium == "" && len(entry.VDIPaths) > 0 {
@@ -154,11 +164,15 @@ func (r *Reader) ListDirectory(snapshotName, guestPath string) ([]FileInfo, erro
 }
 
 // ReadFile reads file bytes from snapshot disk using go-ntfs when available.
+// If maxBytes <= 0, allows up to 512 MiB (for hive extraction).
 func (r *Reader) ReadFile(snapshotName, guestPath string, maxBytes int64) ([]byte, *FileInfo, error) {
 	guestPath = normalizeGuestPath(guestPath)
 	vdi, err := r.EnsureFlattened(snapshotName)
 	if err != nil {
 		return nil, nil, err
+	}
+	if maxBytes <= 0 {
+		maxBytes = 512 * 1024 * 1024
 	}
 	data, info, err := readNTFSFile(vdi, guestPath, maxBytes)
 	if err != nil {
@@ -166,6 +180,24 @@ func (r *Reader) ReadFile(snapshotName, guestPath string, maxBytes int64) ([]byt
 	}
 	info.SnapshotName = snapshotName
 	return data, info, nil
+}
+
+// ExtractFile writes a guest file from the snapshot disk to destPath on the host.
+func (r *Reader) ExtractFile(snapshotName, guestPath, destPath string) (int64, error) {
+	data, info, err := r.ReadFile(snapshotName, guestPath, 0)
+	if err != nil {
+		return 0, err
+	}
+	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+		return 0, err
+	}
+	if err := os.WriteFile(destPath, data, 0o644); err != nil {
+		return 0, err
+	}
+	if info != nil {
+		return info.Size, nil
+	}
+	return int64(len(data)), nil
 }
 
 func normalizeGuestPath(p string) string {
@@ -197,6 +229,26 @@ func readNTFSFile(vdiPath, guestPath string, maxBytes int64) ([]byte, *FileInfo,
 		return nil, nil, fmt.Errorf("read %s from %s: %w (flatten cache: %s)", guestPath, vdiPath, err, vdiPath)
 	}
 	return data, &FileInfo{Path: guestPath, Size: size}, nil
+}
+
+func isUsableFlattenCache(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	var hdr [0x60]byte
+	if _, err := f.ReadAt(hdr[:], 0); err != nil {
+		return false
+	}
+	if bytes.HasPrefix(hdr[:], []byte("<<<<<<< Oracle VM VirtualBox")) {
+		// Only fixed VDI is linear enough; dynamic VDI (type 1) uses a block map.
+		if binary.LittleEndian.Uint32(hdr[0x4c:0x50]) == 1 {
+			return false
+		}
+	}
+	_, err = ntfsPartitionReader(f)
+	return err == nil
 }
 
 func tryNTFSRead(r io.ReaderAt, guestPath string, maxBytes int64) ([]byte, int64, error) {

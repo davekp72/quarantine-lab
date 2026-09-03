@@ -12,16 +12,12 @@ import (
 )
 
 const (
-	maxChangedFileEntries      = 2500
-	maxPathResolvePerCapture   = 300
-	maxFileHashesPerCapture    = 150
-	maxUSNPathsForChangedFiles = 12000
+	maxChangedFileEntries    = 2500
+	maxFileHashesPerCapture  = 150
 )
 
-// ChangedFiles builds file entries from USN and Sysmon sidecar JSON.
-func ChangedFiles(usnRaw, sysmonRaw json.RawMessage, hashMaxMB, contentMaxKB int) (json.RawMessage, int, error) {
-	defer BeginPathResolveBudget(maxPathResolvePerCapture)()
-
+// ChangedFiles builds file entries from Sysmon file events (create, delete, modify).
+func ChangedFiles(_ json.RawMessage, sysmonRaw json.RawMessage, hashMaxMB, contentMaxKB int) (json.RawMessage, int, error) {
 	if hashMaxMB <= 0 {
 		hashMaxMB = 50
 	}
@@ -32,53 +28,6 @@ func ChangedFiles(usnRaw, sysmonRaw json.RawMessage, hashMaxMB, contentMaxKB int
 	contentMax := int64(contentMaxKB) * 1024
 
 	pathKinds := map[string]string{}
-	addPath := func(p, kind string) {
-		p = normalizePath(p)
-		if p == "" {
-			return
-		}
-		if existing, ok := pathKinds[p]; ok {
-			if kind == "removed" || (existing != "removed" && kind == "added") {
-				pathKinds[p] = kind
-			}
-			return
-		}
-		pathKinds[p] = kind
-	}
-
-	if usnRaw != nil {
-		var usn map[string]any
-		if json.Unmarshal(usnRaw, &usn) == nil {
-			if evs, ok := usn["events"].([]any); ok {
-				seenRefs := map[string]bool{}
-				for _, e := range evs {
-					if len(seenRefs) >= maxUSNPathsForChangedFiles {
-						break
-					}
-					em, ok := e.(map[string]any)
-					if !ok {
-						continue
-					}
-					name, _ := em["fileName"].(string)
-					fileRef, _ := em["fileRef"].(string)
-					dedupeKey := fileRef + "|" + name
-					if dedupeKey != "|" {
-						if seenRefs[dedupeKey] {
-							continue
-						}
-						seenRefs[dedupeKey] = true
-					}
-					reasons, _ := em["reason"].([]any)
-					kind := usnChangeKind(reasons)
-					path, _ := em["path"].(string)
-					if path == "" {
-						path = usnEventPath(DefaultVolume(), name, fileRef)
-					}
-					addPath(path, kind)
-				}
-			}
-		}
-	}
 
 	if sysmonRaw != nil {
 		var sysmon map[string]any
@@ -89,17 +38,17 @@ func ChangedFiles(usnRaw, sysmonRaw json.RawMessage, hashMaxMB, contentMaxKB int
 					if !ok {
 						continue
 					}
+					eid, _ := em["eid"].(float64)
 					typ, _ := em["t"].(string)
+					kind, isFile := SysmonFileChangeKind(int(eid), typ)
+					if !isFile {
+						continue
+					}
 					target := stringField(em, "target")
 					if target == "" {
 						target = stringField(em, "targetFilename")
 					}
-					switch typ {
-					case "FileCreate", "FileCreateStream":
-						addPath(normalizePath(target), "added")
-					case "FileDelete", "FileDeleteDetected":
-						addPath(normalizePath(target), "removed")
-					}
+					mergeFileChangeKind(pathKinds, target, kind)
 				}
 			}
 		}
@@ -116,7 +65,7 @@ func ChangedFiles(usnRaw, sysmonRaw json.RawMessage, hashMaxMB, contentMaxKB int
 		entry := map[string]any{
 			"p":      path,
 			"change": kind,
-			"src":    "events",
+			"src":    "sysmon",
 		}
 		if isLeafOnlyUSNPath(path) {
 			continue
@@ -175,39 +124,6 @@ func stringField(m map[string]any, key string) string {
 		return v
 	}
 	return ""
-}
-
-func usnChangeKind(reasons []any) string {
-	labels := map[string]bool{}
-	for _, r := range reasons {
-		if s, ok := r.(string); ok {
-			labels[s] = true
-		}
-	}
-	if labels["file_delete"] || labels["rename_old_name"] {
-		return "removed"
-	}
-	if labels["file_create"] || labels["rename_new_name"] {
-		return "added"
-	}
-	return "modified"
-}
-
-func resolveUsnPath(name string) string {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return ""
-	}
-	if len(name) >= 2 && name[1] == ':' {
-		return filepath.Clean(name)
-	}
-	if strings.HasPrefix(name, `\`) {
-		return filepath.Clean(`C:` + name)
-	}
-	if strings.Contains(strings.ToLower(name), `\hosts`) || strings.EqualFold(name, "hosts") {
-		return `C:\Windows\System32\drivers\etc\hosts`
-	}
-	return filepath.Clean(`C:\` + name)
 }
 
 func normalizePath(p string) string {

@@ -243,19 +243,24 @@ func (c *Client) DiscardState(vmName string) error {
 	return err
 }
 
-// CloneMedium flattens a registered disk medium (UUID or path) to a standalone VDI.
-func (c *Client) CloneMedium(sourceMedium, outputVDI string) error {
+// CloneMedium flattens a registered disk medium to a linear RAW image suitable for NTFS reads.
+func (c *Client) CloneMedium(sourceMedium, outputPath string) error {
 	source := formatMediumRef(sourceMedium)
 	_, err := c.RunWithTimeout(2*time.Hour,
-		"clonemedium", source, outputVDI, "--format", "VDI")
+		"clonemedium", source, outputPath, "--format", "RAW")
 	if err == nil {
 		return nil
 	}
-	// VirtualBox 6.x: clonehd when source is already the leaf medium.
-	if strings.Contains(strings.ToLower(err.Error()), "unknown option") ||
-		strings.Contains(strings.ToLower(err.Error()), "clonemedium") {
+	// Fallback: fixed VDI (linear payload; dynamic VDI uses a block map unreadable by go-ntfs).
+	_, err = c.RunWithTimeout(2*time.Hour,
+		"clonemedium", source, outputPath, "--format", "VDI", "--variant", "Fixed")
+	if err == nil {
+		return nil
+	}
+	// VirtualBox 6.x
+	if strings.Contains(strings.ToLower(err.Error()), "unknown option") {
 		_, err = c.RunWithTimeout(2*time.Hour,
-			"clonehd", source, outputVDI, "--format", "VDI")
+			"clonehd", source, outputPath, "--format", "RAW")
 	}
 	return err
 }

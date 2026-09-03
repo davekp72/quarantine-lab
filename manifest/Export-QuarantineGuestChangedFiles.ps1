@@ -128,10 +128,10 @@ function Add-PathsFromSysmon {
     foreach ($ev in @($Sysmon.events)) {
         $eid = 0
         if ($ev.PSObject.Properties['eid']) { $eid = [int]$ev.eid }
-        if ($eid -notin @(11, 23, 26)) { continue }
+        if ($eid -notin @(2, 11, 12, 23, 26)) { continue }
         $path = if ($ev.target) { [string]$ev.target } elseif ($ev.PSObject.Properties['TargetFilename']) { [string]$ev.TargetFilename } else { '' }
         if ([string]::IsNullOrWhiteSpace($path)) { continue }
-        $kind = if ($eid -in @(23, 26)) { 'removed' } else { 'added' }
+        $kind = if ($eid -in @(23, 26)) { 'removed' } elseif ($eid -eq 2) { 'modified' } else { 'added' }
         Add-ChangedPath -Path $path -Kind $kind -Source 'sysmon'
     }
 }

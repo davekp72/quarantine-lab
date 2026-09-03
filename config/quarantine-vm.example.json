@@ -78,7 +78,8 @@
   "manifest": {
     "logDir": "D:\\Vbox\\LabVM\\logs\\manifests",
     "scanMode": "events",
-    "registryEngine": "cli",
+    "registryEngine": "hive",
+    "registryDiskFlatten": false,
     "hashMaxMb": 50,
     "contentMaxKb": 51200
   },

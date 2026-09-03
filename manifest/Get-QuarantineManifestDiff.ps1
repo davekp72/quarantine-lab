@@ -303,11 +303,11 @@ function Get-EventDerivedFileChanges {
         if ($Left -and $leftSysmonKeys.ContainsKey((Get-SysmonEventKey -Event $ev))) { continue }
         $eid = 0
         if ($ev.PSObject.Properties['eid']) { $eid = [int]$ev.eid }
-        if ($eid -notin @(11, 23, 26)) { continue }
+        if ($eid -notin @(2, 11, 12, 23, 26)) { continue }
         $path = Get-SysmonEventFieldValue -Event $ev -Name 'target'
         if ([string]::IsNullOrWhiteSpace($path)) { continue }
-        $kind = if ($eid -in @(23, 26)) { 'removed' } else { 'added' }
-        if (-not $kinds.ContainsKey($path) -or $kind -eq 'removed') {
+        $kind = if ($eid -in @(23, 26)) { 'removed' } elseif ($eid -eq 2) { 'modified' } else { 'added' }
+        if (-not $kinds.ContainsKey($path) -or $kind -eq 'removed' -or ($kind -eq 'modified' -and $kinds[$path] -ne 'removed')) {
             $kinds[$path] = $kind
             $sources[$path] = 'sysmon'
         }

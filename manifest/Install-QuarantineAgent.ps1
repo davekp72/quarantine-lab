@@ -81,10 +81,21 @@ function Remove-InstallScheduledTask {
 }
 
 function Get-NewestAgentExe {
-    param([string]$Dir)
-    $versioned = Get-ChildItem -LiteralPath $Dir -Filter 'quarantine-agent-v*.exe' -File -ErrorAction SilentlyContinue |
-        Sort-Object { $_.LastWriteTimeUtc } -Descending
-    if ($versioned) {
+    param([string]$Dir, [string]$PreferVersion = '')
+    $versioned = @(Get-ChildItem -LiteralPath $Dir -Filter 'quarantine-agent-v*.exe' -File -ErrorAction SilentlyContinue)
+    if ($PreferVersion) {
+        $tag = ($PreferVersion -replace '\.', '-')
+        # Newest build for this version tag (includes -new / deploy-* fallbacks locked by the old service).
+        $matched = @($versioned | Where-Object {
+                $_.Name -eq ("quarantine-agent-v{0}.exe" -f $tag) -or
+                $_.Name -like ("quarantine-agent-v{0}-*.exe" -f $tag)
+            } | Sort-Object { $_.LastWriteTimeUtc } -Descending)
+        if ($matched.Count -gt 0) {
+            return $matched[0].FullName
+        }
+    }
+    $versioned = @($versioned | Sort-Object { $_.LastWriteTimeUtc } -Descending)
+    if ($versioned.Count -gt 0) {
         return $versioned[0].FullName
     }
     $stable = Join-Path $Dir 'quarantine-agent.exe'
@@ -142,13 +153,25 @@ if (-not (Test-Path -LiteralPath $ConfigDir)) {
 }
 
 $config = Read-InstallConfig -Dir $ConfigDir
-$agentExe = Get-NewestAgentExe -Dir $InstallDir
+$preferVer = if ($config.version) { [string]$config.version } else { '' }
+$agentExe = $null
+if ($config.binary) {
+    $cfgBin = [string]$config.binary
+    if (Test-Path -LiteralPath $cfgBin) {
+        Write-Step "Using binary from agent-install.json: $cfgBin"
+        $agentExe = $cfgBin
+    }
+}
+if (-not $agentExe) {
+    $agentExe = Get-NewestAgentExe -Dir $InstallDir -PreferVersion $preferVer
+}
 $token = Resolve-Token -ConfigDir $ConfigDir -Config $config
 $port = if ($config.port) { [int]$config.port } else { 9443 }
 $payloadUser = if ($config.payloadUser) { [string]$config.payloadUser } else { 'jkcooper' }
 $sysmonLog = if ($config.sysmonLog) { [string]$config.sysmonLog } else { 'Microsoft-Windows-Sysmon/Operational' }
 
 Write-Step "Installing from $agentExe"
+Write-Host "    Selected binary LastWriteTime: $((Get-Item -LiteralPath $agentExe).LastWriteTime)"
 $installArgs = @(
     'install',
     "-token=$token",

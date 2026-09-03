@@ -6,7 +6,9 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/quarantine-lab/quarantine/internal/agent/collectors"
 	"github.com/quarantine-lab/quarantine/internal/evidence"
+	"github.com/quarantine-lab/quarantine/internal/registry"
 )
 
 // Result matches manifest viewer diff JSON schema.
@@ -155,6 +157,8 @@ func Compare(fromPath, toPath string, left, right *evidence.Manifest) (*Result, 
 
 	added, removed, modified := diffFiles(leftFiles, rightFiles)
 	addedReg, removedReg, modifiedReg, volatileFiltered := diffRegistry(left.Registry, right.Registry)
+	addedReg, removedReg, modifiedReg, regWarnings := suppressFalseHKCUDiff(left, right, addedReg, removedReg, modifiedReg)
+	registryDiffSource := "manifest"
 
 	fileDiffSource := "manifest-scanned"
 	if left.ScanMode == "events" || right.ScanMode == "events" {
@@ -192,11 +196,11 @@ func Compare(fromPath, toPath string, left, right *evidence.Manifest) (*Result, 
 			FromScanMode:          scanMode(left),
 			ToScanMode:            scanMode(right),
 			FileDiffSource:        fileDiffSource,
-			RegistryDiffSource:    "manifest",
+			RegistryDiffSource:    registryDiffSource,
 			FromUserRegistryCount: countHKU(left.Registry),
 			ToUserRegistryCount:   countHKU(right.Registry),
 			CompareMode:           compareMode,
-			Warnings:              []string{},
+			Warnings:              append([]string{}, regWarnings...),
 		},
 		Summary: SummarySection{
 			FilesAdded:               len(added),
@@ -206,7 +210,7 @@ func Compare(fromPath, toPath string, left, right *evidence.Manifest) (*Result, 
 			RegistryRemoved:          len(removedReg),
 			RegistryModified:         len(modifiedReg),
 			RegistryVolatileFiltered: volatileFiltered,
-			RegistryDiffSource:       "manifest",
+			RegistryDiffSource:       registryDiffSource,
 			FileDiffSource:           fileDiffSource,
 			SysmonAdded:              len(addedSysmon),
 			ServiceInstallsAdded:     len(addedSvc),
@@ -238,6 +242,75 @@ func Compare(fromPath, toPath string, left, right *evidence.Manifest) (*Result, 
 		_ = addedUsn
 	}
 	return res, nil
+}
+
+// ApplyHiveRegistryDiff replaces manifest registry delta with a hive-index merge-join.
+func ApplyHiveRegistryDiff(res *Result, fromIndex, toIndex string, fromMeta, toMeta *registry.IndexMeta) error {
+	if res == nil {
+		return fmt.Errorf("result required")
+	}
+	idiff, err := registry.DiffIndexes(fromIndex, toIndex)
+	if err != nil {
+		return err
+	}
+	added := make([]evidence.RegistryEntry, 0, len(idiff.Added))
+	for _, r := range idiff.Added {
+		added = append(added, indexToEntry(r))
+	}
+	removed := make([]evidence.RegistryEntry, 0, len(idiff.Removed))
+	for _, r := range idiff.Removed {
+		removed = append(removed, indexToEntry(r))
+	}
+	modified := make([]RegistryModified, 0, len(idiff.Modified))
+	for _, m := range idiff.Modified {
+		before := m.V0
+		after := m.V1
+		if before == nil && m.H0 != "" {
+			before = fmt.Sprintf("sha256:%s", m.H0)
+			if m.S0 > 0 {
+				before = fmt.Sprintf("sha256:%s (%d bytes)", m.H0, m.S0)
+			}
+		}
+		if after == nil && m.H1 != "" {
+			after = fmt.Sprintf("sha256:%s", m.H1)
+			if m.S1 > 0 {
+				after = fmt.Sprintf("sha256:%s (%d bytes)", m.H1, m.S1)
+			}
+		}
+		modified = append(modified, RegistryModified{
+			Key: m.K, Name: m.N, Before: before, After: after, AfterType: m.T,
+		})
+	}
+	res.Registry = RegistrySection{Added: added, Removed: removed, Modified: modified}
+	res.Meta.RegistryDiffSource = "hive-index"
+	res.Summary.RegistryDiffSource = "hive-index"
+	res.Summary.RegistryAdded = len(added)
+	res.Summary.RegistryRemoved = len(removed)
+	res.Summary.RegistryModified = len(modified)
+	res.Summary.RegistryVolatileFiltered = 0
+	// Drop manifest-era HKCU false-positive warnings; hive indexes are authoritative.
+	res.Meta.Warnings = nil
+	if fromMeta != nil {
+		res.Meta.FromUserRegistryCount = fromMeta.EntryCount
+		res.Meta.Warnings = append(res.Meta.Warnings, fromMeta.Warnings...)
+	}
+	if toMeta != nil {
+		res.Meta.ToUserRegistryCount = toMeta.EntryCount
+		res.Meta.Warnings = append(res.Meta.Warnings, toMeta.Warnings...)
+	}
+	return nil
+}
+
+func indexToEntry(r registry.IndexRecord) evidence.RegistryEntry {
+	v := r.V
+	if v == nil && r.H != "" {
+		if r.Size > 0 {
+			v = fmt.Sprintf("sha256:%s (%d bytes)", r.H, r.Size)
+		} else {
+			v = fmt.Sprintf("sha256:%s", r.H)
+		}
+	}
+	return evidence.RegistryEntry{K: r.K, N: r.N, T: r.T, V: v}
 }
 
 func scanMode(m *evidence.Manifest) string {
@@ -357,11 +430,129 @@ func isVolatileRegistry(key string) bool {
 func countHKU(entries []evidence.RegistryEntry) int {
 	n := 0
 	for _, e := range entries {
-		if strings.HasPrefix(strings.ToUpper(e.K), `HKU\`) {
+		if strings.HasPrefix(strings.ToUpper(e.K), `HKU\`) || strings.HasPrefix(strings.ToUpper(e.K), `HKU:`) {
 			n++
 		}
 	}
 	return n
+}
+
+func isHKUKey(key string) bool {
+	u := strings.ToUpper(key)
+	return strings.HasPrefix(u, `HKU\`) || strings.HasPrefix(u, `HKU:`)
+}
+
+func isInteractiveUserHKU(key string) bool {
+	u := strings.ToUpper(strings.ReplaceAll(key, `/`, `\`))
+	return strings.Contains(u, `HKU:\S-1-5-21-`) || strings.Contains(u, `HKU\S-1-5-21-`)
+}
+
+func countInteractiveHKU(entries []evidence.RegistryEntry) int {
+	n := 0
+	for _, e := range entries {
+		if isInteractiveUserHKU(e.K) {
+			n++
+		}
+	}
+	return n
+}
+
+// hkcuCaptureFailed reports that user-hive capture did not succeed for this manifest.
+func hkcuCaptureFailed(m *evidence.Manifest) bool {
+	if m == nil {
+		return false
+	}
+	if len(m.UserRegistryWarn) > 0 {
+		return true
+	}
+	return false
+}
+
+// suppressFalseHKCUDiff drops mass interactive-user HKU add/remove noise when one side failed to capture HKCU.
+// Shared hives (.DEFAULT, SYSTEM) are left intact.
+func suppressFalseHKCUDiff(
+	left, right *evidence.Manifest,
+	added, removed []evidence.RegistryEntry,
+	modified []RegistryModified,
+) ([]evidence.RegistryEntry, []evidence.RegistryEntry, []RegistryModified, []string) {
+	var warnings []string
+	leftFail := hkcuCaptureFailed(left)
+	rightFail := hkcuCaptureFailed(right)
+	leftHKU := countInteractiveHKU(left.Registry)
+	rightHKU := countInteractiveHKU(right.Registry)
+
+	if !rightFail && rightHKU == 0 && leftHKU >= 50 {
+		rightFail = true
+		warnings = append(warnings,
+			fmt.Sprintf("Payload HKCU absent on To (%s) while From has %d user entries — treating as capture miss, not mass delete",
+				right.Snapshot, leftHKU))
+	}
+	if !leftFail && leftHKU == 0 && rightHKU >= 50 {
+		leftFail = true
+		warnings = append(warnings,
+			fmt.Sprintf("Payload HKCU absent on From (%s) while To has %d user entries — treating as capture miss, not mass add",
+				left.Snapshot, rightHKU))
+	}
+
+	if rightFail && leftHKU > 0 {
+		before := len(removed)
+		removed = filterRegistryEntries(removed, func(e evidence.RegistryEntry) bool { return !isInteractiveUserHKU(e.K) })
+		if n := before - len(removed); n > 0 {
+			warnings = append(warnings,
+				fmt.Sprintf("Suppressed %d false payload-HKCU removals (To snapshot HKCU capture unavailable)", n))
+		}
+		modified = filterRegistryModified(modified, func(m RegistryModified) bool { return !isInteractiveUserHKU(m.Key) })
+	}
+	if leftFail && rightHKU > 0 {
+		before := len(added)
+		added = filterRegistryEntries(added, func(e evidence.RegistryEntry) bool { return !isInteractiveUserHKU(e.K) })
+		if n := before - len(added); n > 0 {
+			warnings = append(warnings,
+				fmt.Sprintf("Suppressed %d false payload-HKCU additions (From snapshot HKCU capture unavailable)", n))
+		}
+		modified = filterRegistryModified(modified, func(m RegistryModified) bool { return !isInteractiveUserHKU(m.Key) })
+	}
+	if leftFail && len(left.UserRegistryWarn) > 0 {
+		warnings = append(warnings, "From snapshot: "+strings.Join(left.UserRegistryWarn, "; "))
+	}
+	if rightFail && len(right.UserRegistryWarn) > 0 {
+		warnings = append(warnings, "To snapshot: "+strings.Join(right.UserRegistryWarn, "; "))
+	}
+	return added, removed, modified, uniqueStrings(warnings)
+}
+
+func filterRegistryEntries(in []evidence.RegistryEntry, keep func(evidence.RegistryEntry) bool) []evidence.RegistryEntry {
+	out := make([]evidence.RegistryEntry, 0, len(in))
+	for _, e := range in {
+		if keep(e) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func filterRegistryModified(in []RegistryModified, keep func(RegistryModified) bool) []RegistryModified {
+	out := make([]RegistryModified, 0, len(in))
+	for _, e := range in {
+		if keep(e) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func uniqueStrings(in []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range in {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
 }
 
 func parseEventsSection(raw json.RawMessage) []map[string]any {
@@ -466,42 +657,33 @@ func diffUSN(left, right *evidence.Manifest, compareMode string) ([]map[string]a
 
 func diffEventFiles(left, right *evidence.Manifest) (added []FileDetail, removed []FileDetail, modified []FileModified) {
 	pathKinds := map[string]string{}
-	addPath := func(path, kind string) {
-		if path == "" {
-			return
-		}
-		p := strings.ToLower(path)
-		if kind == "removed" {
-			pathKinds[p] = "removed"
-		} else if _, ok := pathKinds[p]; !ok {
-			pathKinds[p] = kind
-		}
-	}
-	for _, ev := range parseEventsSection(right.USN) {
-		addPath(resolveUSNPath(ev), usnKind(ev))
-	}
 	for _, ev := range parseEventsSection(right.Sysmon) {
 		eid, _ := ev["eid"].(float64)
+		typ, _ := ev["t"].(string)
+		kind, isFile := collectors.SysmonFileChangeKind(int(eid), typ)
+		if !isFile {
+			continue
+		}
 		target, _ := ev["target"].(string)
+		if target == "" {
+			target, _ = ev["targetFilename"].(string)
+		}
 		if target == "" {
 			continue
 		}
-		kind := "added"
-		if int(eid) == 23 || int(eid) == 26 {
-			kind = "removed"
-		}
-		addPath(target, kind)
+		collectors.MergeFileChangeKind(pathKinds, target, kind)
 	}
 	for path, kind := range pathKinds {
+		path = strings.ToLower(path)
 		switch kind {
 		case "added":
-			added = append(added, FileDetail{Path: path, Change: kind, Src: "events"})
+			added = append(added, FileDetail{Path: path, Change: kind, Src: "sysmon"})
 		case "removed":
-			removed = append(removed, FileDetail{Path: path, Change: kind, Src: "events"})
+			removed = append(removed, FileDetail{Path: path, Change: kind, Src: "sysmon"})
 		default:
 			modified = append(modified, FileModified{
 				Path: path,
-				After: FileDetail{Path: path, Change: kind, Src: "events"},
+				After: FileDetail{Path: path, Change: kind, Src: "sysmon"},
 			})
 		}
 	}

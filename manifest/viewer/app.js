@@ -144,6 +144,7 @@
   const SYSMON_TYPE_LABELS = {
     ProcessCreate: 'Process',
     FileCreate: 'File create',
+    FileCreateTime: 'File modified',
     FileCreateStream: 'File stream',
     RegistryEvent: 'Registry',
     DnsQuery: 'DNS',

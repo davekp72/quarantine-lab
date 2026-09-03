@@ -2,7 +2,7 @@ package types
 
 import "encoding/json"
 
-const Version = "1.0.9"
+const Version = "1.0.12"
 
 // CaptureRequest is POST /v1/capture body.
 type CaptureRequest struct {
@@ -25,9 +25,24 @@ type CaptureResponse struct {
 	Sysmon          json.RawMessage `json:"sysmon"`
 	ServiceInstalls json.RawMessage `json:"serviceInstalls"`
 	Registry        RegistryBundle  `json:"registry"`
+	Hives           *HiveDump       `json:"hives,omitempty"`
 	ChangedFiles    json.RawMessage `json:"changedFiles"`
 	Warnings        []string        `json:"warnings,omitempty"`
 	Stats           CaptureStats    `json:"stats,omitempty"`
+}
+
+// HiveDump is a guest-side `reg save` of full hives for host-side indexing.
+type HiveDump struct {
+	GuestDir string     `json:"guestDir"`
+	Files    []HiveFile `json:"files"`
+	Warnings []string   `json:"warnings,omitempty"`
+}
+
+// HiveFile is one saved hive on the guest.
+type HiveFile struct {
+	Name      string `json:"name"`
+	GuestPath string `json:"guestPath"`
+	Prefix    string `json:"prefix"`
 }
 
 type CaptureStats struct {
@@ -36,12 +51,14 @@ type CaptureStats struct {
 	ServiceInstallEvents int `json:"serviceInstallEvents"`
 	HKLMEntries         int `json:"hklmEntries"`
 	HKCUEntries         int `json:"hkcuEntries"`
+	HKUEntries          int `json:"hkuEntries"`
 	ChangedFiles        int `json:"changedFiles"`
 }
 
 type RegistryBundle struct {
 	HKLM     []RegistryEntry `json:"hklm"`
 	HKCU     []RegistryEntry `json:"hkcu"`
+	HKU      []RegistryEntry `json:"hku,omitempty"` // .DEFAULT / system SIDs
 	Warnings []string        `json:"warnings,omitempty"`
 	SID      string          `json:"sid,omitempty"`
 	UserName string          `json:"userName,omitempty"`

@@ -7,6 +7,7 @@ require (
 	github.com/wailsapp/wails/v2 v2.15.0
 	golang.org/x/sys v0.46.0
 	www.velocidex.com/golang/go-ntfs v0.2.1
+	www.velocidex.com/golang/regparser v0.0.0-20250203141505-31e704a67ef7
 )
 
 require (

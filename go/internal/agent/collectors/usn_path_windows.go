@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -127,6 +128,23 @@ func usnEventPath(volume, fileName, fileRef string) string {
 		}
 	}
 	return resolveUsnPath(fileName)
+}
+
+func resolveUsnPath(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	if len(name) >= 2 && name[1] == ':' {
+		return filepath.Clean(name)
+	}
+	if strings.HasPrefix(name, `\`) {
+		return filepath.Clean(`C:` + name)
+	}
+	if strings.Contains(strings.ToLower(name), `\hosts`) || strings.EqualFold(name, "hosts") {
+		return `C:\Windows\System32\drivers\etc\hosts`
+	}
+	return filepath.Clean(`C:\` + name)
 }
 
 func isLeafOnlyPath(p string) bool {

@@ -45,8 +45,8 @@ func (s *Server) ListenAndServe() error {
 		Addr:              addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 30 * time.Second,
-		ReadTimeout:       15 * time.Minute,
-		WriteTimeout:      15 * time.Minute,
+		ReadTimeout:       30 * time.Minute,
+		WriteTimeout:      30 * time.Minute,
 	}
 	return s.httpServer.ListenAndServe()
 }

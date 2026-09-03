@@ -16,9 +16,9 @@ param(
 
     [string]$LogName = 'Microsoft-Windows-Sysmon/Operational',
 
-    [int]$MaxEvents = 5000,
+    [int]$MaxEvents = 50000,
 
-    [int[]]$IncludeEventIds = @(1, 11, 12, 13, 22, 23, 26),
+    [int[]]$IncludeEventIds = @(1, 2, 11, 12, 13, 22, 23, 26),
 
     [string]$OutFile = ''
 
@@ -45,6 +45,8 @@ function Get-SysmonEventTypeName {
     switch ($EventId) {
 
         1 { return 'ProcessCreate' }
+
+        2 { return 'FileCreateTime' }
 
         11 { return 'FileCreate' }
 

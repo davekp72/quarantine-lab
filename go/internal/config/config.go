@@ -111,6 +111,7 @@ type ManifestConfig struct {
 	LogDir                  string `json:"logDir"`
 	ScanMode                string `json:"scanMode"`
 	RegistryEngine          string `json:"registryEngine"`
+	RegistryDiskFlatten     bool   `json:"registryDiskFlatten"`
 	SessionBaselineSnapshot string `json:"sessionBaselineSnapshot"`
 	HashMaxMB               int    `json:"hashMaxMb"`
 	ContentMaxKB            int    `json:"contentMaxKb"`
@@ -148,7 +149,7 @@ func Load(path string) (*Config, error) {
 		cfg.Manifest.ScanMode = "events"
 	}
 	if cfg.Manifest.RegistryEngine == "" {
-		cfg.Manifest.RegistryEngine = "cli"
+		cfg.Manifest.RegistryEngine = "hive"
 	}
 	if cfg.Guest.CopyTargetDir == "" {
 		cfg.Guest.CopyTargetDir = `C:\Users\Public\Quarantine`

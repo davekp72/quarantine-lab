@@ -31,7 +31,7 @@ const (
 )
 
 var sysmonEventIDs = map[int]string{
-	1: "ProcessCreate", 11: "FileCreate", 12: "FileCreateStream", 13: "RegistryEvent",
+	1: "ProcessCreate", 2: "FileCreateTime", 11: "FileCreate", 12: "FileCreateStream", 13: "RegistryEvent",
 	22: "DnsQuery", 23: "FileDelete", 26: "FileDeleteDetected",
 }
 
@@ -42,7 +42,7 @@ func SysmonEvents(logName, baselineAt string, maxEvents int) (json.RawMessage, i
 		logName = `Microsoft-Windows-Sysmon/Operational`
 	}
 	if maxEvents <= 0 {
-		maxEvents = 5000
+		maxEvents = 50000
 	}
 	available := sysmonRunning()
 	if !available {
@@ -139,7 +139,7 @@ func parseBaselineTime(baselineAt string) string {
 }
 
 func buildTimeQuery(since string) string {
-	ids := []string{"1", "11", "12", "13", "22", "23", "26"}
+	ids := []string{"1", "2", "11", "12", "13", "22", "23", "26"}
 	var parts []string
 	for _, id := range ids {
 		parts = append(parts, fmt.Sprintf("EventID=%s", id))

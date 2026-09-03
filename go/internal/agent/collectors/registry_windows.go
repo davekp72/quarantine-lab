@@ -4,6 +4,7 @@ package collectors
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"syscall"
 	"unsafe"
@@ -60,6 +61,20 @@ var hkcuRoots = []struct {
 	{`Software\Microsoft\Windows\CurrentVersion\RunOnce`, `HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce`},
 }
 
+// Shared HKU hives (not the interactive payload user) that malware/lab edits often target.
+var hkuSharedRoots = []struct {
+	path   string
+	prefix string
+}{
+	{`.DEFAULT\Software`, `HKU:\.DEFAULT\Software`},
+	{`.DEFAULT\System`, `HKU:\.DEFAULT\System`},
+	{`.DEFAULT\Environment`, `HKU:\.DEFAULT\Environment`},
+	{`S-1-5-18\Software`, `HKU:\S-1-5-18\Software`},
+	{`S-1-5-18\System`, `HKU:\S-1-5-18\System`},
+	{`S-1-5-19\Software`, `HKU:\S-1-5-19\Software`},
+	{`S-1-5-20\Software`, `HKU:\S-1-5-20\Software`},
+}
+
 // ExportHKLM walks predefined HKLM keys.
 func ExportHKLM() ([]types.RegistryEntry, error) {
 	var entries []types.RegistryEntry
@@ -72,6 +87,30 @@ func ExportHKLM() ([]types.RegistryEntry, error) {
 		k.Close()
 	}
 	return entries, nil
+}
+
+// ExportHKUShared walks .DEFAULT and well-known system user hives under HKEY_USERS.
+func ExportHKUShared() ([]types.RegistryEntry, error) {
+	var entries []types.RegistryEntry
+	for _, root := range hkuSharedRoots {
+		k, err := registry.OpenKey(registry.USERS, root.path, registry.READ|registry.ENUMERATE_SUB_KEYS)
+		if err != nil {
+			continue
+		}
+		walkKey(k, root.prefix, &entries, 10000)
+		k.Close()
+	}
+	return entries, nil
+}
+
+// PayloadIdentity resolves the payload user's SID without walking HKCU.
+func PayloadIdentity(payloadUser string) (sid, user string, err error) {
+	token, sid, user, err := userSessionToken(payloadUser)
+	if err != nil {
+		return "", "", err
+	}
+	token.Close()
+	return sid, user, nil
 }
 
 // ExportHKCU exports payload user registry via impersonation.
@@ -117,10 +156,30 @@ func userSessionToken(username string) (windows.Token, string, string, error) {
 	}
 
 	target := strings.ToLower(username)
+	var candidates []wtsSessionInfo
 	for _, s := range sessions {
-		if s.State != windows.WTSActive && s.State != windows.WTSConnected {
-			continue
+		switch s.State {
+		case windows.WTSActive, windows.WTSConnected, windows.WTSDisconnected:
+			candidates = append(candidates, s)
 		}
+	}
+	// Prefer active/connected sessions, then disconnected (locked desktop).
+	sort.SliceStable(candidates, func(i, j int) bool {
+		rank := func(st uint32) int {
+			switch st {
+			case windows.WTSActive:
+				return 0
+			case windows.WTSConnected:
+				return 1
+			default:
+				return 2
+			}
+		}
+		return rank(candidates[i].State) < rank(candidates[j].State)
+	})
+
+	var lastErr error
+	for _, s := range candidates {
 		user, err := querySessionUserName(s.SessionID)
 		if err != nil {
 			continue
@@ -128,22 +187,29 @@ func userSessionToken(username string) (windows.Token, string, string, error) {
 		if strings.ToLower(user) != target {
 			continue
 		}
+		_ = privileges.EnableManifestRead()
 		var token windows.Token
 		r0, _, e1 := procWTSQueryUserToken.Call(uintptr(s.SessionID), uintptr(unsafe.Pointer(&token)))
 		if r0 == 0 {
-			return 0, "", "", fmt.Errorf("WTSQueryUserToken: %v", e1)
+			lastErr = fmt.Errorf("WTSQueryUserToken: %v", e1)
+			continue
 		}
 		sid, err := tokenUserSID(token)
 		if err != nil {
 			token.Close()
-			return 0, "", "", err
+			lastErr = err
+			continue
 		}
 		dup, err := privileges.DuplicateImpersonationToken(token)
 		token.Close()
 		if err != nil {
-			return 0, "", "", err
+			lastErr = err
+			continue
 		}
 		return dup, sid, user, nil
+	}
+	if lastErr != nil {
+		return 0, "", "", lastErr
 	}
 	return 0, "", "", fmt.Errorf("no active session for payload user %q (log in inside the VM)", username)
 }

@@ -20,6 +20,9 @@ var backupPrivs = []string{
 	"SeRestorePrivilege",
 	"SeSecurityPrivilege",
 	"SeManageVolumePrivilege",
+	"SeTcbPrivilege",
+	"SeImpersonatePrivilege",
+	"SeAssignPrimaryTokenPrivilege",
 }
 
 // EnableManifestRead enables privileges needed for USN journal and event log reads.

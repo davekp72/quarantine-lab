@@ -12,8 +12,16 @@ func ExportHKLM() ([]types.RegistryEntry, error) {
 	return nil, fmt.Errorf("registry collector requires windows")
 }
 
+func ExportHKUShared() ([]types.RegistryEntry, error) {
+	return nil, fmt.Errorf("registry collector requires windows")
+}
+
 func ExportHKCU(payloadUser string) ([]types.RegistryEntry, string, string, error) {
 	return nil, "", "", fmt.Errorf("registry collector requires windows")
+}
+
+func PayloadIdentity(payloadUser string) (sid, user string, err error) {
+	return "", "", fmt.Errorf("registry collector requires windows")
 }
 
 func PayloadSessionActive(payloadUser string) (bool, string) {

@@ -18,6 +18,10 @@ const WER_NOISE_PATTERNS = [
   /\\Microsoft\\Windows\\WER\\/i,
 ];
 
+const EPHEMERAL_TEMP_PATTERNS = [
+  /\\SystemTemp\\__PSScriptPolicyTest_[^\\]+\.ps1$/i,
+];
+
 const NOISE_PATTERNS = [
   /\\Microsoft\\EdgeUpdate\\/i,
   /\\Microsoft\\OneDrive\\ListSync/i,
@@ -86,6 +90,11 @@ function isEbWebViewNoisePath(path, file) {
   return true;
 }
 
+export function isEphemeralTempPath(path) {
+  const norm = normalizePath(path);
+  return EPHEMERAL_TEMP_PATTERNS.some((re) => re.test(norm));
+}
+
 function isPathNoise(path) {
   if (!path) return false;
   return NOISE_PATTERNS.some((re) => re.test(normalizePath(path)));
@@ -103,6 +112,7 @@ export function isFileNoise(fileOrPath) {
   const f = typeof fileOrPath === 'string' ? { path: fileOrPath } : normalizeFile(fileOrPath);
   const path = f.path || fileOrPath?.fileName || '';
   if (!path) return false;
+  if (isEphemeralTempPath(path)) return true;
   if (isHighSignalFilePath(path)) return false;
   if (isWerNoisePath(path)) return true;
   if (isEbWebViewNoisePath(path, f)) return true;
@@ -203,6 +213,7 @@ export function filterDiff(diff, hideNoise) {
     filesModified: filtered.files.modified.length,
     sysmonAdded: filtered.sysmon.added.length,
     registryAdded: (base.registry?.added || []).length,
+    registryRemoved: (base.registry?.removed || []).length,
     registryModified: (base.registry?.modified || []).length,
   };
   return filtered;

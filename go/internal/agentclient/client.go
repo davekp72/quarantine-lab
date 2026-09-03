@@ -40,7 +40,7 @@ func New(cfg *config.Config) (*Client, error) {
 	return &Client{
 		BaseURL: fmt.Sprintf("http://%s:%d", host, port),
 		Token:   token,
-		HTTP:    &http.Client{Timeout: 15 * time.Minute},
+		HTTP:    &http.Client{Timeout: 30 * time.Minute},
 	}, nil
 }
 
@@ -104,9 +104,14 @@ func (c *Client) post(ctx context.Context, path string, body any, out any) error
 }
 
 func decode(resp *http.Response, out any) error {
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 128<<20))
+	const maxBody = 512 << 20 // 512 MiB
+	limited := io.LimitReader(resp.Body, maxBody+1)
+	data, err := io.ReadAll(limited)
 	if err != nil {
 		return err
+	}
+	if len(data) > maxBody {
+		return fmt.Errorf("agent response exceeds %d MiB (truncated); reduce contentMaxKb or changed-file capture", maxBody>>20)
 	}
 	if resp.StatusCode >= 400 {
 		msg := strings.TrimSpace(string(data))
@@ -118,8 +123,15 @@ func decode(resp *http.Response, out any) error {
 	if out == nil {
 		return nil
 	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return fmt.Errorf("decode agent response: empty body (HTTP %s) — agent may have crashed or timed out during capture", resp.Status)
+	}
 	if err := json.Unmarshal(data, out); err != nil {
-		return fmt.Errorf("decode agent response: %w", err)
+		preview := string(data)
+		if len(preview) > 240 {
+			preview = preview[:120] + "…" + preview[len(preview)-120:]
+		}
+		return fmt.Errorf("decode agent response: %w (len=%d preview=%q)", err, len(data), preview)
 	}
 	return nil
 }

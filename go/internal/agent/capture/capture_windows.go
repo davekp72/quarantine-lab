@@ -76,7 +76,7 @@ func Run(req types.CaptureRequest, cfg types.AgentConfig) (*types.CaptureRespons
 		if sysmonLog == "" {
 			sysmonLog = `Microsoft-Windows-Sysmon/Operational`
 		}
-		sysmon, sysCount, err := collectors.SysmonEvents(sysmonLog, baselineAt, 5000)
+		sysmon, sysCount, err := collectors.SysmonEvents(sysmonLog, baselineAt, 50000)
 		if err != nil {
 			resp.Warnings = append(resp.Warnings, "sysmon: "+err.Error())
 		}
@@ -90,13 +90,31 @@ func Run(req types.CaptureRequest, cfg types.AgentConfig) (*types.CaptureRespons
 		resp.ServiceInstalls = svc
 		resp.Stats.ServiceInstallEvents = svcCount
 
-		changed, fileCount, err := collectors.ChangedFiles(resp.USN, sysmon, req.HashMaxMB, req.ContentMaxKB)
+		changed, fileCount, err := collectors.ChangedFiles(nil, sysmon, req.HashMaxMB, req.ContentMaxKB)
 		if err != nil {
 			resp.Warnings = append(resp.Warnings, "changed files: "+err.Error())
 		} else {
 			resp.ChangedFiles = changed
 			resp.Stats.ChangedFiles = fileCount
 		}
+	}
+
+	// Full hive dumps first — Compare source of truth. Skip curated walks when dumps work
+	// so the HTTP JSON stays small (avoids host "unexpected end of JSON" truncations).
+	if dump, err := collectors.SaveRegistryHives(req.Snapshot, payloadUser); err != nil {
+		resp.Warnings = append(resp.Warnings, "hive dump: "+err.Error())
+	} else if dump != nil && len(dump.Files) > 0 {
+		resp.Hives = dump
+		resp.Warnings = append(resp.Warnings, dump.Warnings...)
+		if sid, user, idErr := collectors.PayloadIdentity(payloadUser); idErr != nil {
+			resp.Warnings = append(resp.Warnings, "payload identity: "+idErr.Error())
+			resp.Registry.Warnings = append(resp.Registry.Warnings, idErr.Error())
+		} else {
+			resp.Registry.SID = sid
+			resp.Registry.UserName = user
+		}
+		resp.Warnings = append(resp.Warnings, "registry walks omitted (hive dump present)")
+		return resp, nil
 	}
 
 	hklm, err := collectors.ExportHKLM()
@@ -116,6 +134,14 @@ func Run(req types.CaptureRequest, cfg types.AgentConfig) (*types.CaptureRespons
 		resp.Registry.SID = sid
 		resp.Registry.UserName = user
 		resp.Stats.HKCUEntries = len(hkcu)
+	}
+
+	hku, err := collectors.ExportHKUShared()
+	if err != nil {
+		resp.Warnings = append(resp.Warnings, "hku: "+err.Error())
+	} else {
+		resp.Registry.HKU = hku
+		resp.Stats.HKUEntries = len(hku)
 	}
 
 	return resp, nil

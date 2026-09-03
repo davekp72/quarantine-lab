@@ -28,6 +28,17 @@ func ShouldHideUSNLeafFile(f FileDetail) bool {
 	return f.Hash == "" && f.Size == 0
 }
 
+// IsEphemeralTempPath reports short-lived Windows temp files (e.g. PowerShell
+// execution-policy probes) that often appear in USN/Sysmon but are gone by snapshot time.
+func IsEphemeralTempPath(p string) bool {
+	p = filepath.Clean(p)
+	lower := strings.ToLower(p)
+	if !strings.Contains(lower, `\systemtemp\`) {
+		return false
+	}
+	return strings.Contains(lower, `__psscriptpolicytest_`) && strings.HasSuffix(lower, `.ps1`)
+}
+
 func filterUSNLeafFiles(added []FileDetail, removed []FileDetail, modified []FileModified) ([]FileDetail, []FileDetail, []FileModified) {
 	filterAdded := make([]FileDetail, 0, len(added))
 	for _, f := range added {

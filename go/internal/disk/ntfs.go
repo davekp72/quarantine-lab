@@ -13,13 +13,13 @@ import (
 
 func ntfsReadFile(r io.ReaderAt, guestPath string, maxBytes int64) ([]byte, int64, error) {
 	if maxBytes <= 0 {
-		maxBytes = 10 * 1024 * 1024
+		maxBytes = 512 * 1024 * 1024
 	}
-	offset, err := findNTFSOffset(r)
+	part, err := ntfsPartitionReader(r)
 	if err != nil {
 		return nil, 0, err
 	}
-	ctx, err := ntfs.GetNTFSContext(r, offset)
+	ctx, err := ntfs.GetNTFSContext(part, 0)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -55,16 +55,23 @@ func guestToNTFSPath(guestPath string) string {
 }
 
 func findNTFSOffset(r io.ReaderAt) (int64, error) {
-	// Common Windows VDI layouts: try GPT ESP skip then NTFS, then MBR.
+	for _, start := range mbrPartitionStarts(r) {
+		if ok, _ := isNTFSBoot(r, start); ok {
+			return start, nil
+		}
+	}
+	if off := findGPTNTFSOffset(r); off >= 0 {
+		return off, nil
+	}
+	// Common offsets: ESP skip, Windows default partition start.
 	candidates := []int64{0, 512, 1024 * 1024, 2048 * 512}
 	for _, off := range candidates {
 		if ok, _ := isNTFSBoot(r, off); ok {
 			return off, nil
 		}
 	}
-	// Scan first 4MB for NTFS OEM ID
 	var buf [512]byte
-	for off := int64(0); off < 4*1024*1024; off += 512 {
+	for off := int64(0); off < 64*1024*1024; off += 512 {
 		if _, err := r.ReadAt(buf[:], off); err != nil {
 			break
 		}
@@ -73,6 +80,88 @@ func findNTFSOffset(r io.ReaderAt) (int64, error) {
 		}
 	}
 	return 0, fmt.Errorf("NTFS partition not found in disk image")
+}
+
+func mbrPartitionStarts(r io.ReaderAt) []int64 {
+	var mbr [512]byte
+	if _, err := r.ReadAt(mbr[:], 0); err != nil {
+		return nil
+	}
+	if binary.LittleEndian.Uint16(mbr[510:512]) != 0xAA55 {
+		return nil
+	}
+	var starts []int64
+	for i := 0; i < 4; i++ {
+		base := 446 + i*16
+		start := binary.LittleEndian.Uint32(mbr[base+8 : base+12])
+		if start > 0 {
+			starts = append(starts, int64(start)*512)
+		}
+	}
+	return starts
+}
+
+func findGPTNTFSOffset(r io.ReaderAt) int64 {
+	var mbr [512]byte
+	if _, err := r.ReadAt(mbr[:], 0); err != nil {
+		return -1
+	}
+	if binary.LittleEndian.Uint16(mbr[510:512]) != 0xAA55 || mbr[450] != 0xEE {
+		return -1
+	}
+	var gptHdr [512]byte
+	if _, err := r.ReadAt(gptHdr[:], 512); err != nil {
+		return -1
+	}
+	if !bytes.Equal(gptHdr[0:8], []byte("EFI PART")) {
+		return -1
+	}
+	entryLBA := binary.LittleEndian.Uint64(gptHdr[72:80])
+	entryCount := binary.LittleEndian.Uint32(gptHdr[80:84])
+	entrySize := binary.LittleEndian.Uint32(gptHdr[84:88])
+	if entryLBA == 0 || entryCount == 0 || entrySize < 128 {
+		return -1
+	}
+	if entryCount > 128 {
+		entryCount = 128
+	}
+	entryOff := int64(entryLBA) * 512
+	buf := make([]byte, int(entrySize))
+	var bestOff int64 = -1
+	var bestSize uint64
+	for i := uint32(0); i < entryCount; i++ {
+		off := entryOff + int64(i)*int64(entrySize)
+		if _, err := r.ReadAt(buf, off); err != nil {
+			break
+		}
+		if isZeroGUID(buf[0:16]) {
+			continue
+		}
+		firstLBA := binary.LittleEndian.Uint64(buf[32:40])
+		lastLBA := binary.LittleEndian.Uint64(buf[40:48])
+		if firstLBA == 0 || lastLBA < firstLBA {
+			continue
+		}
+		partOff := int64(firstLBA) * 512
+		if ok, _ := isNTFSBoot(r, partOff); !ok {
+			continue
+		}
+		size := lastLBA - firstLBA + 1
+		if size > bestSize {
+			bestSize = size
+			bestOff = partOff
+		}
+	}
+	return bestOff
+}
+
+func isZeroGUID(b []byte) bool {
+	for _, v := range b {
+		if v != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func isNTFSBoot(r io.ReaderAt, offset int64) (bool, error) {
@@ -84,11 +173,11 @@ func isNTFSBoot(r io.ReaderAt, offset int64) (bool, error) {
 }
 
 func ntfsListDir(r io.ReaderAt, guestPath string) ([]FileInfo, error) {
-	offset, err := findNTFSOffset(r)
+	part, err := ntfsPartitionReader(r)
 	if err != nil {
 		return nil, err
 	}
-	ctx, err := ntfs.GetNTFSContext(r, offset)
+	ctx, err := ntfs.GetNTFSContext(part, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -133,17 +222,4 @@ func ntfsListDir(r io.ReaderAt, guestPath string) ([]FileInfo, error) {
 
 func stringsHasSuffix(s, suffix string) bool {
 	return len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix
-}
-
-// readPartitionStart reads MBR partition LBA if present.
-func readPartitionStart(r io.ReaderAt) int64 {
-	var mbr [512]byte
-	if _, err := r.ReadAt(mbr[:], 0); err != nil {
-		return 0
-	}
-	if binary.LittleEndian.Uint16(mbr[510:512]) != 0xAA55 {
-		return 0
-	}
-	start := binary.LittleEndian.Uint32(mbr[446+8 : 446+12])
-	return int64(start) * 512
 }

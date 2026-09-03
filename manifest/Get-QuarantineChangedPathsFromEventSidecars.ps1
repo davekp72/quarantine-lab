@@ -104,10 +104,10 @@ function Get-QuarantineChangedPathMapFromEventSidecars {
     if ($Sysmon -and (Get-QuarantineJsonProperty -Object $Sysmon -Name 'available') -ne $false -and $sysmonEvents.Length -gt 0) {
         foreach ($ev in $sysmonEvents) {
             $eid = [int](Get-QuarantineJsonProperty -Object $ev -Name 'eid')
-            if ($eid -notin @(11, 23, 26)) { continue }
+            if ($eid -notin @(2, 11, 12, 23, 26)) { continue }
             $path = [string](Get-QuarantineJsonProperty -Object $ev -Name 'target')
             if ([string]::IsNullOrWhiteSpace($path)) { continue }
-            $kind = if ($eid -in @(23, 26)) { 'removed' } else { 'added' }
+            $kind = if ($eid -in @(23, 26)) { 'removed' } elseif ($eid -eq 2) { 'modified' } else { 'added' }
             Add-QuarantineChangedPathEntry -PathKinds $pathKinds -Path $path -Kind $kind -Source 'sysmon'
         }
     }

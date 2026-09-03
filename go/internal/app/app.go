@@ -92,11 +92,16 @@ func (a *App) CompareSnapshots(ctx context.Context, fromSnap, toSnap string, ref
 	if err != nil {
 		return nil, "", err
 	}
+	a.enrichManifestHKCUWarnings(left, from)
+	a.enrichManifestHKCUWarnings(right, to)
 	fromPath := a.Cfg.ManifestPath(from)
 	toPath := a.Cfg.ManifestPath(to)
 	result, err := diff.Compare(fromPath, toPath, left, right)
 	if err != nil {
 		return nil, "", err
+	}
+	if err := a.applyHiveRegistryDiff(from, to, result); err != nil {
+		a.logInfo("Hive registry index unavailable, using manifest registry: " + err.Error())
 	}
 	diff.EnrichNetwork(a.ConfigPath, config.ProjectRoot(a.ConfigPath), result, left.CapturedAt, right.CapturedAt, result.Sysmon.Added)
 	outPath := a.Evidence.DiffOutputPath(from, to)
@@ -105,6 +110,114 @@ func (a *App) CompareSnapshots(ctx context.Context, fromSnap, toSnap string, ref
 		return nil, "", err
 	}
 	return result, outPath, nil
+}
+
+// applyHiveRegistryDiff builds offline hive indexes when needed and prefers them over manifest registry.
+func (a *App) applyHiveRegistryDiff(from, to string, result *diff.Result) error {
+	if a.Evidence == nil || a.Disk == nil || result == nil {
+		return fmt.Errorf("disk/evidence unavailable")
+	}
+	engine := strings.ToLower(strings.TrimSpace(a.Cfg.Manifest.RegistryEngine))
+	if engine == "cli" {
+		return fmt.Errorf("registryEngine=cli")
+	}
+	// Refresh snapshot disk index so newly preserved Evidence-* disks resolve.
+	if dr, err := disk.NewReader(a.Cfg, a.VM.VBox); err == nil {
+		a.Disk = dr
+	}
+	a.logInfo("Building registry index for " + from + "…")
+	fromMeta, err := a.ensureHiveIndex(from, false)
+	if err != nil {
+		return err
+	}
+	a.logInfo("Building registry index for " + to + "…")
+	toMeta, err := a.ensureHiveIndex(to, false)
+	if err != nil {
+		return err
+	}
+	return diff.ApplyHiveRegistryDiff(result,
+		a.Evidence.RegistryIndexPath(from),
+		a.Evidence.RegistryIndexPath(to),
+		fromMeta, toMeta)
+}
+
+func (a *App) ensureHiveIndex(snapshotName string, force bool) (*registry.IndexMeta, error) {
+	indexPath := a.Evidence.RegistryIndexPath(snapshotName)
+	metaPath := a.Evidence.RegistryIndexMetaPath(snapshotName)
+	if !force && a.Evidence.RegistryHivesNewerThanIndex(snapshotName) {
+		force = true
+	}
+	if force {
+		a.Evidence.InvalidateRegistryIndex(snapshotName)
+	} else if a.Evidence.HasRegistryIndex(snapshotName) {
+		return registry.ReadIndexMeta(metaPath)
+	}
+
+	// Prefer live `reg save` hives pulled during capture (MB, not multi-GB RAW clone).
+	if a.Evidence.HasRegistryHives(snapshotName) {
+		a.logInfo("Building registry index from live hive dump for " + snapshotName + "…")
+		refs, err := a.Evidence.ListRegistryHiveFiles(snapshotName)
+		if err != nil {
+			return nil, err
+		}
+		files := make([]registry.LocalHiveFile, 0, len(refs))
+		for _, r := range refs {
+			files = append(files, registry.LocalHiveFile{
+				LocalPath: r.LocalPath, GuestPath: r.GuestPath, Prefix: r.Prefix,
+			})
+		}
+		return registry.BuildIndexFromLocalHives(snapshotName, indexPath, metaPath, files)
+	}
+
+	if !a.Cfg.Manifest.RegistryDiskFlatten {
+		return nil, fmt.Errorf("no live hive dump for %s (re-capture with agent 1.0.11+, or set manifest.registryDiskFlatten=true for slow RAW fallback)", snapshotName)
+	}
+
+	if a.Disk == nil {
+		return nil, fmt.Errorf("disk reader required")
+	}
+	a.logInfo("WARNING: Flattening full snapshot disk to RAW for " + snapshotName + " (one-time, multi-GB). Prefer live hive dumps.")
+	workDir, err := a.Evidence.EnsureRegistryIndexDir(snapshotName)
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(workDir)
+	return registry.BuildIndexFromDisk(a.Disk, snapshotName, indexPath, metaPath, workDir)
+}
+
+// enrichManifestHKCUWarnings loads payload sidecar warnings onto the manifest when missing.
+func (a *App) enrichManifestHKCUWarnings(m *evidence.Manifest, snap string) {
+	if m == nil || a.Evidence == nil {
+		return
+	}
+	if len(m.UserRegistryWarn) > 0 {
+		return
+	}
+	sc, err := a.Evidence.LoadSidecar(snap, "-payload-registry.json")
+	if err != nil {
+		return
+	}
+	if warns, ok := sc["warnings"].([]any); ok {
+		for _, w := range warns {
+			if s, ok := w.(string); ok && strings.TrimSpace(s) != "" {
+				m.UserRegistryWarn = append(m.UserRegistryWarn, s)
+			}
+		}
+	}
+	hku := 0
+	for _, e := range m.Registry {
+		u := strings.ToUpper(e.K)
+		if strings.HasPrefix(u, `HKU\`) || strings.HasPrefix(u, `HKU:`) {
+			hku++
+		}
+	}
+	if hku == 0 && len(m.UserRegistryWarn) == 0 {
+		if ec, ok := sc["entryCount"].(float64); ok && ec == 0 {
+			if sid, _ := sc["sid"].(string); sid == "" {
+				m.UserRegistryWarn = append(m.UserRegistryWarn, "HKCU not captured (empty payload registry)")
+			}
+		}
+	}
 }
 
 // ListSnapshots returns VBox snapshot list.
@@ -117,13 +230,28 @@ func (a *App) VMStatus(ctx context.Context) (any, error) {
 	return a.VM.Status(ctx)
 }
 
-// ReadSnapshotFile reads file content from snapshot disk.
+// ReadSnapshotFile reads file content from sidecar capture or snapshot disk.
 func (a *App) ReadSnapshotFile(snapshotName, guestPath string) (map[string]any, error) {
+	if data, ok := a.Evidence.FileContentFromSidecar(snapshotName, guestPath); ok {
+		return map[string]any{
+			"path":    guestPath,
+			"size":    len(data),
+			"content": string(data),
+			"base64":  false,
+			"source":  "sidecar",
+		}, nil
+	}
+	if entry, ok := a.Evidence.FileSidecarEntry(snapshotName, guestPath); ok && !evidence.FileCapturedInSidecar(entry) {
+		return unavailableFilePreview(a.Evidence, snapshotName, guestPath, "events_only"), nil
+	}
 	if a.Disk == nil {
 		return nil, fmt.Errorf("disk reader unavailable")
 	}
 	data, info, err := a.Disk.ReadFile(snapshotName, guestPath, 512*1024)
 	if err != nil {
+		if isDiskFileNotFound(err) {
+			return unavailableFilePreview(a.Evidence, snapshotName, guestPath, "deleted_before_snapshot"), nil
+		}
 		return nil, err
 	}
 	return map[string]any{
@@ -131,7 +259,43 @@ func (a *App) ReadSnapshotFile(snapshotName, guestPath string) (map[string]any, 
 		"size":    info.Size,
 		"content": string(data),
 		"base64":  false,
+		"source":  "disk",
 	}, nil
+}
+
+func isDiskFileNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "not found")
+}
+
+func unavailableFilePreview(svc *evidence.Service, snapshotName, guestPath, reason string) map[string]any {
+	meta := svc.FileCreateMetaFromSysmon(snapshotName, guestPath)
+	msg := fmt.Sprintf(
+		"Content unavailable — this file was seen during the session but is not on the evidence snapshot disk.\n\n"+
+			"Typical cause: a short-lived temp file (e.g. PowerShell __PSScriptPolicyTest_*) created during capture and deleted before the snapshot was taken.\n\n"+
+			"Path: %s",
+		guestPath,
+	)
+	if meta != nil {
+		if meta.Time != "" {
+			msg += fmt.Sprintf("\nSysmon FileCreate: %s", meta.Time)
+		}
+		if meta.Image != "" {
+			msg += fmt.Sprintf("\nProcess: %s", meta.Image)
+		}
+	}
+	out := map[string]any{
+		"path":        guestPath,
+		"content":     msg,
+		"unavailable": true,
+		"reason":      reason,
+	}
+	if meta != nil {
+		out["sysmon"] = meta
+	}
+	return out
 }
 
 // ListDirectory lists directory on snapshot disk.
@@ -148,13 +312,76 @@ func (a *App) RegistryTreeFromDiff(diffJSON string) (any, error) {
 	if err := json.Unmarshal([]byte(diffJSON), &d); err != nil {
 		return nil, err
 	}
-	var entries []evidence.RegistryEntry
-	entries = append(entries, d.Registry.Added...)
-	entries = append(entries, d.Registry.Removed...)
-	for _, m := range d.Registry.Modified {
-		entries = append(entries, evidence.RegistryEntry{K: m.Key, N: m.Name, V: m.After, T: m.AfterType})
+	var entries []registry.ChangedEntry
+	for _, e := range d.Registry.Added {
+		entries = append(entries, registry.ChangedEntry{
+			Key: e.K, Name: e.N, Type: e.T, Value: e.V, Change: "added",
+		})
 	}
-	return registry.BuildTree(entries), nil
+	for _, e := range d.Registry.Removed {
+		entries = append(entries, registry.ChangedEntry{
+			Key: e.K, Name: e.N, Type: e.T, Value: e.V, Change: "removed",
+		})
+	}
+	for _, m := range d.Registry.Modified {
+		entries = append(entries, registry.ChangedEntry{
+			Key: m.Key, Name: m.Name, Change: "modified",
+			Before: m.Before, After: m.After,
+			BeforeType: m.BeforeType, AfterType: m.AfterType,
+			Value: m.After, Type: m.AfterType,
+		})
+	}
+	flat := make([]evidence.RegistryEntry, 0, len(entries))
+	for _, e := range entries {
+		flat = append(flat, evidence.RegistryEntry{K: e.Key, N: e.Name, T: e.Type, V: e.Value})
+	}
+	sidNames := a.registrySIDNames(d.Meta.FromSnapshot, d.Meta.ToSnapshot, flat)
+	return registry.BuildChangedTree(entries, sidNames), nil
+}
+
+// registrySIDNames resolves HKU SIDs to account names from payload sidecars / config.
+func (a *App) registrySIDNames(fromSnap, toSnap string, entries []evidence.RegistryEntry) map[string]string {
+	out := map[string]string{}
+	load := func(snap string) {
+		if snap == "" || a.Evidence == nil {
+			return
+		}
+		sc, err := a.Evidence.LoadSidecar(snap, "-payload-registry.json")
+		if err != nil {
+			return
+		}
+		sid, _ := sc["sid"].(string)
+		user, _ := sc["userName"].(string)
+		if sid != "" && user != "" {
+			out[sid] = user
+		}
+	}
+	load(fromSnap)
+	load(toSnap)
+
+	payloadUser := ""
+	guestUser := ""
+	if a.Cfg != nil {
+		payloadUser = strings.TrimSpace(a.Cfg.Payload.Username)
+		guestUser = strings.TrimSpace(a.Cfg.Guest.Username)
+	}
+	for _, sid := range registry.CollectSIDsFromEntries(entries) {
+		if _, ok := out[sid]; ok {
+			continue
+		}
+		upper := strings.ToUpper(sid)
+		switch {
+		case strings.HasSuffix(upper, "-500"):
+			out[sid] = "Administrator"
+		case strings.HasSuffix(upper, "-501"):
+			out[sid] = "Guest"
+		case guestUser != "" && strings.HasSuffix(upper, "-1002"):
+			out[sid] = guestUser
+		case payloadUser != "" && strings.HasPrefix(upper, "S-1-5-21-"):
+			out[sid] = payloadUser
+		}
+	}
+	return out
 }
 
 // FileTreeFromDiff builds file path tree nodes from diff files section.
@@ -199,7 +426,11 @@ func (a *App) FileTreeFromDiff(diffJSON string) (any, error) {
 		if diff.ShouldHideUSNLeafFile(f) {
 			continue
 		}
-		addPath(f.Path, map[string]any{"change": "added"})
+		meta := map[string]any{"change": "added"}
+		if diff.IsEphemeralTempPath(f.Path) {
+			meta["previewUnavailable"] = true
+		}
+		addPath(f.Path, meta)
 	}
 	for _, f := range d.Files.Removed {
 		if diff.ShouldHideUSNLeafFile(f) {
@@ -505,6 +736,14 @@ func (a *App) captureLiveManifest(snapshotName string, afterSnapshot bool) error
 	if path != "" {
 		a.logInfo("Manifest sidecars saved: " + path)
 	}
+	if a.Evidence.HasRegistryHives(snapshotName) {
+		a.logInfo("Building registry index from live hive dump for " + snapshotName + "…")
+		if meta, err := a.ensureHiveIndex(snapshotName, true); err != nil {
+			a.logInfo("Registry index from hive dump failed: " + err.Error())
+		} else if meta != nil {
+			a.logInfo(fmt.Sprintf("Registry index ready (%d entries, no disk flatten)", meta.EntryCount))
+		}
+	}
 	return nil
 }
 
@@ -553,6 +792,16 @@ func (a *App) PreserveEvidenceWails(label string) (string, error) {
 		return name, fmt.Errorf("sidecars saved but snapshot failed: %w", err)
 	}
 	a.logInfo("Evidence snapshot: " + name)
+	if a.Evidence != nil && a.Evidence.HasRegistryHives(name) {
+		a.logInfo("Building registry index from live hive dump for " + name + "…")
+		if meta, err := a.ensureHiveIndex(name, true); err != nil {
+			a.logInfo("Registry index build deferred: " + err.Error())
+		} else if meta != nil {
+			a.logInfo(fmt.Sprintf("Registry index ready (%d entries)", meta.EntryCount))
+		}
+	} else if a.Evidence != nil && !a.Evidence.HasRegistryIndex(name) {
+		a.logInfo("No live hive dump for " + name + " — install agent 1.0.12+ or enable registryDiskFlatten for offline RAW extract")
+	}
 	return name, nil
 }
 

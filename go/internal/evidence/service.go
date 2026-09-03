@@ -2,10 +2,12 @@ package evidence
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/quarantine-lab/quarantine/internal/config"
@@ -122,6 +124,147 @@ func (s *Service) LoadSidecar(snapshotName, suffix string) (map[string]any, erro
 		return nil, err
 	}
 	return out, nil
+}
+
+// FileContentFromSidecar returns captured file bytes from changed-files sidecar when available.
+func (s *Service) FileContentFromSidecar(snapshotName, guestPath string) ([]byte, bool) {
+	snap := s.Cfg.ResolveSnapshotName(snapshotName)
+	sc, err := s.LoadSidecar(snap, "-changed-files.json")
+	if err != nil {
+		return nil, false
+	}
+	files, _ := sc["files"].([]any)
+	want := strings.ToLower(filepath.Clean(guestPath))
+	for _, item := range files {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		p, _ := m["p"].(string)
+		if p == "" {
+			p, _ = m["path"].(string)
+		}
+		if strings.ToLower(filepath.Clean(p)) != want {
+			continue
+		}
+		if d, ok := m["d"].(string); ok && d != "" {
+			return []byte(d), true
+		}
+		if c, _ := m["c"].(string); c == "text" {
+			if d, ok := m["d"].(string); ok {
+				return []byte(d), true
+			}
+		}
+		if c, _ := m["c"].(string); c == "base64" {
+			if d, ok := m["d"].(string); ok && d != "" {
+				if raw, err := base64.StdEncoding.DecodeString(d); err == nil {
+					return raw, true
+				}
+			}
+		}
+	}
+	return nil, false
+}
+
+// FileCreateMeta holds Sysmon FileCreate context for a guest path.
+type FileCreateMeta struct {
+	Time  string `json:"time,omitempty"`
+	Image string `json:"image,omitempty"`
+	EID   int    `json:"eid,omitempty"`
+}
+
+// FileSidecarEntry returns the changed-files sidecar row for a guest path when present.
+func (s *Service) FileSidecarEntry(snapshotName, guestPath string) (map[string]any, bool) {
+	snap := s.Cfg.ResolveSnapshotName(snapshotName)
+	sc, err := s.LoadSidecar(snap, "-changed-files.json")
+	if err != nil {
+		return nil, false
+	}
+	files, _ := sc["files"].([]any)
+	want := strings.ToLower(filepath.Clean(guestPath))
+	for _, item := range files {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		p, _ := m["p"].(string)
+		if p == "" {
+			p, _ = m["path"].(string)
+		}
+		if strings.ToLower(filepath.Clean(p)) == want {
+			return m, true
+		}
+	}
+	return nil, false
+}
+
+// FileCapturedInSidecar reports whether changed-files sidecar captured bytes or a hash.
+func FileCapturedInSidecar(entry map[string]any) bool {
+	if entry == nil {
+		return false
+	}
+	if d, ok := entry["d"].(string); ok && d != "" {
+		return true
+	}
+	if h, ok := entry["h"].(string); ok && h != "" {
+		return true
+	}
+	if hash, ok := entry["hash"].(string); ok && hash != "" {
+		return true
+	}
+	return false
+}
+
+// FileCreateMetaFromSysmon returns the newest Sysmon FileCreate event for a path.
+func (s *Service) FileCreateMetaFromSysmon(snapshotName, guestPath string) *FileCreateMeta {
+	snap := s.Cfg.ResolveSnapshotName(snapshotName)
+	raw, err := os.ReadFile(s.Cfg.SidecarPath(snap, "-sysmon.json"))
+	if err != nil {
+		return nil
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil
+	}
+	events, _ := doc["events"].([]any)
+	want := strings.ToLower(filepath.Clean(guestPath))
+	var best *FileCreateMeta
+	for _, item := range events {
+		ev, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		eid, _ := ev["eid"].(float64)
+		if int(eid) != 11 {
+			continue
+		}
+		target, _ := ev["target"].(string)
+		if target == "" {
+			target, _ = ev["targetFilename"].(string)
+		}
+		if strings.ToLower(filepath.Clean(target)) != want {
+			continue
+		}
+		meta := &FileCreateMeta{
+			Time:  stringFromAny(ev["time"]),
+			Image: stringFromAny(ev["image"]),
+			EID:   11,
+		}
+		if best == nil || meta.Time > best.Time {
+			best = meta
+		}
+	}
+	return best
+}
+
+func stringFromAny(v any) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return fmt.Sprint(v)
 }
 
 // PublishFromSidecars builds/updates manifest from live sidecars on disk.
@@ -275,6 +418,67 @@ func (s *Service) writeManifestFromSidecars(snap, hostPath string, payload map[s
 		}
 	}
 	m.RegistryCount = len(m.Registry)
+	m.UserRegistryCount = 0
+	for _, e := range m.Registry {
+		u := strings.ToUpper(e.K)
+		if strings.HasPrefix(u, `HKU\`) || strings.HasPrefix(u, `HKU:`) {
+			m.UserRegistryCount++
+		}
+	}
+	if warns, ok := payload["warnings"].([]any); ok {
+		for _, w := range warns {
+			if s, ok := w.(string); ok && strings.TrimSpace(s) != "" {
+				m.UserRegistryWarn = append(m.UserRegistryWarn, s)
+			}
+		}
+	}
+	if m.UserRegistryCount == 0 {
+		if rawWarns, ok := payload["warnings"].([]string); ok {
+			m.UserRegistryWarn = append(m.UserRegistryWarn, rawWarns...)
+		}
+	}
+	// Empty payload registry with an explicit capture error → mark as failed HKCU.
+	if m.UserRegistryCount == 0 && len(m.UserRegistryWarn) == 0 {
+		if ec, ok := payload["entryCount"].(float64); ok && ec == 0 {
+			if sid, _ := payload["sid"].(string); sid == "" {
+				m.UserRegistryWarn = append(m.UserRegistryWarn,
+					"HKCU not captured (empty payload registry)")
+			}
+		}
+	}
+
+	// Merge machine registry (HKLM + shared HKU/.DEFAULT) into the manifest for diffs.
+	if hklm, err := s.LoadSidecar(snap, "-hklm-registry.json"); err == nil {
+		if reg, ok := hklm["registry"].([]any); ok {
+			for _, item := range reg {
+				if rm, ok := item.(map[string]any); ok {
+					entry := RegistryEntry{}
+					if k, ok := rm["k"].(string); ok {
+						entry.K = k
+					}
+					if n, ok := rm["n"].(string); ok {
+						entry.N = n
+					}
+					if t, ok := rm["t"].(string); ok {
+						entry.T = t
+					}
+					entry.V = rm["v"]
+					if entry.K == "" {
+						continue
+					}
+					m.Registry = append(m.Registry, entry)
+				}
+			}
+		}
+	}
+	m.RegistryCount = len(m.Registry)
+	m.UserRegistryCount = 0
+	for _, e := range m.Registry {
+		u := strings.ToUpper(e.K)
+		if strings.HasPrefix(u, `HKU\`) || strings.HasPrefix(u, `HKU:`) {
+			m.UserRegistryCount++
+		}
+	}
 
 	if changed, err := s.LoadSidecar(snap, "-changed-files.json"); err == nil {
 		if files, ok := changed["files"].([]any); ok {
@@ -402,6 +606,8 @@ func (s *Service) RemoveSnapshotArtifacts(snapshotName string) []string {
 		s.Cfg.SidecarPath(snapshotName, "-sysmon.json"),
 		s.Cfg.SidecarPath(snapshotName, "-service-installs.json"),
 		s.Cfg.SidecarPath(snapshotName, "-changed-files.json"),
+		s.Cfg.SidecarPath(snapshotName, "-registry-index.jsonl.gz"),
+		s.Cfg.SidecarPath(snapshotName, "-registry-meta.json"),
 		filepath.Join(logDir, safe+"-regshot.hivu"),
 		filepath.Join(logDir, safe+"-regshot-compare.txt"),
 	}
@@ -414,6 +620,7 @@ func (s *Service) RemoveSnapshotArtifacts(snapshotName string) []string {
 	dirs := []string{
 		s.Cfg.SidecarPath(snapshotName, "-payload-registry"),
 		s.Cfg.SidecarPath(snapshotName, "-hklm-registry"),
+		s.Cfg.SidecarPath(snapshotName, "-hives"),
 	}
 	for _, dir := range dirs {
 		if err := os.RemoveAll(dir); err == nil {

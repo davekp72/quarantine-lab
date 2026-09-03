@@ -1,11 +1,12 @@
 import { EventsOn } from './wailsjs/runtime/runtime.js';
-import { filterDiff, isUsnLeafPath } from './noise.js';
+import { filterDiff, isEphemeralTempPath, isUsnLeafPath } from './noise.js';
 
 let diffData = null;
 let toSnapshot = '';
 let snapshotNames = [];
 let logDrawerOpen = false;
 let fileChangeTab = 'added';
+let regChangeTab = 'added';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -341,14 +342,24 @@ function renderOverview() {
   const noiseNote = hideNoiseEnabled()
     ? '<p class="muted">Routine noise hidden — uncheck to show all changes.</p>'
     : '';
+  const warnNote = (m.warnings || []).length
+    ? `<ul class="warn-list">${(m.warnings || []).map((w) => `<li>${escapeHtml(w)}</li>`).join('')}</ul>`
+    : '';
   panel.innerHTML = `
     <p><strong>${m.fromSnapshot || ''}</strong> → <strong>${m.toSnapshot || ''}</strong></p>
+    <p class="muted">Registry source: ${escapeHtml(m.registryDiffSource || s.registryDiffSource || 'manifest')}${
+      (m.fromUserRegistryCount || m.toUserRegistryCount)
+        ? ` · index entries ${m.fromUserRegistryCount || 0} → ${m.toUserRegistryCount || 0}`
+        : ''
+    }</p>
     ${noiseNote}
+    ${warnNote}
     <div class="stat-grid">
       <div class="stat"><div class="n">${s.filesAdded || 0}</div>Files added</div>
       <div class="stat"><div class="n">${s.filesRemoved || 0}</div>Files removed</div>
       <div class="stat"><div class="n">${s.filesModified || 0}</div>Files modified</div>
       <div class="stat"><div class="n">${s.registryAdded || 0}</div>Registry added</div>
+      <div class="stat"><div class="n">${s.registryRemoved || 0}</div>Registry removed</div>
       <div class="stat"><div class="n">${s.registryModified || 0}</div>Registry modified</div>
       <div class="stat"><div class="n">${s.sysmonAdded || 0}</div>Sysmon events</div>
       <div class="stat"><div class="n">${s.dnsQueries || 0}</div>DNS lookups</div>
@@ -393,17 +404,103 @@ function fileTabEmptyMessage(tab) {
   return 'No changed files in this diff.';
 }
 
-function renderTreeNode(node, container, onSelect, depth = 0) {
+function showRegTab(name) {
+  regChangeTab = name;
+  document.querySelectorAll('.reg-tabs button').forEach((b) => {
+    b.classList.toggle('active', b.dataset.regTab === name);
+  });
+  renderRegistryTree().catch((e) => alert(e));
+}
+
+function filterDiffForRegTab(diff, tab) {
+  const reg = diff.registry || {};
+  return {
+    ...diff,
+    registry: {
+      added: tab === 'added' ? (reg.added || []) : [],
+      removed: tab === 'removed' ? (reg.removed || []) : [],
+      modified: tab === 'modified' ? (reg.modified || []) : [],
+    },
+  };
+}
+
+function updateRegTabCounts(diff) {
+  const reg = diff?.registry || {};
+  const setCount = (id, n) => {
+    const el = $(id);
+    if (el) el.textContent = n ? `(${n})` : '';
+  };
+  setCount('#reg-count-added', (reg.added || []).length);
+  setCount('#reg-count-removed', (reg.removed || []).length);
+  setCount('#reg-count-modified', (reg.modified || []).length);
+}
+
+function regTabEmptyMessage(tab) {
+  if (tab === 'added') return 'No new registry values in this diff.';
+  if (tab === 'removed') return 'No deleted registry values in this diff.';
+  return 'No changed registry values in this diff.';
+}
+
+function renderTreeNode(node, container, onSelect, depth = 0, expand = true) {
   if (!node) return;
+  const childrenMap = node.children && typeof node.children === 'object' ? node.children : {};
+  const children = Object.values(childrenMap).sort((a, b) =>
+    String(a.name || a.path || '').localeCompare(String(b.name || b.path || ''), undefined, { sensitivity: 'base' })
+  );
+  const hasChildren = children.length > 0;
+
   const row = document.createElement('div');
-  row.className = 'tree-row' + (node.change ? ` change-${node.change}` : '');
-  row.style.paddingLeft = `${depth * 12}px`;
-  row.textContent = node.name || node.path || '(root)';
-  row.onclick = () => onSelect(node);
+  let cls = 'tree-row file-row';
+  if (node.change) cls += ` change-${node.change}`;
+  if (node.previewUnavailable) cls += ' preview-unavailable';
+  row.className = cls;
+  row.style.paddingLeft = `${depth * 14}px`;
+  row.title = node.previewUnavailable
+    ? 'Seen in session; not on snapshot disk'
+    : (node.path || '');
+
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'tree-toggle';
+  toggle.textContent = hasChildren ? (expand ? '▾' : '▸') : '';
+  toggle.disabled = !hasChildren;
+  toggle.setAttribute('aria-label', expand ? 'Collapse' : 'Expand');
+
+  const label = document.createElement('span');
+  label.className = 'tree-label';
+  label.textContent = node.name || node.path || '(root)';
+
+  row.appendChild(toggle);
+  row.appendChild(label);
+
+  const childHost = document.createElement('div');
+  childHost.className = 'tree-children' + (expand ? '' : ' collapsed');
+
+  toggle.onclick = (ev) => {
+    ev.stopPropagation();
+    if (!hasChildren) return;
+    const open = childHost.classList.toggle('collapsed') === false;
+    toggle.textContent = open ? '▾' : '▸';
+    toggle.setAttribute('aria-label', open ? 'Collapse' : 'Expand');
+  };
+
+  row.onclick = (ev) => {
+    if (ev.target === toggle) return;
+    if (hasChildren) {
+      const open = childHost.classList.toggle('collapsed') === false;
+      toggle.textContent = open ? '▾' : '▸';
+      toggle.setAttribute('aria-label', open ? 'Collapse' : 'Expand');
+      return;
+    }
+    container.querySelectorAll('.file-row.selected').forEach((el) => el.classList.remove('selected'));
+    row.classList.add('selected');
+    onSelect(node);
+  };
+
   container.appendChild(row);
-  const children = node.children;
-  if (children && typeof children === 'object') {
-    Object.values(children).forEach((child) => renderTreeNode(child, container, onSelect, depth + 1));
+  if (hasChildren) {
+    container.appendChild(childHost);
+    children.forEach((child) => renderTreeNode(child, childHost, onSelect, depth + 1, depth < 1));
   }
 }
 
@@ -429,12 +526,16 @@ async function renderFileTree() {
     try {
       if (api?.ReadSnapshotFileWails) {
         const res = await api.ReadSnapshotFileWails(toSnapshot, node.path);
-        $('#file-preview').textContent = res.content || '(empty)';
+        const preview = $('#file-preview');
+        preview.classList.toggle('preview-unavailable', !!res.unavailable);
+        preview.textContent = res.content || '(empty)';
       } else {
         $('#file-preview').textContent = node.path;
       }
     } catch (e) {
-      $('#file-preview').textContent = String(e);
+      const preview = $('#file-preview');
+      preview.classList.remove('preview-unavailable');
+      preview.textContent = String(e);
     }
   });
 }
@@ -457,7 +558,10 @@ function buildFileTreeLocal(diff) {
       acc = acc ? `${acc}\\${part}` : part;
       if (!node.children[part]) node.children[part] = { name: part, path: acc, children: {} };
       node = node.children[part];
-      if (i === parts.length - 1) node.change = change;
+      if (i === parts.length - 1) {
+        node.change = change;
+        if (change === 'added' && isEphemeralTempPath(path)) node.previewUnavailable = true;
+      }
     }
   };
   (diff.files?.added || []).forEach((f) => add(f.path, 'added', f));
@@ -470,36 +574,124 @@ async function renderRegistryTree() {
   const host = $('#registry-tree');
   const values = $('#registry-values');
   host.innerHTML = '';
-  values.innerHTML = '';
+  values.innerHTML = '<span class="muted">Select a registry key</span>';
   const d = activeDiff();
   if (!d) return;
+  updateRegTabCounts(d);
+  const filtered = filterDiffForRegTab(d, regChangeTab);
+  const reg = filtered.registry || {};
+  const count = (reg[regChangeTab] || []).length;
+  if (!count) {
+    host.innerHTML = `<p class="muted">${regTabEmptyMessage(regChangeTab)}</p>`;
+    return;
+  }
   const api = await backend();
-  const json = JSON.stringify(d);
+  const json = JSON.stringify(filtered);
   const tree = api?.BuildRegistryTreeWails ? await api.BuildRegistryTreeWails(json) : null;
   if (!tree) {
-    const hku = d.meta?.toUserRegistryCount ?? d.meta?.fromUserRegistryCount;
-    if (hku === 0) {
+    const src = d.meta?.registryDiffSource || '';
+    if (src !== 'hive-index' && (d.meta?.toUserRegistryCount ?? d.meta?.fromUserRegistryCount) === 0) {
       host.innerHTML = '<p class="muted">No HKCU registry in manifests — log in as payload user (jkcooper) before capture for user registry diffs.</p>';
     } else {
       host.textContent = 'No registry tree';
     }
     return;
   }
-  const walk = (node, depth) => {
-    if (node.path) {
-      const row = document.createElement('div');
-      row.className = 'tree-row';
-      row.style.paddingLeft = `${depth * 12}px`;
-      row.textContent = node.path;
-      row.onclick = () => {
-        values.innerHTML = (node.values || []).map((v) =>
-          `<div><code>${v.n}</code> = ${JSON.stringify(v.v)}</div>`).join('') || '<span class="muted">(no values)</span>';
-      };
-      host.appendChild(row);
+  renderRegistryNode(tree, host, values, 0, true);
+}
+
+function escapeHtml(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function formatRegData(v) {
+  if (v == null) return '';
+  return typeof v === 'string' ? v : JSON.stringify(v);
+}
+
+function renderRegistryNode(node, container, valuesEl, depth, expand) {
+  if (!node) return;
+  const children = Object.values(node.children || {}).sort((a, b) =>
+    String(a.label || a.name || '').localeCompare(String(b.label || b.name || ''), undefined, { sensitivity: 'base' })
+  );
+  const hasChildren = children.length > 0;
+  const isRoot = !node.path && !node.name;
+
+  if (!isRoot) {
+    const row = document.createElement('div');
+    let cls = 'tree-row reg-row';
+    if (node.change) cls += ` change-${node.change}`;
+    row.className = cls;
+    row.style.paddingLeft = `${depth * 14}px`;
+    row.title = node.path || '';
+
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'tree-toggle';
+    toggle.textContent = hasChildren ? (expand ? '▾' : '▸') : '';
+    toggle.disabled = !hasChildren;
+    toggle.setAttribute('aria-label', expand ? 'Collapse' : 'Expand');
+
+    const label = document.createElement('span');
+    label.className = 'tree-label';
+    label.textContent = node.label || node.name || node.path || '';
+    if (node.label && node.label !== node.name && /^S-1-/i.test(node.name || '')) {
+      label.title = node.name;
+    } else if (node.path) {
+      label.title = node.path;
     }
-    Object.values(node.children || {}).forEach((c) => walk(c, depth + 1));
-  };
-  walk(tree, 0);
+
+    row.appendChild(toggle);
+    row.appendChild(label);
+    row.onclick = (ev) => {
+      if (ev.target === toggle) return;
+      container.querySelectorAll('.reg-row.selected').forEach((el) => el.classList.remove('selected'));
+      row.classList.add('selected');
+      const vals = node.values || [];
+      if (!vals.length) {
+        valuesEl.innerHTML = `<div class="reg-path muted">${escapeHtml(node.path)}</div><span class="muted">(no values at this key)</span>`;
+        return;
+      }
+      valuesEl.innerHTML = `<div class="reg-path muted">${escapeHtml(node.path)}</div>` + vals.map((v) => {
+        const name = v.n === '' || v.n == null ? '(Default)' : v.n;
+        const changeCls = v.change ? ` change-${v.change}` : '';
+        let dataHtml;
+        if (v.change === 'modified') {
+          dataHtml = `<span class="reg-before">${escapeHtml(formatRegData(v.before))}</span>` +
+            `<span class="reg-arrow">→</span>` +
+            `<span class="reg-after">${escapeHtml(formatRegData(v.after ?? v.v))}</span>`;
+        } else {
+          dataHtml = escapeHtml(formatRegData(v.v));
+        }
+        const typ = v.t || v.afterType || v.beforeType || '';
+        return `<div class="reg-value${changeCls}"><code>${escapeHtml(name)}</code>` +
+          `<span class="reg-type">${escapeHtml(typ)}</span>` +
+          `<span class="reg-data">${dataHtml}</span></div>`;
+      }).join('');
+    };
+
+    const childHost = document.createElement('div');
+    childHost.className = 'tree-children' + (expand ? '' : ' collapsed');
+
+    toggle.onclick = (ev) => {
+      ev.stopPropagation();
+      if (!hasChildren) return;
+      const open = childHost.classList.toggle('collapsed') === false;
+      toggle.textContent = open ? '▾' : '▸';
+      toggle.setAttribute('aria-label', open ? 'Collapse' : 'Expand');
+    };
+
+    container.appendChild(row);
+    container.appendChild(childHost);
+    children.forEach((c) => renderRegistryNode(c, childHost, valuesEl, depth + 1, depth < 1));
+    return;
+  }
+
+  children.forEach((c) => renderRegistryNode(c, container, valuesEl, depth, true));
 }
 
 function renderSysmon() {
@@ -610,8 +802,11 @@ async function compare() {
 document.querySelectorAll('.tabs button').forEach((b) => {
   b.addEventListener('click', () => showTab(b.dataset.tab));
 });
-document.querySelectorAll('.file-tabs button').forEach((b) => {
+document.querySelectorAll('.file-tabs button[data-file-tab]').forEach((b) => {
   b.addEventListener('click', () => showFileTab(b.dataset.fileTab));
+});
+document.querySelectorAll('.reg-tabs button[data-reg-tab]').forEach((b) => {
+  b.addEventListener('click', () => showRegTab(b.dataset.regTab));
 });
 $('#btn-compare').addEventListener('click', () => compare().catch((e) => alert(e)));
 $('#hideNoise').addEventListener('change', () => rerenderDiff().catch((e) => alert(e)));
