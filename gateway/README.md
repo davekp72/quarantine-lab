@@ -20,9 +20,17 @@
 #   .\quarantine-vm.ps1 gateway status
 #
 # Manual first boot (if not using cloud-init)
-#   1. Install Ubuntu Server 22.04/24.04 in Quarantine-Gateway VM (2 NICs)
-#   2. Attach shared folder or copy this `gateway/` tree to /opt/quarantine-gateway-src
-#   3. sudo bash /opt/quarantine-gateway-src/first-boot.sh
+#   1. Install Ubuntu Server in Quarantine-Gateway VM (2 NICs: NAT + intnet)
+#   2. Create user matching config network.gateway (username/password)
+#   3. Enable OpenSSH + install Guest Additions
+#   4. Optional (faster provision): passwordless sudo for that user:
+#        echo 'quarantine ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers.d/quarantine
+#   5. On host: .\quarantine-vm.ps1 gateway provision
+#      (provision uses sudo -S if NOPASSWD is not set)
+#
+# first-boot notes (Ubuntu 24+/26+)
+#   - Disables systemd-resolved stub listener so dnsmasq can bind :53 on 10.66.0.1
+#   - Chmods netplan YAML to 600 (netplan rejects world-readable files)
 #
 # Guest lab VM
 #   Run Configure-QuarantineGuestNetwork.ps1 -Mode Gateway

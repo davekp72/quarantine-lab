@@ -2,6 +2,7 @@ package guest
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -67,10 +68,14 @@ func (c *Client) RunPowerShell(scriptPath string, args []string, creds Credentia
 
 // CopyTo copies host file to guest directory.
 func (c *Client) CopyTo(hostPath, guestDir string, creds Credentials) error {
-	guestDest := filepath.Join(guestDir, filepath.Base(hostPath))
+	abs, err := filepath.Abs(hostPath)
+	if err != nil {
+		return err
+	}
+	guestDest := filepath.Join(guestDir, filepath.Base(abs))
 	return c.VBox.GuestControlCopyTo(
 		c.Cfg.VMName, creds.Username, creds.Password,
-		hostPath, guestDest, c.timeout(c.Cfg.Guest),
+		abs, guestDest, c.timeout(c.Cfg.Guest),
 	)
 }
 
@@ -92,6 +97,42 @@ func (c *Client) DeployScript(hostScriptPath string, creds Credentials) (string,
 		return "", err
 	}
 	return filepath.Join(dir, filepath.Base(hostScriptPath)), nil
+}
+
+// DeployGatewaySetup copies gateway commission scripts + CA into the lab guest.
+func (c *Client) DeployGatewaySetup(projectRoot string) (string, error) {
+	creds := c.GuestCreds()
+	dir := c.Cfg.Guest.CopyTargetDir
+	if dir == "" {
+		dir = `C:\Users\Public\Quarantine`
+	}
+	files := []string{
+		filepath.Join(projectRoot, "network", "guest", "Configure-QuarantineGuestNetwork.ps1"),
+		filepath.Join(projectRoot, "network", "guest", "Install-QuarantineProxyCA.ps1"),
+		filepath.Join(projectRoot, "network", "proxy", "mitmproxy-ca-cert.cer"),
+	}
+	for _, f := range files {
+		if _, err := os.Stat(f); err != nil {
+			return "", fmt.Errorf("missing %s (run gateway export-ca if the .cer is absent): %w", f, err)
+		}
+		if err := c.CopyTo(f, dir, creds); err != nil {
+			return "", fmt.Errorf("copy %s: %w", filepath.Base(f), err)
+		}
+	}
+	return fmt.Sprintf(`Gateway setup files copied to %s
+
+  Configure-QuarantineGuestNetwork.ps1
+  Install-QuarantineProxyCA.ps1
+  mitmproxy-ca-cert.cer
+
+In the guest (elevated PowerShell):
+
+  powershell -ExecutionPolicy Bypass -File %s\Configure-QuarantineGuestNetwork.ps1 -Mode gateway
+
+If SSL warnings remain:
+
+  powershell -ExecutionPolicy Bypass -File %s\Install-QuarantineProxyCA.ps1 -ProxyHost 10.66.0.1 -ProxyPort 8080 -PacPort 8080 -CaPath %s\mitmproxy-ca-cert.cer
+`, dir, dir, dir, dir), nil
 }
 
 // TestGuestSession verifies guest credentials work.

@@ -738,7 +738,7 @@ Tip: Mark USN + payload registry baseline before making test changes:
                 Invoke-QuarantineGuestHostsEntry -ConfigPath $ConfigPath
             }
 
-            default { throw 'Usage: .\quarantine-vm.ps1 guest run|ps|copy|test|hosts' }
+            default { throw 'Usage: .\quarantine-vm.ps1 guest run|ps|copy|test|hosts|gateway-setup' }
 
         }
 
@@ -1074,6 +1074,7 @@ Guest control (requires Guest Additions + guest credentials):
   guest ps <script>       Run PowerShell -Command in guest
 
   guest copy <file>       Copy host file(s) into guest (no shared folder)
+  guest gateway-setup     Upload Configure + CA installer + mitm CA for gateway mode
 
 
 

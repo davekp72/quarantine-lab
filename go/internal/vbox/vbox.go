@@ -412,23 +412,41 @@ func (c *Client) GuestControlCopyFrom(vmName, username, password, guestPath, hos
 // NatPFAdd adds a NAT port forwarding rule to NIC1.
 // Uses controlvm when the VM is running (modifyvm requires the VM to be powered off).
 func (c *Client) NatPFAdd(vmName, rule string) error {
+	return c.NatPFAddOn(vmName, 1, rule)
+}
+
+// NatPFAddOn adds a NAT port forwarding rule on the given NIC slot (1-based).
+func (c *Client) NatPFAddOn(vmName string, nic int, rule string) error {
+	if nic < 1 {
+		nic = 1
+	}
+	pf := fmt.Sprintf("natpf%d", nic)
 	state, _ := c.VMState(vmName)
 	if vmSessionActive(state) {
-		_, err := c.RunWithTimeout(time.Minute, "controlvm", vmName, "natpf1", rule)
+		_, err := c.RunWithTimeout(time.Minute, "controlvm", vmName, pf, rule)
 		return err
 	}
-	_, err := c.RunWithTimeout(time.Minute, "modifyvm", vmName, "--natpf1", rule)
+	_, err := c.RunWithTimeout(time.Minute, "modifyvm", vmName, "--"+pf, rule)
 	return err
 }
 
 // NatPFDelete removes a NAT port forwarding rule by name.
 func (c *Client) NatPFDelete(vmName, ruleName string) error {
+	return c.NatPFDeleteOn(vmName, 1, ruleName)
+}
+
+// NatPFDeleteOn removes a NAT port forwarding rule from the given NIC slot.
+func (c *Client) NatPFDeleteOn(vmName string, nic int, ruleName string) error {
+	if nic < 1 {
+		nic = 1
+	}
+	pf := fmt.Sprintf("natpf%d", nic)
 	state, _ := c.VMState(vmName)
 	var err error
 	if vmSessionActive(state) {
-		_, err = c.RunWithTimeout(time.Minute, "controlvm", vmName, "natpf1", "delete", ruleName)
+		_, err = c.RunWithTimeout(time.Minute, "controlvm", vmName, pf, "delete", ruleName)
 	} else {
-		_, err = c.RunWithTimeout(time.Minute, "modifyvm", vmName, "--natpf1", "delete", ruleName)
+		_, err = c.RunWithTimeout(time.Minute, "modifyvm", vmName, "--"+pf, "delete", ruleName)
 	}
 	return ignoreNatPFMissing(err)
 }

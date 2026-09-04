@@ -8,7 +8,8 @@
 
   Modes:
     host-nat (default) — VirtualBox NAT + host mitmproxy at 10.0.2.2
-    gateway            — Linux gateway on intnet (static 10.66.0.15, GW/DNS 10.66.0.1)
+    gateway            — Linux gateway on intnet (static 10.66.0.15, GW/DNS 10.66.0.1).
+                         With dual-NIC (intnet + NAT for agent), keeps default route on LAN.
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File .\Configure-QuarantineGuestNetwork.ps1
@@ -78,22 +79,57 @@ Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet
 Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings' -Name ProxyServer -Value "${ProxyHost}:${ProxyPort}"
 Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings' -Name AutoConfigURL -Value $PacUrl
 
-$adapter = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | Select-Object -First 1
-if ($adapter) {
-    if ($Mode -eq 'gateway' -and $GuestIP -and $GatewayIP) {
-        Get-NetIPAddress -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-            Where-Object { $_.IPAddress -ne $GuestIP } |
-            ForEach-Object {
-                Remove-NetIPAddress -InterfaceIndex $adapter.InterfaceIndex -IPAddress $_.IPAddress -Confirm:$false -ErrorAction SilentlyContinue
-            }
-        Remove-NetRoute -InterfaceIndex $adapter.InterfaceIndex -DestinationPrefix '0.0.0.0/0' -Confirm:$false -ErrorAction SilentlyContinue
-        New-NetIPAddress -InterfaceIndex $adapter.InterfaceIndex -IPAddress $GuestIP -PrefixLength ([int]$PrefixLength) -DefaultGateway $GatewayIP -ErrorAction SilentlyContinue | Out-Null
-        Write-Host "  Static IP $GuestIP/$PrefixLength gateway $GatewayIP on $($adapter.Name)"
+$upAdapters = @(Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | Sort-Object ifIndex)
+if ($upAdapters.Count -eq 0) {
+    Write-Warning 'No active network adapter found; configure IP/DNS manually.'
+} elseif ($Mode -eq 'gateway' -and $GuestIP -and $GatewayIP) {
+    # Dual-NIC layout from host: NIC1=intnet (sample traffic), NIC2=NAT (agent port-forward only).
+    # Prefer the non-VBox-NAT adapter for the quarantine LAN; demote NAT so it never wins the default route.
+    function Test-IsVBoxNatAdapter {
+        param([int]$IfIndex)
+        $addrs = @(Get-NetIPAddress -InterfaceIndex $IfIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty IPAddress)
+        foreach ($ip in $addrs) {
+            if ($ip -like '10.0.2.*') { return $true }
+        }
+        return $false
     }
+
+    $lan = $null
+    $nat = $null
+    foreach ($a in $upAdapters) {
+        if (Test-IsVBoxNatAdapter -IfIndex $a.ifIndex) {
+            if (-not $nat) { $nat = $a }
+        } else {
+            if (-not $lan) { $lan = $a }
+        }
+    }
+    if (-not $lan) { $lan = $upAdapters[0] }
+    if (-not $nat -and $upAdapters.Count -gt 1) {
+        $nat = $upAdapters | Where-Object { $_.ifIndex -ne $lan.ifIndex } | Select-Object -First 1
+    }
+
+    Get-NetIPAddress -InterfaceIndex $lan.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Where-Object { $_.IPAddress -ne $GuestIP } |
+        ForEach-Object {
+            Remove-NetIPAddress -InterfaceIndex $lan.ifIndex -IPAddress $_.IPAddress -Confirm:$false -ErrorAction SilentlyContinue
+        }
+    Remove-NetRoute -InterfaceIndex $lan.ifIndex -DestinationPrefix '0.0.0.0/0' -Confirm:$false -ErrorAction SilentlyContinue
+    New-NetIPAddress -InterfaceIndex $lan.ifIndex -IPAddress $GuestIP -PrefixLength ([int]$PrefixLength) -DefaultGateway $GatewayIP -ErrorAction SilentlyContinue | Out-Null
+    Set-NetIPInterface -InterfaceIndex $lan.ifIndex -InterfaceMetric 10 -ErrorAction SilentlyContinue
+    Set-DnsClientServerAddress -InterfaceIndex $lan.ifIndex -ServerAddresses $DnsServer
+    Write-Host "  LAN (intnet): static $GuestIP/$PrefixLength gw $GatewayIP metric 10 on $($lan.Name)"
+
+    if ($nat) {
+        Remove-NetRoute -InterfaceIndex $nat.ifIndex -DestinationPrefix '0.0.0.0/0' -Confirm:$false -ErrorAction SilentlyContinue
+        Set-NetIPInterface -InterfaceIndex $nat.ifIndex -InterfaceMetric 5000 -ErrorAction SilentlyContinue
+        Set-DnsClientServerAddress -InterfaceIndex $nat.ifIndex -ResetServerAddresses -ErrorAction SilentlyContinue
+        Write-Host "  NAT (agent PF): metric 5000, no default route on $($nat.Name)"
+    }
+} else {
+    $adapter = $upAdapters[0]
     Set-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -ServerAddresses $DnsServer
     Write-Host "  DNS set on adapter: $($adapter.Name)"
-} else {
-    Write-Warning 'No active network adapter found; configure IP/DNS manually.'
 }
 
 # Strict outbound firewall

@@ -220,9 +220,12 @@ func (s *Service) Start(ctx context.Context) error {
 	if err := s.VBox.StartVM(s.Cfg.VMName); err != nil {
 		return err
 	}
-	// Best-effort NAT PF for quarantine-agent when using NAT/quarantine mode.
-	if s.Cfg.Agent.Enabled && (s.Cfg.Network.Mode == "quarantine" || s.Cfg.Network.Mode == "nat" || s.Cfg.Network.Mode == "") {
-		_ = network.New(s.Cfg, s.VBox).EnsureAgentPortForward()
+	// Best-effort NAT PF for quarantine-agent (nic1 in quarantine, nic2 in gateway).
+	if s.Cfg.Agent.Enabled {
+		mode := strings.ToLower(strings.TrimSpace(s.Cfg.Network.Mode))
+		if mode == "quarantine" || mode == "nat" || mode == "gateway" || mode == "" {
+			_ = network.New(s.Cfg, s.VBox).EnsureAgentPortForward()
+		}
 	}
 	return nil
 }

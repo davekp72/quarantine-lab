@@ -1,7 +1,9 @@
 package gateway
 
 import (
+	"archive/tar"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -213,13 +215,30 @@ func (m *Manager) Provision() (string, error) {
 	if err := m.Start(); err != nil {
 		return "", err
 	}
+	// Ensure WAN cable is connected (NAT NIC1) — provision needs apt/pip.
+	_, _ = m.VBox.RunWithTimeout(30*time.Second, "controlvm", m.vmName(), "setlinkstate1", "on")
+
 	user, pass := m.creds()
 	scripts := m.scriptsHostDir()
+	if _, err := os.Stat(filepath.Join(scripts, "mitm", "quarantine.pac")); err != nil {
+		return "", fmt.Errorf("gateway tree incomplete (missing mitm/quarantine.pac under %s): %w", scripts, err)
+	}
+
+	// VBox guestcontrol copyto does NOT recurse directories — pack a tar instead.
+	tarHost := filepath.Join(os.TempDir(), "quarantine-gateway-src.tar")
+	if err := writeGatewayTar(scripts, tarHost); err != nil {
+		return "", fmt.Errorf("pack gateway tar: %w", err)
+	}
+	defer os.Remove(tarHost)
+
 	var lastErr error
 	for i := 0; i < 36; i++ {
-		time.Sleep(5 * time.Second)
-		_, _ = m.VBox.GuestControlRun(m.vmName(), user, pass, "/bin/mkdir", []string{"-p", "/tmp/quarantine-gateway"}, time.Minute)
-		if err := m.linuxCopyTo(scripts, "/tmp/quarantine-gateway"); err != nil {
+		if i > 0 {
+			time.Sleep(5 * time.Second)
+		}
+		_, _ = m.VBox.GuestControlRun(m.vmName(), user, pass, "/bin/mkdir", []string{"-p", "/tmp"}, time.Minute)
+		// copyto quirks: --target-directory is the full destination *file* path
+		if err := m.linuxCopyFileTo(tarHost, "/tmp/quarantine-gateway-src.tar"); err != nil {
 			lastErr = err
 			continue
 		}
@@ -229,9 +248,23 @@ func (m *Manager) Provision() (string, error) {
 	if lastErr != nil {
 		return "", fmt.Errorf("copy scripts to gateway (install Guest Additions + user %s): %w", user, lastErr)
 	}
+
+	inner := strings.Join([]string{
+		"set -e",
+		"rm -rf /tmp/quarantine-gateway /opt/quarantine-gateway-src",
+		"mkdir -p /tmp/quarantine-gateway /opt/quarantine-gateway-src",
+		"tar -xf /tmp/quarantine-gateway-src.tar -C /tmp/quarantine-gateway",
+		"test -f /tmp/quarantine-gateway/mitm/quarantine.pac",
+		"test -f /tmp/quarantine-gateway/first-boot.sh",
+		"cp -a /tmp/quarantine-gateway/. /opt/quarantine-gateway-src/",
+		"chmod +x /opt/quarantine-gateway-src/first-boot.sh",
+		"/opt/quarantine-gateway-src/first-boot.sh",
+	}, "; ")
+	lc := fmt.Sprintf("printf '%%s\\n' %s | sudo -S -p '' bash -c %s",
+		shellSingleQuote(pass), shellSingleQuote(inner))
 	out, err := m.VBox.GuestControlRun(m.vmName(), user, pass,
 		"/bin/bash",
-		[]string{"-lc", "sudo cp -a /tmp/quarantine-gateway/. /opt/quarantine-gateway-src/ 2>/dev/null || sudo cp -a /tmp/quarantine-gateway /opt/quarantine-gateway-src; sudo chmod +x /opt/quarantine-gateway-src/first-boot.sh; sudo /opt/quarantine-gateway-src/first-boot.sh"},
+		[]string{"-lc", lc},
 		30*time.Minute,
 	)
 	if err != nil {
@@ -240,27 +273,121 @@ func (m *Manager) Provision() (string, error) {
 	return "Gateway provisioned.\n" + out, nil
 }
 
-// AttachLabGuest sets the lab Windows VM NIC to intnet for gateway mode.
+// linuxCopyFileTo copies a single host file to an absolute guest file path.
+func (m *Manager) linuxCopyFileTo(hostPath, guestFile string) error {
+	user, pass := m.creds()
+	_, err := m.VBox.RunWithTimeout(10*time.Minute,
+		"guestcontrol", m.vmName(), "copyto",
+		"--username="+user,
+		"--password="+pass,
+		"--target-directory="+guestFile,
+		hostPath,
+	)
+	return err
+}
+
+func writeGatewayTar(srcDir, tarPath string) error {
+	f, err := os.Create(tarPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	tw := tar.NewWriter(f)
+	defer tw.Close()
+
+	return filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(srcDir, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		// Skip local junk
+		base := filepath.Base(rel)
+		if base == ".git" || base == "__pycache__" {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		hdr, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return err
+		}
+		hdr.Name = filepath.ToSlash(rel)
+		if err := tw.WriteHeader(hdr); err != nil {
+			return err
+		}
+		if info.Mode().IsRegular() {
+			rf, err := os.Open(path)
+			if err != nil {
+				return err
+			}
+			_, copyErr := io.Copy(tw, rf)
+			rf.Close()
+			return copyErr
+		}
+		return nil
+	})
+}
+
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// AttachLabGuest sets the lab Windows VM for gateway mode:
+//   NIC1 = intnet (quarantine LAN / sample traffic)
+//   NIC2 = NAT (host agent port-forward only; keep default route on NIC1)
+// Skips power-off when the layout is already correct so re-running
+// `network gateway` does not bounce a live lab session.
 func (m *Manager) AttachLabGuest() error {
 	g := m.gw()
 	vm := m.Cfg.VMName
-	state, _ := m.VBox.VMState(vm)
+	info, _ := m.VBox.RunWithTimeout(time.Minute, "showvminfo", vm, "--machinereadable")
+	already := nicMachineValue(info, 1) == "intnet" &&
+		nicMachineField(info, "intnet1") == g.IntnetName &&
+		nicMachineValue(info, 2) == "nat"
+	state := nicMachineField(info, "VMState")
 	running := strings.EqualFold(state, "running") || strings.EqualFold(state, "paused")
-	if running {
-		_, _ = m.VBox.RunWithTimeout(2*time.Minute, "controlvm", vm, "poweroff")
-		time.Sleep(2 * time.Second)
-	}
-	if _, err := m.VBox.RunWithTimeout(time.Minute, "modifyvm", vm,
-		"--nic1", "intnet",
-		"--intnet1", g.IntnetName,
-		"--cableconnected1", "on",
-	); err != nil {
-		return err
+
+	if !already {
+		if running {
+			_, _ = m.VBox.RunWithTimeout(2*time.Minute, "controlvm", vm, "poweroff")
+			time.Sleep(2 * time.Second)
+		}
+		if _, err := m.VBox.RunWithTimeout(time.Minute, "modifyvm", vm,
+			"--nic1", "intnet",
+			"--intnet1", g.IntnetName,
+			"--cableconnected1", "on",
+			"--nic2", "nat",
+			"--cableconnected2", "on",
+		); err != nil {
+			return err
+		}
 	}
 	m.Cfg.Network.Mode = "gateway"
 	m.Cfg.Network.GuestGateway = g.LANGateway
 	m.Cfg.Network.GuestDNS = g.LANGateway
 	return nil
+}
+
+func nicMachineValue(info string, nic int) string {
+	return nicMachineField(info, fmt.Sprintf("nic%d", nic))
+}
+
+func nicMachineField(info, key string) string {
+	prefix := key + `="`
+	for _, line := range strings.Split(info, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimSuffix(strings.TrimPrefix(line, prefix), `"`)
+		}
+	}
+	return ""
 }
 
 // EnableMode starts the gateway and attaches the lab guest to the LAN intnet.
@@ -320,16 +447,30 @@ func (m *Manager) SyncLogs() (string, error) {
 
 // ExportCA copies the mitm CA to network/proxy for guest install.
 func (m *Manager) ExportCA() (string, error) {
+	if err := m.Start(); err != nil {
+		return "", err
+	}
+	user, pass := m.creds()
 	destDir := filepath.Join(m.ProjectRoot, "network", "proxy")
 	_ = os.MkdirAll(destDir, 0o755)
 	dest := filepath.Join(destDir, "mitmproxy-ca-cert.cer")
 	tmp := filepath.Join(os.TempDir(), "gw-ca.cer")
 	_ = os.Remove(tmp)
-	err := m.linuxCopyFrom("/etc/quarantine-gateway/mitmproxy-ca-cert.cer", tmp)
-	if err != nil {
-		err = m.linuxCopyFrom("/root/.mitmproxy/mitmproxy-ca-cert.pem", tmp)
+
+	scriptHost := filepath.Join(m.scriptsHostDir(), "scripts", "export-ca.sh")
+	if _, err := os.Stat(scriptHost); err != nil {
+		return "", fmt.Errorf("export CA script missing: %w", err)
 	}
-	if err != nil {
+	if err := m.linuxCopyFileTo(scriptHost, "/tmp/export-ca.sh"); err != nil {
+		return "", fmt.Errorf("upload export-ca.sh: %w", err)
+	}
+	inner := "chmod +x /tmp/export-ca.sh; bash /tmp/export-ca.sh"
+	lc := fmt.Sprintf("printf '%%s\\n' %s | sudo -S -p '' bash -c %s",
+		shellSingleQuote(pass), shellSingleQuote(inner))
+	if out, err := m.VBox.GuestControlRun(m.vmName(), user, pass, "/bin/bash", []string{"-lc", lc}, 2*time.Minute); err != nil {
+		return "", fmt.Errorf("export CA (stage in guest): %w (%s)", err, out)
+	}
+	if err := m.linuxCopyFrom("/tmp/quarantine-ca.cer", tmp); err != nil {
 		return "", fmt.Errorf("export CA: %w", err)
 	}
 	if err := copyFile(tmp, dest); err != nil {

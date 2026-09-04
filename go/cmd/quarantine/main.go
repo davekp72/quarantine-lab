@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"github.com/quarantine-lab/quarantine/internal/app"
+	"github.com/quarantine-lab/quarantine/internal/config"
 	"github.com/spf13/cobra"
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -588,17 +589,43 @@ func guestCmd(cfgPath *string) *cobra.Command {
 	cmd.AddCommand(run)
 
 	copyC := &cobra.Command{
-		Use: "copy",
+		Use:   "copy [--host path]",
+		Short: "Copy a host file into the guest (default: guest.copyTargetDir)",
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			a, err := app.New(*cfgPath)
 			if err != nil {
 				return err
 			}
-			return a.Evidence.Guest.CopyTo(hostPath, a.Cfg.Guest.CopyTargetDir, a.Evidence.Guest.GuestCreds())
+			path := hostPath
+			if path == "" && len(args) > 0 {
+				path = args[0]
+			}
+			if path == "" {
+				return fmt.Errorf("usage: quarantine guest copy --host <file>  (or positional path)")
+			}
+			return a.Evidence.Guest.CopyTo(path, a.Cfg.Guest.CopyTargetDir, a.Evidence.Guest.GuestCreds())
 		},
 	}
 	copyC.Flags().StringVar(&hostPath, "host", "", "Host file to copy")
 	cmd.AddCommand(copyC)
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "gateway-setup",
+		Short: "Upload gateway commission scripts + CA into the lab guest",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			a, err := app.New(*cfgPath)
+			if err != nil {
+				return err
+			}
+			msg, err := a.Evidence.Guest.DeployGatewaySetup(config.ProjectRoot(*cfgPath))
+			if err != nil {
+				return err
+			}
+			fmt.Println(msg)
+			return nil
+		},
+	})
 	return cmd
 }
 

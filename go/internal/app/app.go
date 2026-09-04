@@ -801,7 +801,10 @@ func (a *App) TakeSnapshotWails(name, description string, force bool) error {
 		return err
 	}
 	if capErr := a.captureLiveManifest(name, true); capErr != nil {
-		return fmt.Errorf("snapshot saved but live capture failed: %w", capErr)
+		// Snapshot itself succeeded — do not fail the UI. Agent may be briefly
+		// unreachable (e.g. gateway intnet without NAT) or still starting.
+		a.logInfo("Snapshot saved: " + name + " (live capture deferred: " + capErr.Error() + ")")
+		return nil
 	}
 	a.logInfo("Snapshot saved: " + name)
 	return nil
