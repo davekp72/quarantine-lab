@@ -96,10 +96,6 @@ func (s *Service) MarkLiveSnapshot(snapshotName string) (string, error) {
 	}
 
 	snap := s.Cfg.ResolveSnapshotName(snapshotName)
-	engine := strings.ToLower(strings.TrimSpace(s.Cfg.Manifest.RegistryEngine))
-	if engine == "regshot" {
-		return "", fmt.Errorf("regshot registry engine is not supported in the Go UI yet")
-	}
 
 	isEvidence := strings.HasPrefix(strings.ToLower(snap), "evidence-")
 	baselineName := strings.TrimSpace(s.Cfg.Manifest.SessionBaselineSnapshot)
@@ -172,40 +168,40 @@ func (s *Service) writeSidecarsFromCapture(snapshotName string, resp *types.Capt
 		return fmt.Errorf("changed-files sidecar: %w", err)
 	}
 
+	payloadWarnings := []string{"Registry compare uses hive-index dumps; curated walks omitted"}
+	payloadWarnings = append(payloadWarnings, resp.Registry.Warnings...)
 	payloadExport := map[string]any{
-		"engine":     "cli",
+		"engine":     "hive",
 		"capturedAt": resp.CapturedAt,
 		"snapshot":   snapshotName,
 		"userName":   resp.Registry.UserName,
 		"sid":        resp.Registry.SID,
-		"entryCount": len(resp.Registry.HKCU),
-		"registry":   resp.Registry.HKCU,
-	}
-	if len(resp.Registry.Warnings) > 0 {
-		payloadExport["warnings"] = resp.Registry.Warnings
+		"entryCount": 0,
+		"registry":   []any{},
+		"warnings":   payloadWarnings,
 	}
 	if err := writeObj("-payload-registry.json", payloadExport); err != nil {
 		return fmt.Errorf("payload registry sidecar: %w", err)
 	}
 
-	machine := append(append([]types.RegistryEntry{}, resp.Registry.HKLM...), resp.Registry.HKU...)
 	hklmExport := map[string]any{
-		"engine":     "cli",
+		"engine":     "hive",
 		"scope":      "hklm+hku",
 		"capturedAt": resp.CapturedAt,
 		"snapshot":   snapshotName,
-		"entryCount": len(machine),
-		"hklmCount":  len(resp.Registry.HKLM),
-		"hkuCount":   len(resp.Registry.HKU),
-		"registry":   machine,
+		"entryCount": 0,
+		"hklmCount":  0,
+		"hkuCount":   0,
+		"registry":   []any{},
 	}
 	if err := writeObj("-hklm-registry.json", hklmExport); err != nil {
 		return fmt.Errorf("hklm registry sidecar: %w", err)
 	}
-	if resp.Hives != nil && len(resp.Hives.Files) > 0 {
-		if err := s.pullHiveDump(snapshotName, resp.Hives); err != nil {
-			return fmt.Errorf("hive dump pull: %w", err)
-		}
+	if resp.Hives == nil || len(resp.Hives.Files) == 0 {
+		return fmt.Errorf("hive dump missing from agent capture — registry requires reg save dumps")
+	}
+	if err := s.pullHiveDump(snapshotName, resp.Hives); err != nil {
+		return fmt.Errorf("hive dump pull: %w", err)
 	}
 	return nil
 }

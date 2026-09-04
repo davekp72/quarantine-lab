@@ -25,9 +25,25 @@
     },
     "capture": {
       "enabled": true,
+      "mode": "guest-nic",
       "logDir": "D:\\Vbox\\LabVM\\logs\\pcap",
       "interface": "auto",
       "guestIp": "10.0.2.15"
+    },
+    "gateway": {
+      "enabled": false,
+      "vmName": "Quarantine-Gateway",
+      "lanCidr": "10.66.0.0/24",
+      "lanGateway": "10.66.0.1",
+      "guestIp": "10.66.0.15",
+      "intnetName": "quarantine-net",
+      "uplink": "nat",
+      "username": "quarantine",
+      "password": "quarantine",
+      "sshHostPort": 2222,
+      "memoryMb": 1024,
+      "cpuCount": 1,
+      "diskSizeGb": 16
     }
   },
   "isolation": {
@@ -82,10 +98,6 @@
     "registryDiskFlatten": false,
     "hashMaxMb": 50,
     "contentMaxKb": 51200
-  },
-  "regshot": {
-    "guestDir": "C:\\Users\\Public\\Quarantine\\regshot",
-    "hostToolsDir": "tools\\regshot"
   },
   "agent": {
     "enabled": true,

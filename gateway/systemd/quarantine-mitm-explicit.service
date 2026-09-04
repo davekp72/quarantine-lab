@@ -1,0 +1,25 @@
+[Unit]
+Description=Quarantine mitmproxy (explicit HTTP proxy :8080)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=QUARANTINE_ACCESS_LOG=/var/log/quarantine/proxy/access.log
+Environment=QUARANTINE_ERROR_LOG=/var/log/quarantine/proxy/errors.log
+Environment=QUARANTINE_PAC_PATH=/etc/quarantine-gateway/quarantine.pac
+Environment=QUARANTINE_CA_PATH=/root/.mitmproxy/mitmproxy-ca-cert.pem
+ExecStartPre=/bin/mkdir -p /var/log/quarantine/proxy /root/.mitmproxy
+ExecStart=/opt/quarantine-gateway/venv/bin/mitmdump \
+  --mode regular \
+  --listen-host 0.0.0.0 \
+  --listen-port 8080 \
+  --set block_global=false \
+  --set confdir=/root/.mitmproxy \
+  -s /etc/quarantine-gateway/block_private.py \
+  --set hardcopy=/var/log/quarantine/proxy/flows.mitm
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

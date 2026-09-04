@@ -90,6 +90,112 @@ function appendActivityLine(entry) {
   scrollLogView();
 }
 
+async function refreshCaptureStatus() {
+  const api = await backend();
+  const statusEl = $('#capture-status');
+  const detailEl = $('#capture-detail');
+  const startBtn = $('#btn-capture-start');
+  const stopBtn = $('#btn-capture-stop');
+  if (!statusEl) return;
+  if (!api?.CaptureStatusWails) {
+    statusEl.textContent = 'Unavailable';
+    statusEl.className = 'capture-status disabled';
+    if (detailEl) detailEl.textContent = '';
+    return;
+  }
+  try {
+    const st = await api.CaptureStatusWails();
+    const running = !!st.running;
+    const enabled = st.enabled !== false;
+    statusEl.className = 'capture-status ' + (!enabled ? 'disabled' : running ? 'running' : 'stopped');
+    statusEl.textContent = !enabled ? 'Disabled' : running ? 'Recording' : 'Stopped';
+    const parts = [];
+    if (st.mode) parts.push(st.mode);
+    if (st.message && st.message !== 'running' && st.message !== 'stopped') parts.push(st.message);
+    else if (st.pcapPath) parts.push(st.pcapPath);
+    if (detailEl) detailEl.textContent = parts.join(' · ');
+    if (startBtn) startBtn.disabled = !enabled || running;
+    if (stopBtn) stopBtn.disabled = !enabled || (!running && !st.pcapPath && !st.stale);
+  } catch (e) {
+    statusEl.textContent = 'Error';
+    statusEl.className = 'capture-status disabled';
+    if (detailEl) detailEl.textContent = String(e);
+  }
+}
+
+async function refreshGatewayStatus() {
+  const api = await backend();
+  const statusEl = $('#gateway-status');
+  const detailEl = $('#gateway-detail');
+  if (!statusEl) return;
+  if (!api?.GatewayStatusWails) {
+    statusEl.textContent = 'Unavailable';
+    statusEl.className = 'capture-status disabled';
+    return;
+  }
+  try {
+    const st = await api.GatewayStatusWails();
+    const vmState = (st.vmState || '').toLowerCase();
+    const mode = (st.mode || '').toLowerCase();
+    const active = mode === 'gateway' && vmState === 'running';
+    statusEl.className = 'capture-status ' + (active ? 'running' : vmState === 'running' ? 'stopped' : 'disabled');
+    statusEl.textContent = active ? 'Active' : (vmState === 'running' ? 'Running (idle)' : (vmState || 'Off'));
+    const parts = [];
+    if (st.vmName) parts.push(st.vmName);
+    if (st.lanGateway) parts.push('LAN ' + st.lanGateway);
+    if (st.guestIp) parts.push('guest ' + st.guestIp);
+    if (st.status && typeof st.status === 'string') {
+      const first = st.status.split('\n')[0];
+      if (first && !first.includes(st.vmName || '')) parts.push(first);
+    }
+    if (detailEl) detailEl.textContent = parts.join(' · ');
+  } catch (e) {
+    statusEl.textContent = 'Error';
+    statusEl.className = 'capture-status disabled';
+    if (detailEl) detailEl.textContent = String(e);
+  }
+}
+
+async function startCapture() {
+  const api = await backend();
+  if (!api?.StartCaptureWails) {
+    alert('Capture API unavailable');
+    return;
+  }
+  const btn = $('#btn-capture-start');
+  setBusy(btn, true, 'Starting…');
+  try {
+    await api.StartCaptureWails();
+    toggleLogDrawer(true);
+    await refreshCaptureStatus();
+  } catch (e) {
+    alert(String(e));
+  } finally {
+    setBusy(btn, false, 'Start');
+    await refreshCaptureStatus();
+  }
+}
+
+async function stopCapture() {
+  const api = await backend();
+  if (!api?.StopCaptureWails) {
+    alert('Capture API unavailable');
+    return;
+  }
+  const btn = $('#btn-capture-stop');
+  setBusy(btn, true, 'Stopping…');
+  try {
+    await api.StopCaptureWails();
+    toggleLogDrawer(true);
+    await refreshCaptureStatus();
+  } catch (e) {
+    alert(String(e));
+  } finally {
+    setBusy(btn, false, 'Stop');
+    await refreshCaptureStatus();
+  }
+}
+
 async function refreshStatus() {
   const api = await backend();
   if (!api?.GetVMStatusWails) {
@@ -98,6 +204,7 @@ async function refreshStatus() {
   }
   const st = await api.GetVMStatusWails();
   let line = `${st.vmName || ''} — ${st.state || 'unknown'}`;
+  if (st.networkMode) line += ` · net ${st.networkMode}`;
   if (st.agentEnabled === 'true') {
     if (st.agentStatus === 'ok') {
       line += ` | agent v${st.agentVersion || '?'} (payload=${st.agentPayloadSession})`;
@@ -441,8 +548,88 @@ function regTabEmptyMessage(tab) {
   return 'No changed registry values in this diff.';
 }
 
-function renderTreeNode(node, container, onSelect, depth = 0, expand = true) {
+function expandTreeAncestors(row) {
+  let el = row?.parentElement;
+  while (el) {
+    if (el.classList?.contains('tree-children') && el.classList.contains('collapsed')) {
+      el.classList.remove('collapsed');
+      const toggleRow = el.previousElementSibling;
+      const t = toggleRow?.querySelector?.('.tree-toggle');
+      if (t && !t.disabled) {
+        t.textContent = '▾';
+        t.setAttribute('aria-label', 'Collapse');
+      }
+    }
+    el = el.parentElement;
+  }
+}
+
+function collectFileLeaves(node, out = []) {
+  const children = Object.values(node.children || {});
+  if (!children.length) {
+    if (node.path) out.push(node);
+    return out;
+  }
+  children.forEach((c) => collectFileLeaves(c, out));
+  return out;
+}
+
+function collectRegistryLeaves(node, out = []) {
+  for (const v of node.values || []) {
+    out.push({ path: node.path || '', value: v });
+  }
+  Object.values(node.children || {}).forEach((c) => collectRegistryLeaves(c, out));
+  return out;
+}
+
+function formatRegValueData(v) {
+  if (v.change === 'modified') {
+    return `<span class="reg-before">${escapeHtml(formatRegData(v.before))}</span>` +
+      `<span class="reg-arrow">→</span>` +
+      `<span class="reg-after">${escapeHtml(formatRegData(v.after ?? v.v))}</span>`;
+  }
+  return escapeHtml(formatRegData(v.v));
+}
+
+function navigateFileLeaf(path, byPath, onSelect) {
+  const target = byPath.get(path);
+  if (!target) return;
+  expandTreeAncestors(target.row);
+  $('#file-tree')?.querySelectorAll('.file-row.selected').forEach((el) => el.classList.remove('selected'));
+  target.row.classList.add('selected');
+  target.row.scrollIntoView({ block: 'nearest' });
+  onSelect(target.node);
+}
+
+function fillFileFlatPane(node, previewEl, byPath, onSelect) {
+  const scope = node.path || node.name || '';
+  const leaves = collectFileLeaves(node).sort((a, b) =>
+    String(a.path || '').localeCompare(String(b.path || ''), undefined, { sensitivity: 'base' })
+  );
+  let html = `<div class="reg-path muted">${escapeHtml(scope)}</div>`;
+  html += `<div class="reg-section-title">${leaves.length} file${leaves.length === 1 ? '' : 's'} under this folder</div>`;
+  if (!leaves.length) {
+    html += '<span class="muted">(no files under this node)</span>';
+    previewEl.classList.remove('preview-unavailable');
+    previewEl.innerHTML = html;
+    return;
+  }
+  html += leaves.map((f) => {
+    const changeCls = f.change ? ` change-${f.change}` : '';
+    return `<div class="flat-leaf${changeCls}" data-nav-path="${escapeHtml(f.path || '')}">` +
+      `<code class="flat-leaf-path">${escapeHtml(f.path || '')}</code>` +
+      `<span class="reg-type">${escapeHtml(f.change || 'file')}</span></div>`;
+  }).join('');
+  previewEl.classList.remove('preview-unavailable');
+  previewEl.innerHTML = html;
+  previewEl.querySelectorAll('.flat-leaf[data-nav-path]').forEach((el) => {
+    el.onclick = () => navigateFileLeaf(el.getAttribute('data-nav-path'), byPath, onSelect);
+  });
+}
+
+function renderTreeNode(node, container, onSelect, depth = 0, expand = true, byPath = null) {
   if (!node) return;
+  const map = byPath || new Map();
   const childrenMap = node.children && typeof node.children === 'object' ? node.children : {};
   const children = Object.values(childrenMap).sort((a, b) =>
     String(a.name || a.path || '').localeCompare(String(b.name || b.path || ''), undefined, { sensitivity: 'base' })
@@ -484,23 +671,25 @@ function renderTreeNode(node, container, onSelect, depth = 0, expand = true) {
     toggle.setAttribute('aria-label', open ? 'Collapse' : 'Expand');
   };
 
+  if (node.path) {
+    map.set(node.path, { row, node, children, hasChildren });
+  }
+
   row.onclick = (ev) => {
     if (ev.target === toggle) return;
+    $('#file-tree')?.querySelectorAll('.file-row.selected').forEach((el) => el.classList.remove('selected'));
+    row.classList.add('selected');
     if (hasChildren) {
-      const open = childHost.classList.toggle('collapsed') === false;
-      toggle.textContent = open ? '▾' : '▸';
-      toggle.setAttribute('aria-label', open ? 'Collapse' : 'Expand');
+      fillFileFlatPane(node, $('#file-preview'), map, onSelect);
       return;
     }
-    container.querySelectorAll('.file-row.selected').forEach((el) => el.classList.remove('selected'));
-    row.classList.add('selected');
     onSelect(node);
   };
 
   container.appendChild(row);
   if (hasChildren) {
     container.appendChild(childHost);
-    children.forEach((child) => renderTreeNode(child, childHost, onSelect, depth + 1, depth < 1));
+    children.forEach((child) => renderTreeNode(child, childHost, onSelect, depth + 1, depth < 1, map));
   }
 }
 
@@ -613,8 +802,104 @@ function formatRegData(v) {
   return typeof v === 'string' ? v : JSON.stringify(v);
 }
 
-function renderRegistryNode(node, container, valuesEl, depth, expand) {
+function collectRegSegmentLabels(node, out = new Map()) {
+  if (node && node.name && node.label && node.label !== node.name) {
+    out.set(node.name, node.label);
+  }
+  Object.values(node.children || {}).forEach((c) => collectRegSegmentLabels(c, out));
+  return out;
+}
+
+function friendlyRegPath(path, labels) {
+  if (!path || !labels?.size) return path || '';
+  return String(path).split('\\').map((part) => {
+    if (!part) return part;
+    if (labels.has(part)) return labels.get(part);
+    for (const [raw, label] of labels) {
+      if (raw.toLowerCase() === part.toLowerCase()) return label;
+    }
+    return part;
+  }).join('\\');
+}
+
+function navigateRegistryKey(path, byPath, valuesEl, labels, highlightName) {
+  const target = byPath.get(path);
+  if (!target) return;
+  expandTreeAncestors(target.row);
+  $('#registry-tree')?.querySelectorAll('.reg-row.selected').forEach((el) => el.classList.remove('selected'));
+  target.row.classList.add('selected');
+  target.row.scrollIntoView({ block: 'nearest' });
+  fillRegistryLocalPane(target.node, valuesEl, labels, highlightName);
+}
+
+function fillRegistryLocalPane(node, valuesEl, labels, highlightName) {
+  const path = friendlyRegPath(node.path || '', labels);
+  const vals = node.values || [];
+  let html = `<div class="reg-path muted">${escapeHtml(path)}</div>`;
+  if (!vals.length) {
+    html += '<span class="muted">(no values at this key)</span>';
+    valuesEl.innerHTML = html;
+    return;
+  }
+  html += vals.map((v) => {
+    const name = v.n === '' || v.n == null ? '(Default)' : v.n;
+    const changeCls = v.change ? ` change-${v.change}` : '';
+    const hi = highlightName != null && String(v.n ?? '') === String(highlightName) ? ' flat-leaf-active' : '';
+    const typ = v.t || v.afterType || v.beforeType || '';
+    return `<div class="reg-value${changeCls}${hi}" data-value-name="${escapeHtml(String(v.n ?? ''))}">` +
+      `<code>${escapeHtml(name)}</code>` +
+      `<span class="reg-type">${escapeHtml(typ)}</span>` +
+      `<span class="reg-data">${formatRegValueData(v)}</span></div>`;
+  }).join('');
+  valuesEl.innerHTML = html;
+  const active = valuesEl.querySelector('.flat-leaf-active');
+  if (active) active.scrollIntoView({ block: 'nearest' });
+}
+
+function fillRegistryFlatPane(node, valuesEl, byPath, labels) {
+  const scope = friendlyRegPath(node.path || '', labels);
+  const leaves = collectRegistryLeaves(node).sort((a, b) => {
+    const pk = String(a.path || '').localeCompare(String(b.path || ''), undefined, { sensitivity: 'base' });
+    if (pk) return pk;
+    return String(a.value?.n ?? '').localeCompare(String(b.value?.n ?? ''), undefined, { sensitivity: 'base' });
+  });
+  let html = `<div class="reg-path muted">${escapeHtml(scope)}</div>`;
+  html += `<div class="reg-section-title">${leaves.length} value${leaves.length === 1 ? '' : 's'} under this key</div>`;
+  if (!leaves.length) {
+    html += '<span class="muted">(no values under this node)</span>';
+    valuesEl.innerHTML = html;
+    return;
+  }
+  html += leaves.map((leaf) => {
+    const v = leaf.value || {};
+    const name = v.n === '' || v.n == null ? '(Default)' : v.n;
+    const changeCls = v.change ? ` change-${v.change}` : '';
+    const typ = v.t || v.afterType || v.beforeType || '';
+    const dispKey = friendlyRegPath(leaf.path || '', labels);
+    const full = dispKey ? `${dispKey}\\${name}` : name;
+    return `<div class="flat-leaf${changeCls}" data-nav-path="${escapeHtml(leaf.path || '')}" data-value-name="${escapeHtml(String(v.n ?? ''))}">` +
+      `<code class="flat-leaf-path">${escapeHtml(full)}</code>` +
+      `<span class="reg-type">${escapeHtml(typ || v.change || '')}</span>` +
+      `<span class="reg-data">${formatRegValueData(v)}</span></div>`;
+  }).join('');
+  valuesEl.innerHTML = html;
+  valuesEl.querySelectorAll('.flat-leaf[data-nav-path]').forEach((el) => {
+    el.onclick = () => {
+      navigateRegistryKey(
+        el.getAttribute('data-nav-path'),
+        byPath,
+        valuesEl,
+        labels,
+        el.getAttribute('data-value-name')
+      );
+    };
+  });
+}
+
+function renderRegistryNode(node, container, valuesEl, depth, expand, byPath = null, labels = null) {
   if (!node) return;
+  const map = byPath || new Map();
+  const sidLabels = labels || collectRegSegmentLabels(node);
   const children = Object.values(node.children || {}).sort((a, b) =>
     String(a.label || a.name || '').localeCompare(String(b.label || b.name || ''), undefined, { sensitivity: 'base' })
   );
@@ -647,31 +932,18 @@ function renderRegistryNode(node, container, valuesEl, depth, expand) {
 
     row.appendChild(toggle);
     row.appendChild(label);
+    if (node.path) {
+      map.set(node.path, { row, node, children, hasChildren });
+    }
     row.onclick = (ev) => {
       if (ev.target === toggle) return;
-      container.querySelectorAll('.reg-row.selected').forEach((el) => el.classList.remove('selected'));
+      $('#registry-tree')?.querySelectorAll('.reg-row.selected').forEach((el) => el.classList.remove('selected'));
       row.classList.add('selected');
-      const vals = node.values || [];
-      if (!vals.length) {
-        valuesEl.innerHTML = `<div class="reg-path muted">${escapeHtml(node.path)}</div><span class="muted">(no values at this key)</span>`;
-        return;
+      if (hasChildren) {
+        fillRegistryFlatPane(node, valuesEl, map, sidLabels);
+      } else {
+        fillRegistryLocalPane(node, valuesEl, sidLabels);
       }
-      valuesEl.innerHTML = `<div class="reg-path muted">${escapeHtml(node.path)}</div>` + vals.map((v) => {
-        const name = v.n === '' || v.n == null ? '(Default)' : v.n;
-        const changeCls = v.change ? ` change-${v.change}` : '';
-        let dataHtml;
-        if (v.change === 'modified') {
-          dataHtml = `<span class="reg-before">${escapeHtml(formatRegData(v.before))}</span>` +
-            `<span class="reg-arrow">→</span>` +
-            `<span class="reg-after">${escapeHtml(formatRegData(v.after ?? v.v))}</span>`;
-        } else {
-          dataHtml = escapeHtml(formatRegData(v.v));
-        }
-        const typ = v.t || v.afterType || v.beforeType || '';
-        return `<div class="reg-value${changeCls}"><code>${escapeHtml(name)}</code>` +
-          `<span class="reg-type">${escapeHtml(typ)}</span>` +
-          `<span class="reg-data">${dataHtml}</span></div>`;
-      }).join('');
     };
 
     const childHost = document.createElement('div');
@@ -687,11 +959,11 @@ function renderRegistryNode(node, container, valuesEl, depth, expand) {
 
     container.appendChild(row);
     container.appendChild(childHost);
-    children.forEach((c) => renderRegistryNode(c, childHost, valuesEl, depth + 1, depth < 1));
+    children.forEach((c) => renderRegistryNode(c, childHost, valuesEl, depth + 1, depth < 1, map, sidLabels));
     return;
   }
 
-  children.forEach((c) => renderRegistryNode(c, container, valuesEl, depth, true));
+  children.forEach((c) => renderRegistryNode(c, container, valuesEl, depth, true, map, sidLabels));
 }
 
 function renderSysmon() {
@@ -739,6 +1011,9 @@ function renderNetwork() {
     ? `${net.windowFrom} → ${net.windowTo}`
     : 'snapshot capture window';
   let html = `<p class="muted">${windowText} · ${dns.length} DNS · ${reqs.length} HTTP/proxy</p>`;
+  if (hideNoiseEnabled()) {
+    html += '<p class="muted">Routine Microsoft / connectivity noise hidden — uncheck Hide routine noise to show all.</p>';
+  }
   if (net.message) {
     html += `<p class="muted">${net.message}</p>`;
   }
@@ -834,6 +1109,9 @@ $('#btn-install-agent').addEventListener('click', async () => {
     setBusy(btn, false, 'Install VM agent');
   }
 });
+$('#btn-capture-start')?.addEventListener('click', () => startCapture());
+$('#btn-capture-stop')?.addEventListener('click', () => stopCapture());
+$('#btn-capture-refresh')?.addEventListener('click', () => refreshCaptureStatus().catch(alert));
 $('#btn-load-file').addEventListener('click', async () => {
   const path = prompt('Diff JSON path');
   if (!path) return;
@@ -860,8 +1138,14 @@ EventsOn('applog', (entry) => {
 
 (async () => {
   await refreshStatus();
+  await refreshGatewayStatus();
+  await refreshCaptureStatus();
   await loadSnapshots();
   renderOverview();
+  setInterval(() => {
+    refreshCaptureStatus().catch(() => {});
+    refreshGatewayStatus().catch(() => {});
+  }, 10000);
 })().catch((e) => {
   $('#snap-action-msg').textContent = String(e);
 });

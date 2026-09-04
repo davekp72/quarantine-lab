@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -16,6 +17,7 @@ import (
 type Client struct {
 	Binary string
 	OnLog  func(level, message string)
+	mu     sync.Mutex
 }
 
 // NewClient resolves VBoxManage path from config or common install locations.
@@ -40,31 +42,77 @@ func NewClient(configuredPath string) (*Client, error) {
 	return nil, fmt.Errorf("VBoxManage not found; set vboxManagePath in config")
 }
 
-// Run executes VBoxManage with arguments.
+func (c *Client) installDir() string {
+	return filepath.Dir(c.Binary)
+}
+
+func isTransientVBoxExit(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	// Windows STATUS_DLL_INIT_FAILED — often under concurrent VBoxManage spawn.
+	return strings.Contains(s, "0xc0000142") ||
+		strings.Contains(s, "c0000142") ||
+		strings.Contains(s, "dll_init_failed") ||
+		strings.Contains(s, "status_dll_init_failed")
+}
+
+// Run executes VBoxManage with arguments (serialized; retries transient Windows spawn failures).
 func (c *Client) Run(ctx context.Context, args ...string) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if c.OnLog != nil {
 		c.OnLog("cmd", "VBoxManage "+strings.Join(args, " "))
 	}
-	cmd := exec.CommandContext(ctx, c.Binary, args...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	out := strings.TrimSpace(stdout.String())
-	if err != nil {
+
+	vboxDir := c.installDir()
+	var lastErr error
+	var out string
+	for attempt := 0; attempt < 4; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return out, fmt.Errorf("VBoxManage %s: %w", strings.Join(args, " "), ctx.Err())
+			case <-time.After(time.Duration(attempt) * 200 * time.Millisecond):
+			}
+		}
+
+		cmd := exec.CommandContext(ctx, c.Binary, args...)
+		prepareCmd(cmd, vboxDir)
+		// Prefer VirtualBox DLLs over whatever the host process PATH provides.
+		pathEnv := vboxDir + string(os.PathListSeparator) + os.Getenv("PATH")
+		cmd.Env = append(os.Environ(), "PATH="+pathEnv)
+
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+		out = strings.TrimSpace(stdout.String())
+		if err == nil {
+			if c.OnLog != nil && out != "" {
+				c.OnLog("debug", out)
+			}
+			return out, nil
+		}
+
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
 			msg = out
 		}
-		if c.OnLog != nil {
-			c.OnLog("error", msg)
+		lastErr = fmt.Errorf("VBoxManage %s: %w: %s", strings.Join(args, " "), err, msg)
+		if !isTransientVBoxExit(err) && !isTransientVBoxExit(lastErr) {
+			if c.OnLog != nil {
+				c.OnLog("error", msg)
+			}
+			return out, lastErr
 		}
-		return out, fmt.Errorf("VBoxManage %s: %w: %s", strings.Join(args, " "), err, msg)
+		if c.OnLog != nil {
+			c.OnLog("error", fmt.Sprintf("transient VBoxManage failure (attempt %d): %v", attempt+1, lastErr))
+		}
 	}
-	if c.OnLog != nil && out != "" {
-		c.OnLog("debug", out)
-	}
-	return out, nil
+	return out, lastErr
 }
 
 // RunWithTimeout runs with a default timeout.

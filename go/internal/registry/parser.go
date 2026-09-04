@@ -1,71 +1,20 @@
 package registry
 
 import (
-	"bufio"
-	"fmt"
 	"regexp"
 	"strings"
 
 	"github.com/quarantine-lab/quarantine/internal/evidence"
 )
 
-// ParseRegExport parses Windows reg.exe export format into registry entries.
-func ParseRegExport(content string) ([]evidence.RegistryEntry, error) {
-	var entries []evidence.RegistryEntry
-	scanner := bufio.NewScanner(strings.NewReader(content))
-	var currentKey string
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "Windows Registry Editor") || strings.HasPrefix(line, ";") {
-			continue
-		}
-		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
-			currentKey = strings.Trim(line, "[]")
-			continue
-		}
-		if currentKey == "" {
-			continue
-		}
-		name, typ, val, err := parseRegLine(line)
-		if err != nil {
-			continue
-		}
-		entries = append(entries, evidence.RegistryEntry{K: currentKey, N: name, T: typ, V: val})
-	}
-	return entries, scanner.Err()
-}
-
-func parseRegLine(line string) (name, typ, val string, err error) {
-	eq := strings.Index(line, "=")
-	if eq < 0 {
-		return "", "", "", fmt.Errorf("invalid line")
-	}
-	name = strings.TrimSpace(line[:eq])
-	rest := strings.TrimSpace(line[eq+1:])
-	if strings.HasPrefix(rest, "hex(") || strings.HasPrefix(rest, "dword:") || strings.HasPrefix(rest, "qword:") {
-		parts := strings.SplitN(rest, ":", 2)
-		if len(parts) == 2 {
-			return unquoteName(name), parts[0], parts[1], nil
-		}
-	}
-	if strings.HasPrefix(rest, `"`) {
-		return unquoteName(name), "REG_SZ", strings.Trim(rest, `"`), nil
-	}
-	return unquoteName(name), "REG_SZ", rest, nil
-}
-
-func unquoteName(name string) string {
-	return strings.Trim(name, `"@`)
-}
-
 // ValueNode is a registry value under a key, with optional change metadata.
 type ValueNode struct {
-	N      string `json:"n"`
-	T      string `json:"t,omitempty"`
-	V      any    `json:"v,omitempty"`
-	Change string `json:"change,omitempty"`
-	Before any    `json:"before,omitempty"`
-	After  any    `json:"after,omitempty"`
+	N          string `json:"n"`
+	T          string `json:"t,omitempty"`
+	V          any    `json:"v,omitempty"`
+	Change     string `json:"change,omitempty"`
+	Before     any    `json:"before,omitempty"`
+	After      any    `json:"after,omitempty"`
 	BeforeType string `json:"beforeType,omitempty"`
 	AfterType  string `json:"afterType,omitempty"`
 }

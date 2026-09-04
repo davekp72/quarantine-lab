@@ -16,6 +16,7 @@ import (
 	"github.com/quarantine-lab/quarantine/internal/diff"
 	"github.com/quarantine-lab/quarantine/internal/disk"
 	"github.com/quarantine-lab/quarantine/internal/evidence"
+	"github.com/quarantine-lab/quarantine/internal/gateway"
 	"github.com/quarantine-lab/quarantine/internal/inbox"
 	"github.com/quarantine-lab/quarantine/internal/network"
 	"github.com/quarantine-lab/quarantine/internal/proxy"
@@ -33,6 +34,7 @@ type App struct {
 	Network    *network.Service
 	Proxy      *proxy.Manager
 	Capture    *capture.Manager
+	Gateway    *gateway.Manager
 	Inbox      *inbox.Service
 	Disk       *disk.Reader
 	WailsCtx   context.Context
@@ -56,14 +58,21 @@ func New(configPath string) (*App, error) {
 	}
 	root := config.ProjectRoot(configPath)
 	dr, _ := disk.NewReader(cfg, vms.VBox)
+	gw := gateway.New(cfg, vms.VBox, root)
+	capMgr := capture.New(cfg, vms.VBox)
+	capMgr.Gateway = gw
+	netSvc := network.New(cfg, vms.VBox)
+	netSvc.Gateway = gw
+	netSvc.CfgPath = configPath
 	a := &App{
 		ConfigPath: configPath,
 		Cfg:        cfg,
 		VM:         vms,
 		Evidence:   ev,
-		Network:    network.New(cfg, vms.VBox),
+		Network:    netSvc,
 		Proxy:      proxy.New(cfg, root),
-		Capture:    capture.New(cfg),
+		Capture:    capMgr,
+		Gateway:    gw,
 		Inbox:      inbox.New(cfg, vms.VBox),
 		Disk:       dr,
 		Log:        applog.New(1000),
@@ -114,15 +123,15 @@ func (a *App) CompareSnapshots(ctx context.Context, fromSnap, toSnap string, ref
 
 // applyHiveRegistryDiff builds offline hive indexes when needed and prefers them over manifest registry.
 func (a *App) applyHiveRegistryDiff(from, to string, result *diff.Result) error {
-	if a.Evidence == nil || a.Disk == nil || result == nil {
-		return fmt.Errorf("disk/evidence unavailable")
+	if a.Evidence == nil || result == nil {
+		return fmt.Errorf("evidence unavailable")
 	}
-	engine := strings.ToLower(strings.TrimSpace(a.Cfg.Manifest.RegistryEngine))
-	if engine == "cli" {
-		return fmt.Errorf("registryEngine=cli")
-	}
-	// Refresh snapshot disk index so newly preserved Evidence-* disks resolve.
-	if dr, err := disk.NewReader(a.Cfg, a.VM.VBox); err == nil {
+	// Disk is only required when indexes must be built from snapshot RAW.
+	if a.Disk == nil {
+		if dr, err := disk.NewReader(a.Cfg, a.VM.VBox); err == nil {
+			a.Disk = dr
+		}
+	} else if dr, err := disk.NewReader(a.Cfg, a.VM.VBox); err == nil {
 		a.Disk = dr
 	}
 	a.logInfo("Building registry index for " + from + "…")
@@ -135,10 +144,29 @@ func (a *App) applyHiveRegistryDiff(from, to string, result *diff.Result) error 
 	if err != nil {
 		return err
 	}
+	fromHives := localHiveFiles(a.Evidence, from)
+	toHives := localHiveFiles(a.Evidence, to)
 	return diff.ApplyHiveRegistryDiff(result,
 		a.Evidence.RegistryIndexPath(from),
 		a.Evidence.RegistryIndexPath(to),
-		fromMeta, toMeta)
+		fromMeta, toMeta, fromHives, toHives)
+}
+
+func localHiveFiles(ev *evidence.Service, snap string) []registry.LocalHiveFile {
+	if ev == nil {
+		return nil
+	}
+	refs, err := ev.ListRegistryHiveFiles(snap)
+	if err != nil {
+		return nil
+	}
+	out := make([]registry.LocalHiveFile, 0, len(refs))
+	for _, r := range refs {
+		out = append(out, registry.LocalHiveFile{
+			LocalPath: r.LocalPath, GuestPath: r.GuestPath, Prefix: r.Prefix,
+		})
+	}
+	return out
 }
 
 func (a *App) ensureHiveIndex(snapshotName string, force bool) (*registry.IndexMeta, error) {
@@ -147,10 +175,16 @@ func (a *App) ensureHiveIndex(snapshotName string, force bool) (*registry.IndexM
 	if !force && a.Evidence.RegistryHivesNewerThanIndex(snapshotName) {
 		force = true
 	}
+	if !force && a.Evidence.HasRegistryIndex(snapshotName) {
+		meta, err := registry.ReadIndexMeta(metaPath)
+		if err != nil || meta == nil || meta.Format != registry.IndexFormatSlim {
+			force = true
+		} else {
+			return meta, nil
+		}
+	}
 	if force {
 		a.Evidence.InvalidateRegistryIndex(snapshotName)
-	} else if a.Evidence.HasRegistryIndex(snapshotName) {
-		return registry.ReadIndexMeta(metaPath)
 	}
 
 	// Prefer live `reg save` hives pulled during capture (MB, not multi-GB RAW clone).
@@ -565,6 +599,10 @@ func (a *App) GetVMStatusWails() (map[string]string, error) {
 			m["agentError"] = err.Error()
 		}
 	}
+	m["networkMode"] = a.Cfg.Network.Mode
+	if a.Cfg.IsGatewayMode() {
+		m["gateway"] = "on"
+	}
 	return m, nil
 }
 
@@ -600,8 +638,8 @@ Run in elevated guest PowerShell:
   %s
 
 Then on the host:
-  .\quarantine-go.ps1 agent sync-token
-  .\quarantine-go.ps1 agent health
+  .\quarantine-vm.ps1 agent sync-token
+  .\quarantine-vm.ps1 agent health
 `, agenttypes.Version, evidence.AgentInstallInstructions())
 	a.logInfo(msg)
 	if health, err := a.Evidence.AgentHealth(ctx); err == nil {
@@ -893,4 +931,93 @@ func (a *App) DeleteSnapshotWails(name string, force bool) (string, error) {
 	msg := fmt.Sprintf("Deleted: %s", strings.Join(deleted, ", "))
 	a.logInfo(msg)
 	return msg, nil
+}
+
+// CaptureStatusWails returns packet-capture status for the UI.
+func (a *App) CaptureStatusWails() (map[string]any, error) {
+	if a.Capture == nil {
+		return map[string]any{"running": false, "message": "capture unavailable", "enabled": false}, nil
+	}
+	info := a.Capture.Info()
+	return map[string]any{
+		"running":   info.Running,
+		"mode":      info.Mode,
+		"pcapPath":  info.PcapPath,
+		"startedAt": info.StartedAt,
+		"message":   info.Message,
+		"stale":     info.Stale,
+		"enabled":   info.Enabled,
+	}, nil
+}
+
+// StartCaptureWails starts guest-nic packet capture.
+func (a *App) StartCaptureWails() (map[string]any, error) {
+	if a.Capture == nil {
+		return nil, fmt.Errorf("capture unavailable")
+	}
+	a.logInfo("Starting packet capture…")
+	path, err := a.Capture.Start()
+	if err != nil {
+		a.logError(err.Error())
+		return nil, err
+	}
+	a.logInfo("Packet capture started: " + path)
+	info := a.Capture.Info()
+	return map[string]any{
+		"running":   info.Running,
+		"mode":      info.Mode,
+		"pcapPath":  info.PcapPath,
+		"startedAt": info.StartedAt,
+		"message":   info.Message,
+		"enabled":   info.Enabled,
+	}, nil
+}
+
+// StopCaptureWails stops packet capture.
+func (a *App) StopCaptureWails() (map[string]any, error) {
+	if a.Capture == nil {
+		return nil, fmt.Errorf("capture unavailable")
+	}
+	a.logInfo("Stopping packet capture…")
+	if err := a.Capture.Stop(); err != nil {
+		a.logError(err.Error())
+		return nil, err
+	}
+	a.logInfo("Packet capture stopped")
+	info := a.Capture.Info()
+	return map[string]any{
+		"running":   info.Running,
+		"mode":      info.Mode,
+		"pcapPath":  info.PcapPath,
+		"startedAt": info.StartedAt,
+		"message":   info.Message,
+		"enabled":   info.Enabled,
+	}, nil
+}
+
+// GatewayStatusWails returns Linux gateway VM status for the UI sidebar.
+func (a *App) GatewayStatusWails() (map[string]any, error) {
+	mode := a.Cfg.Network.Mode
+	g := a.Cfg.Network.Gateway.WithDefaults(a.Cfg.Network.IntnetName)
+	out := map[string]any{
+		"enabled":     a.Cfg.IsGatewayMode() || g.Enabled,
+		"mode":        mode,
+		"vmName":      g.VMName,
+		"lanGateway":  g.LANGateway,
+		"guestIp":     g.GuestIP,
+		"intnetName":  g.IntnetName,
+		"status":      "unavailable",
+	}
+	if a.Gateway == nil {
+		return out, nil
+	}
+	st := a.Gateway.Status()
+	out["status"] = st
+	state, err := a.VM.VBox.VMState(g.VMName)
+	if err != nil {
+		out["vmState"] = "missing"
+	} else {
+		out["vmState"] = state
+	}
+	return out, nil
 }

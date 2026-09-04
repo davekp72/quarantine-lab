@@ -4,7 +4,7 @@
 
 .SYNOPSIS
 
-  Spin up an isolated VirtualBox Windows host for spam/virus/quarantine work.
+  Quarantine lab — single entry point for VM, network, evidence, and UI.
 
 
 
@@ -12,15 +12,15 @@
 
   .\quarantine-vm.ps1 create
 
-  .\quarantine-vm.ps1 install
-
-  .\quarantine-vm.ps1 snapshot
-
   .\quarantine-vm.ps1 start
 
-  .\quarantine-vm.ps1 network quarantine
+  .\quarantine-vm.ps1 proxy start
 
-  .\quarantine-vm.ps1 reset
+  .\quarantine-vm.ps1 ui
+
+  .\quarantine-vm.ps1 reset -Clean
+
+  .\quarantine-vm.ps1 -Rebuild ui
 
 #>
 
@@ -30,15 +30,13 @@ param(
 
     [Parameter(Position = 0)]
 
-    [ValidateSet('create', 'install', 'start', 'stop', 'snapshot', 'snapshots', 'delete-snapshot', 'baseline', 'preserve', 'reset', 'status', 'mount-iso', 'guest-additions', 'relocate', 'consolidate', 'network', 'proxy', 'capture', 'clipboard', 'inbox', 'guest', 'payload', 'sysmon', 'regshot', 'manifest', 'help')]
+    [ValidateSet('create', 'install', 'start', 'stop', 'snapshot', 'snapshots', 'delete-snapshot', 'baseline', 'preserve', 'reset', 'status', 'mount-iso', 'guest-additions', 'relocate', 'consolidate', 'network', 'proxy', 'capture', 'clipboard', 'inbox', 'guest', 'payload', 'sysmon', 'manifest', 'ui', 'agent', 'setup', 'gateway', 'help')]
 
     [string]$Action = 'help',
 
 
 
     [Parameter(Position = 1)]
-
-    [ValidateSet('start', 'stop', 'status', 'export-ca', 'quarantine', 'offline', 'nat', 'intnet', 'none', 'hostonly', 'hosttoguest', 'guesttohost', 'bidirectional', 'disabled', 'push', 'open', 'close', 'clear', 'run', 'copy', 'test', 'ps', 'hosts', 'install', 'capture', 'capture-live', 'diff', 'view', 'mark', 'list', 'enrich', 'probe', 'grant', 'deploy')]
 
     [string]$SubAction,
 
@@ -52,9 +50,15 @@ param(
 
     [Parameter()]
 
-    [ValidateSet('nat', 'intnet', 'none', 'hostonly', 'quarantine', 'offline')]
+    [ValidateSet('nat', 'intnet', 'none', 'hostonly', 'quarantine', 'offline', 'gateway')]
 
     [string]$NetworkMode = 'intnet',
+
+
+
+    [Parameter()]
+
+    [switch]$Rebuild,
 
 
 
@@ -196,7 +200,223 @@ Set-StrictMode -Version Latest
 
 $ErrorActionPreference = 'Stop'
 
+$script:QuarantineRoot = $PSScriptRoot
 
+# --- Go binary build / launch (preferred path for day-to-day commands) ---
+
+$script:WailsExe = Join-Path $script:QuarantineRoot 'go\cmd\quarantine\build\bin\quarantine.exe'
+$script:CliExe = Join-Path $script:QuarantineRoot 'go\quarantine.exe'
+$script:AgentExe = Join-Path $script:QuarantineRoot 'go\quarantine-agent.exe'
+$script:WailsDir = Join-Path $script:QuarantineRoot 'go\cmd\quarantine'
+$script:GoRoot = Join-Path $script:QuarantineRoot 'go'
+$script:SourceExtensions = @('.go', '.html', '.js', '.css', '.json', '.mod', '.sum')
+
+function Test-QuarantineSourcePathExcluded {
+    param([string]$FullName)
+    $n = $FullName -replace '/', '\'
+    return ($n -match '\\build\\|\\node_modules\\|\\wailsjs\\|\\\.git\\')
+}
+
+function Get-QuarantineLatestSourceWriteTime {
+    param([string[]]$Roots)
+    $latest = [datetime]::MinValue
+    foreach ($rootPath in $Roots) {
+        if (-not (Test-Path -LiteralPath $rootPath)) { continue }
+        Get-ChildItem -LiteralPath $rootPath -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object {
+                $script:SourceExtensions -contains $_.Extension -and
+                -not (Test-QuarantineSourcePathExcluded $_.FullName)
+            } |
+            ForEach-Object {
+                if ($_.LastWriteTime -gt $latest) { $latest = $_.LastWriteTime }
+            }
+    }
+    return $latest
+}
+
+function Test-QuarantineBinaryStale {
+    param([string]$ExePath, [string[]]$SourceRoots)
+    if (-not (Test-Path -LiteralPath $ExePath)) { return $true }
+    $srcTime = Get-QuarantineLatestSourceWriteTime -Roots $SourceRoots
+    if ($srcTime -eq [datetime]::MinValue) { return $false }
+    return $srcTime -gt (Get-Item -LiteralPath $ExePath).LastWriteTime
+}
+
+function Invoke-QuarantineNativeCommand {
+    param([Parameter(Mandatory)][string[]]$Command)
+    & $Command[0] @($Command[1..($Command.Count - 1)]) 2>&1 | ForEach-Object { Write-Host $_ }
+    if ($LASTEXITCODE -ne 0) {
+        throw "Command failed ($LASTEXITCODE): $($Command -join ' ')"
+    }
+}
+
+function Ensure-QuarantineCliBinary {
+    param([switch]$Force)
+    $sources = @($script:GoRoot)
+    $needCli = $Force -or (Test-QuarantineBinaryStale -ExePath $script:CliExe -SourceRoots $sources)
+    $needAgent = $Force -or (Test-QuarantineBinaryStale -ExePath $script:AgentExe -SourceRoots $sources)
+    if (-not $needCli -and -not $needAgent) { return }
+    Push-Location $script:GoRoot
+    try {
+        if ($needCli) {
+            Write-Host 'Building quarantine.exe (CLI)...'
+            Invoke-QuarantineNativeCommand @('go', 'build', '-o', 'quarantine.exe', './cmd/quarantine')
+        }
+        if ($needAgent) {
+            Write-Host 'Building quarantine-agent.exe...'
+            Invoke-QuarantineNativeCommand @('go', 'build', '-o', 'quarantine-agent.exe', './cmd/quarantine-agent')
+        }
+    } finally {
+        Pop-Location
+    }
+}
+
+function Ensure-QuarantineWailsBinary {
+    param([switch]$Force)
+    $sources = @(
+        (Join-Path $script:GoRoot 'cmd\quarantine')
+        (Join-Path $script:GoRoot 'internal')
+    )
+    if ($Force -or (Test-QuarantineBinaryStale -ExePath $script:WailsExe -SourceRoots $sources)) {
+        if (-not $Force -and (Test-Path -LiteralPath $script:WailsExe)) {
+            Write-Host 'Wails UI is stale — rebuilding...'
+        }
+        Write-Host 'Building Wails UI...'
+        Push-Location $script:WailsDir
+        try {
+            Invoke-QuarantineNativeCommand @('wails', 'build')
+        } finally {
+            Pop-Location
+        }
+        if (-not (Test-Path -LiteralPath $script:WailsExe)) {
+            throw 'Wails build did not produce build\bin\quarantine.exe'
+        }
+    }
+    return ,$script:WailsExe
+}
+
+function Test-QuarantineUseWails {
+    param([string]$ActionName, [string]$Sub)
+    if ($ActionName -eq 'ui') { return $true }
+    if ($ActionName -eq 'manifest' -and $Sub -eq 'view') { return $true }
+    return $false
+}
+
+function Test-QuarantinePreferGo {
+    param([string]$ActionName, [string]$Sub)
+    # PowerShell-only (or incomplete in Go) — keep legacy path.
+    $psOnly = @{
+        'create'           = $true
+        'install'          = $true
+        'mount-iso'        = $true
+        'guest-additions'  = $true
+        'relocate'         = $true
+        'consolidate'      = $true
+        'payload'          = $true
+        'help'             = $true
+    }
+    if ($psOnly.ContainsKey($ActionName)) { return $false }
+    if ($ActionName -eq 'capture' -and $Sub -eq 'status') { return $false }
+    if ($ActionName -eq 'inbox' -and $Sub -in @('push', 'clear', 'status')) { return $false }
+    if ($ActionName -eq 'guest' -and $Sub -in @('test', 'ps', 'hosts')) { return $false }
+    if ($ActionName -eq 'sysmon' -and $Sub -in @('copy', 'install', 'grant')) { return $false }
+    if ($ActionName -eq 'manifest' -and $Sub -in @('mark', 'list', 'enrich', 'probe', 'capture', 'capture-live')) { return $false }
+    if ($env:QUARANTINE_FORCE_PS -eq '1') { return $false }
+    $goActions = @(
+        'ui', 'status', 'start', 'stop', 'snapshot', 'snapshots', 'preserve', 'reset',
+        'baseline', 'delete-snapshot', 'manifest', 'network', 'proxy', 'capture',
+        'inbox', 'clipboard', 'guest', 'agent', 'setup', 'sysmon', 'gateway'
+    )
+    return ($goActions -contains $ActionName)
+}
+
+function Get-QuarantineGoArgList {
+    param(
+        [string]$ActionName,
+        [string]$Sub,
+        [string[]]$Rest
+    )
+    $goArgs = New-Object System.Collections.Generic.List[string]
+    [void]$goArgs.Add($ActionName)
+    if (-not [string]::IsNullOrWhiteSpace($Sub)) {
+        # Pass through Go-style flags already in SubAction (--clean) or subcommands (start).
+        [void]$goArgs.Add($Sub)
+    }
+    foreach ($r in @($Rest)) {
+        if (-not [string]::IsNullOrWhiteSpace($r)) { [void]$goArgs.Add($r) }
+    }
+
+    # Map common PowerShell switches → Go flags when not already present.
+    $joined = ($goArgs -join ' ')
+    switch ($ActionName) {
+        'reset' {
+            if ($Clean -and $joined -notmatch '(^|\s)--clean(\s|$)') { [void]$goArgs.Add('--clean') }
+            if ($SnapshotName -and $joined -notmatch '(^|\s)--snapshot(\s|$)') {
+                [void]$goArgs.Add('--snapshot'); [void]$goArgs.Add($SnapshotName)
+            }
+        }
+        'snapshot' {
+            if ($SnapshotName -and $joined -notmatch '(^|\s)--name(\s|$)') {
+                [void]$goArgs.Add('--name'); [void]$goArgs.Add($SnapshotName)
+            }
+            if ($SnapshotDescription -and $joined -notmatch '(^|\s)--description(\s|$)') {
+                [void]$goArgs.Add('--description'); [void]$goArgs.Add($SnapshotDescription)
+            }
+            if ($Force -and $joined -notmatch '(^|\s)--force(\s|$)') { [void]$goArgs.Add('--force') }
+            if ($Offline -and $joined -notmatch '(^|\s)--offline(\s|$)') { [void]$goArgs.Add('--offline') }
+        }
+        'preserve' {
+            if ($SnapshotName -and $joined -notmatch '(^|\s)--label(\s|$)') {
+                [void]$goArgs.Add('--label'); [void]$goArgs.Add($SnapshotName)
+            }
+        }
+        'delete-snapshot' {
+            if ($SnapshotName -and $joined -notmatch '(^|\s)--name(\s|$)') {
+                [void]$goArgs.Add('--name'); [void]$goArgs.Add($SnapshotName)
+            }
+            if ($Force -and $joined -notmatch '(^|\s)--force(\s|$)') { [void]$goArgs.Add('--force') }
+        }
+        'manifest' {
+            if ($FromSnapshot -and $joined -notmatch '(^|\s)--from(\s|$)') {
+                [void]$goArgs.Add('--from'); [void]$goArgs.Add($FromSnapshot)
+            }
+            if ($ToSnapshot -and $joined -notmatch '(^|\s)--to(\s|$)') {
+                [void]$goArgs.Add('--to'); [void]$goArgs.Add($ToSnapshot)
+            }
+            if ($Refresh -and $joined -notmatch '(^|\s)--refresh(\s|$)') { [void]$goArgs.Add('--refresh') }
+        }
+        'stop' {
+            if ($Force -and $joined -notmatch '(^|\s)--force(\s|$)') { [void]$goArgs.Add('--force') }
+        }
+    }
+    return ,$goArgs.ToArray()
+}
+
+function Invoke-QuarantineGo {
+    param([string[]]$GoArgs, [switch]$WantWails, [switch]$ForceRebuild)
+    if ($WantWails) {
+        $exe = Ensure-QuarantineWailsBinary -Force:$ForceRebuild
+    } else {
+        Ensure-QuarantineCliBinary -Force:$ForceRebuild
+        $exe = $script:CliExe
+    }
+    & (Get-Item -LiteralPath $exe).FullName --config $ConfigPath @GoArgs
+    exit $LASTEXITCODE
+}
+
+if (Test-QuarantinePreferGo -ActionName $Action -Sub $SubAction) {
+    $goArgs = Get-QuarantineGoArgList -ActionName $Action -Sub $SubAction -Rest $SourcePath
+    $wantWails = Test-QuarantineUseWails -ActionName $Action -Sub $SubAction
+    Invoke-QuarantineGo -GoArgs $goArgs -WantWails:$wantWails -ForceRebuild:$Rebuild
+}
+
+# Rebuild with no action → just build binaries
+if ($Rebuild -and $Action -eq 'help') {
+    Ensure-QuarantineCliBinary -Force
+    Ensure-QuarantineWailsBinary -Force | Out-Null
+    Write-Host 'Rebuild complete.'
+    exit 0
+}
 
 Import-Module (Join-Path $PSScriptRoot 'QuarantineVM.psm1') -Force
 
@@ -357,10 +577,6 @@ switch ($Action) {
                 Invoke-QuarantineManifestBaselineMark -ConfigPath $ConfigPath -SnapshotName $markSnapName -SkipGuestReadyWait
             } catch {
                 Write-Warning "Baseline mark failed: $($_.Exception.Message)"
-                if ((Get-QuarantineRegistryEngine -ConfigPath $ConfigPath) -eq 'regshot') {
-                    Write-Host 'Regshot needs Regshot_cmd-x64-ANSI.exe (not the GUI exe). See tools/regshot/README.md'
-                    Write-Host '  .\quarantine-vm.ps1 regshot copy'
-                }
             }
         } elseif (-not $SkipMark) {
             Write-Host @"
@@ -630,28 +846,6 @@ After copy/install, apply config once in elevated guest PowerShell (see install 
 
     }
 
-    'regshot' {
-
-        switch ($SubAction) {
-
-            'copy' {
-                & (Join-Path $PSScriptRoot 'guest\Deploy-QuarantineRegshot.ps1') -ConfigPath $ConfigPath
-            }
-
-            default {
-                throw @'
-Usage:
-  .\quarantine-vm.ps1 regshot copy   Copy RegShot CMD + config to guest
-
-Place Regshot_cmd-x64-ANSI.exe in tools\regshot\ (see tools/regshot/README.md).
-Optional GUI: Regshot-x64-Unicode.exe from https://github.com/Seabreg/Regshot
-'@
-            }
-
-        }
-
-    }
-
     'manifest' {
 
         switch ($SubAction) {
@@ -807,6 +1001,10 @@ Quarantine VM utility (VirtualBox)
 
   status     Show VM state
 
+  ui         Open the Wails desktop UI (Go)
+
+  agent      install|sync-token|health|set-token (Go)
+
 
 
 Guest Additions (host-to-guest paste):
@@ -817,7 +1015,9 @@ Guest Additions (host-to-guest paste):
 
 Network (internet-only quarantine vs offline):
 
-  network quarantine   NAT + mitmproxy logging (internet, no LAN)
+  network gateway      Linux gateway VM (routing + capture + transparent TLS MITM)
+
+  network quarantine   NAT + host mitmproxy logging (legacy)
 
   network offline      Internal network only (alias for intnet)
 
@@ -825,11 +1025,17 @@ Network (internet-only quarantine vs offline):
 
 
 
-Proxy / capture (host-side):
+Gateway appliance:
+
+  gateway create|start|stop|status|provision|export-ca|sync-logs
+
+
+
+Proxy / capture:
 
   proxy start|stop|status|export-ca
 
-  capture start|stop
+  capture start|stop|status
 
 
 

@@ -1668,8 +1668,19 @@ To repair host-only later: reinstall VirtualBox and run as Administrator:
         'quarantine' {
             $nicType = 'nat'
         }
+        'gateway' {
+            $nicType = 'intnet'
+            $gwIntnet = if ($Network.gateway -and $Network.gateway.intnetName) {
+                $Network.gateway.intnetName
+            } elseif ($Network.intnetName) {
+                $Network.intnetName
+            } else {
+                'quarantine-net'
+            }
+            $nicExtra = @('--intnet1', $gwIntnet)
+        }
         default {
-            throw "Unsupported network.mode '$mode'. Use hostonly, intnet, none, nat, or quarantine."
+            throw "Unsupported network.mode '$mode'. Use hostonly, intnet, none, nat, quarantine, or gateway."
         }
     }
 
@@ -1681,7 +1692,7 @@ function Set-QuarantineVMNetworkMode {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
-        [ValidateSet('nat', 'intnet', 'none', 'hostonly', 'quarantine', 'offline')]
+        [ValidateSet('nat', 'intnet', 'none', 'hostonly', 'quarantine', 'offline', 'gateway')]
         [string]$Mode,
 
         [Parameter()]
@@ -1709,6 +1720,17 @@ function Set-QuarantineVMNetworkMode {
         return
     }
 
+    if ($Mode -eq 'gateway') {
+        $networkModule = Join-Path $PSScriptRoot 'QuarantineNetwork.psm1'
+        if (-not (Test-Path -LiteralPath $networkModule)) {
+            throw "QuarantineNetwork.psm1 not found at $networkModule"
+        }
+        Import-Module $networkModule -Force
+        Enable-QuarantineGatewayNetwork -ConfigPath $ConfigPath -SkipCapture:$SkipCapture
+        Update-QuarantineVMNetworkConfig -ConfigPath $ConfigPath -Mode 'gateway'
+        return
+    }
+
     $script:Config = Get-QuarantineVMConfig -ConfigPath $ConfigPath
     $vmName = $script:Config.vmName
 
@@ -1722,6 +1744,7 @@ function Set-QuarantineVMNetworkMode {
         mode              = $Mode
         hostOnlyAdapter   = $script:Config.network.hostOnlyAdapter
         intnetName        = $script:Config.network.intnetName
+        gateway           = $script:Config.network.gateway
     }
 
     Set-QuarantineVMNetwork -VmName $vmName -Network $network

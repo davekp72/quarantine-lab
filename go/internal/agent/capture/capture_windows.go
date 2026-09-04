@@ -99,50 +99,22 @@ func Run(req types.CaptureRequest, cfg types.AgentConfig) (*types.CaptureRespons
 		}
 	}
 
-	// Full hive dumps first — Compare source of truth. Skip curated walks when dumps work
-	// so the HTTP JSON stays small (avoids host "unexpected end of JSON" truncations).
-	if dump, err := collectors.SaveRegistryHives(req.Snapshot, payloadUser); err != nil {
-		resp.Warnings = append(resp.Warnings, "hive dump: "+err.Error())
-	} else if dump != nil && len(dump.Files) > 0 {
-		resp.Hives = dump
-		resp.Warnings = append(resp.Warnings, dump.Warnings...)
-		if sid, user, idErr := collectors.PayloadIdentity(payloadUser); idErr != nil {
-			resp.Warnings = append(resp.Warnings, "payload identity: "+idErr.Error())
-			resp.Registry.Warnings = append(resp.Registry.Warnings, idErr.Error())
-		} else {
-			resp.Registry.SID = sid
-			resp.Registry.UserName = user
-		}
-		resp.Warnings = append(resp.Warnings, "registry walks omitted (hive dump present)")
-		return resp, nil
-	}
-
-	hklm, err := collectors.ExportHKLM()
+	// Hive dumps only — Compare source of truth (no curated registry walks / reg.exe export).
+	dump, err := collectors.SaveRegistryHives(req.Snapshot, payloadUser)
 	if err != nil {
-		resp.Warnings = append(resp.Warnings, "hklm: "+err.Error())
-	} else {
-		resp.Registry.HKLM = hklm
-		resp.Stats.HKLMEntries = len(hklm)
+		return nil, fmt.Errorf("hive dump: %w", err)
 	}
-
-	hkcu, sid, user, err := collectors.ExportHKCU(payloadUser)
-	if err != nil {
-		resp.Warnings = append(resp.Warnings, "hkcu: "+err.Error())
-		resp.Registry.Warnings = append(resp.Registry.Warnings, err.Error())
+	if dump == nil || len(dump.Files) == 0 {
+		return nil, fmt.Errorf("hive dump produced no files")
+	}
+	resp.Hives = dump
+	resp.Warnings = append(resp.Warnings, dump.Warnings...)
+	if sid, user, idErr := collectors.PayloadIdentity(payloadUser); idErr != nil {
+		resp.Warnings = append(resp.Warnings, "payload identity: "+idErr.Error())
+		resp.Registry.Warnings = append(resp.Registry.Warnings, idErr.Error())
 	} else {
-		resp.Registry.HKCU = hkcu
 		resp.Registry.SID = sid
 		resp.Registry.UserName = user
-		resp.Stats.HKCUEntries = len(hkcu)
 	}
-
-	hku, err := collectors.ExportHKUShared()
-	if err != nil {
-		resp.Warnings = append(resp.Warnings, "hku: "+err.Error())
-	} else {
-		resp.Registry.HKU = hku
-		resp.Stats.HKUEntries = len(hku)
-	}
-
 	return resp, nil
 }

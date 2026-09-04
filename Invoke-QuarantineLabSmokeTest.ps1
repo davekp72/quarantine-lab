@@ -5,7 +5,7 @@
 
 .DESCRIPTION
   User (jkcooper) changes run via guestcontrol immediately.
-  Admin HKLM/system changes need the SYSTEM task QuarantineLabPrivilegedExport — registered once
+  Elevated Sysmon/USN/event exports need the SYSTEM task QuarantineLabPrivilegedExport — registered once
   from elevated PowerShell inside the guest (cannot be done from the host).
 
   First-time admin setup (once per VM / after Clean restore):

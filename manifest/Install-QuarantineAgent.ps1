@@ -200,4 +200,4 @@ Write-Host "  Service : $ServiceName (Running)"
 Write-Host "  Binary  : $agentExe"
 Write-Host "  Token   : $tokenPath"
 Write-Host ''
-Write-Host 'On the host run:  .\quarantine-go.ps1 agent sync-token' -ForegroundColor Yellow
+Write-Host 'On the host run:  .\quarantine-vm.ps1 agent sync-token' -ForegroundColor Yellow

@@ -11,8 +11,8 @@ param(
     [string]$SnapshotLabel = '',
     [ValidateSet('events', 'full')]
     [string]$ScanMode = 'events',
-    [ValidateSet('regshot', 'legacy')]
-    [string]$RegistryEngine = 'regshot',
+    [ValidateSet('hive')]
+    [string]$RegistryEngine = 'hive',
     [int]$HashMaxMb = 50,
     [int]$ContentMaxKb = 51200
 )
@@ -631,51 +631,10 @@ function Export-AllUserRegistry {
     return @($warnings)
 }
 
-$regTrees = @(
-    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion',
-    'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion',
-    'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion',
-    'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager',
-    'HKLM:\SOFTWARE\Oracle\VirtualBox Guest Additions'
-)
 $userRegistryWarnings = @()
 $userRegistryCount = 0
-if ($RegistryEngine -eq 'legacy') {
-    foreach ($tree in $regTrees) { Export-RegTree -Path $tree }
-    if ($ScanMode -eq 'full') {
-        $userRegistryWarnings = Export-AllUserRegistry
-    } else {
-        $userRegistryWarnings = Export-EventsModeUserRegistry -MaxDepth 8
-    }
-    $userRegistryCount = 0
-    foreach ($entry in $registry) {
-        if ($entry.k -match '^HKU:\\') { $userRegistryCount++ }
-    }
-
-    try {
-        Get-ChildItem -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Services' -ErrorAction SilentlyContinue |
-            Select-Object -First 400 | ForEach-Object {
-                $p = $_.PSPath
-                try {
-                    $ip = (Get-ItemProperty -LiteralPath $p -ErrorAction Stop).ImagePath
-                    if ($ip) {
-                        $regKey = Normalize-RegKeyPath -Path ($p -replace '^Microsoft\.PowerShell\.Core\\Registry::', '')
-                        $registry.Add([pscustomobject][ordered]@{
-                            k = $regKey
-                            n = 'ImagePath'
-                            t = 'REG_SZ'
-                            v = [string]$ip
-                            h = (Get-StringHash ([string]$ip))
-                        }) | Out-Null
-                    }
-                } catch { }
-            }
-    } catch { }
-} elseif ($RegistryEngine -eq 'regshot') {
-    [void]$userRegistryWarnings.Add('registryEngine=regshot: HKLM/HKU captured via Regshot compare at manifest diff time.')
-} else {
-    [void]$userRegistryWarnings.Add('registryEngine=cli: payload HKU captured live via reg.exe at snapshot/preserve; HKLM captured via SYSTEM reg.exe export at snapshot/preserve.')
-}
+# Hive engine: guest manifest leaves registry empty; host hive index (agent reg save dumps) is source of truth.
+[void]$userRegistryWarnings.Add('registryEngine=hive: guest registry empty; host indexes agent hive dumps (not reg.exe).')
 
 try {
     schtasks.exe /query /fo CSV /v 2>$null | Select-Object -Skip 1 | ForEach-Object {
@@ -721,7 +680,7 @@ $manifest = [ordered]@{
     version      = 2
     guestScriptVersion = 5
     scanMode     = $ScanMode
-    registryEngine = $RegistryEngine
+    registryEngine = 'hive'
     capturedAt   = (Get-Date).ToUniversalTime().ToString('o')
     computerName = $env:COMPUTERNAME
     snapshot     = $SnapshotLabel

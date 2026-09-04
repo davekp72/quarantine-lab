@@ -3,19 +3,18 @@ package registry
 import (
 	"bufio"
 	"compress/gzip"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
 const (
-	maxInlineValueBytes = 4 * 1024
-	IndexSuffix         = "-registry-index.jsonl.gz"
-	IndexMetaSuffix     = "-registry-meta.json"
+	IndexSuffix      = "-registry-index.jsonl.gz"
+	IndexMetaSuffix  = "-registry-meta.json"
+	IndexFormatSlim  = "slim-fnv64-json"
 )
 
 // IndexRecord is one registry value in the sorted hive index.
@@ -33,15 +32,15 @@ func (r IndexRecord) SortKey() string {
 	return strings.ToLower(r.K) + "|" + strings.ToLower(r.N)
 }
 
-// ContentHash hashes type + serialized value for equality checks.
+// ContentHash hashes type + serialized value for equality checks (tests / legacy).
 func ContentHash(typ string, value any) string {
-	sum := sha256.Sum256([]byte(typ + "\x00" + fmt.Sprint(value)))
-	return hex.EncodeToString(sum[:])
+	return contentHashRaw(0, []byte(typ+"\x00"+fmt.Sprint(value)))
 }
 
 // IndexMeta describes a built hive index sidecar.
 type IndexMeta struct {
 	Engine     string            `json:"engine"`
+	Format     string            `json:"format,omitempty"`
 	Snapshot   string            `json:"snapshot"`
 	BuiltAt    string            `json:"builtAt"`
 	EntryCount int               `json:"entryCount"`
@@ -60,10 +59,11 @@ type HiveMeta struct {
 	Error     string `json:"error,omitempty"`
 }
 
-// WriteIndexSorted writes records sorted by SortKey as gzip JSONL.
-// records must already be sorted (caller sorts); this re-checks via sort for safety.
+// WriteIndexSorted writes records as gzip JSONL (sorted by SortKey if needed).
 func WriteIndexSorted(path string, records []IndexRecord) error {
-	sortRecords(records)
+	if !recordsSorted(records) {
+		sortRecords(records)
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -72,10 +72,14 @@ func WriteIndexSorted(path string, records []IndexRecord) error {
 		return err
 	}
 	defer f.Close()
-	gz := gzip.NewWriter(f)
-	enc := json.NewEncoder(gz)
+	gz, err := gzip.NewWriterLevel(f, gzip.BestSpeed)
+	if err != nil {
+		return err
+	}
+	buf := make([]byte, 0, 512)
 	for _, rec := range records {
-		if err := enc.Encode(rec); err != nil {
+		buf = appendIndexLine(buf[:0], rec)
+		if _, err := gz.Write(buf); err != nil {
 			_ = gz.Close()
 			return err
 		}
@@ -84,6 +88,48 @@ func WriteIndexSorted(path string, records []IndexRecord) error {
 		return err
 	}
 	return f.Close()
+}
+
+func recordsSorted(records []IndexRecord) bool {
+	for i := 1; i < len(records); i++ {
+		if records[i].SortKey() < records[i-1].SortKey() {
+			return false
+		}
+	}
+	return true
+}
+
+func appendIndexLine(buf []byte, rec IndexRecord) []byte {
+	buf = append(buf, `{"k":`...)
+	buf = appendJSONString(buf, rec.K)
+	buf = append(buf, `,"n":`...)
+	buf = appendJSONString(buf, rec.N)
+	buf = append(buf, `,"t":`...)
+	buf = appendJSONString(buf, rec.T)
+	buf = append(buf, `,"h":`...)
+	buf = appendJSONString(buf, rec.H)
+	if rec.Size > 0 {
+		buf = append(buf, `,"s":`...)
+		buf = strconv.AppendInt(buf, int64(rec.Size), 10)
+	}
+	if rec.V != nil {
+		buf = append(buf, `,"v":`...)
+		raw, err := json.Marshal(rec.V)
+		if err == nil {
+			buf = append(buf, raw...)
+		} else {
+			buf = append(buf, `null`...)
+		}
+	}
+	return append(buf, "}\n"...)
+}
+
+func appendJSONString(buf []byte, s string) []byte {
+	raw, err := json.Marshal(s)
+	if err != nil {
+		return append(buf, `""`...)
+	}
+	return append(buf, raw...)
 }
 
 // WriteIndexMeta writes registry index metadata JSON.
@@ -182,6 +228,8 @@ func (r *IndexReader) Next() bool {
 
 func (r *IndexReader) Record() IndexRecord { return r.rec }
 func (r *IndexReader) Err() error          { return r.err }
+
+const maxInlineValueBytes = 4 * 1024
 
 // ValueForStorage returns inline value or nil when only hash should be kept.
 func ValueForStorage(typ string, raw any, data []byte) (v any, size int, keep bool) {

@@ -30,7 +30,6 @@ type Config struct {
 	CleanSnapshot    string         `json:"cleanSnapshotName"`
 	Firmware         string         `json:"firmware"`
 	Manifest         ManifestConfig `json:"manifest"`
-	Regshot          RegshotConfig  `json:"regshot"`
 	Agent            AgentConfig    `json:"agent"`
 }
 
@@ -46,13 +45,75 @@ type AgentConfig struct {
 }
 
 type NetworkConfig struct {
-	Mode            string         `json:"mode"`
-	HostOnlyAdapter string         `json:"hostOnlyAdapter"`
-	IntnetName      string         `json:"intnetName"`
-	GuestGateway    string         `json:"guestGateway"`
-	GuestDNS        string         `json:"guestDns"`
-	Proxy           ProxyConfig    `json:"proxy"`
-	Capture         CaptureConfig  `json:"capture"`
+	Mode            string        `json:"mode"`
+	HostOnlyAdapter string        `json:"hostOnlyAdapter"`
+	IntnetName      string        `json:"intnetName"`
+	GuestGateway    string        `json:"guestGateway"`
+	GuestDNS        string        `json:"guestDns"`
+	Proxy           ProxyConfig   `json:"proxy"`
+	Capture         CaptureConfig `json:"capture"`
+	Gateway         GatewayConfig `json:"gateway"`
+}
+
+// GatewayConfig describes the Linux quarantine gateway VM.
+type GatewayConfig struct {
+	Enabled     bool   `json:"enabled"`
+	VMName      string `json:"vmName"`
+	LANCidr     string `json:"lanCidr"`
+	LANGateway  string `json:"lanGateway"`
+	GuestIP     string `json:"guestIp"`
+	IntnetName  string `json:"intnetName"`
+	Uplink      string `json:"uplink"`
+	Username    string `json:"username"`
+	Password    string `json:"password"`
+	SSHHostPort int    `json:"sshHostPort"`
+	MemoryMB    int    `json:"memoryMb"`
+	CPUCount    int    `json:"cpuCount"`
+	DiskSizeGB  int    `json:"diskSizeGb"`
+}
+
+// WithDefaults fills gateway fields from intnet name when empty.
+func (g GatewayConfig) WithDefaults(intnetFallback string) GatewayConfig {
+	if g.VMName == "" {
+		g.VMName = "Quarantine-Gateway"
+	}
+	if g.LANCidr == "" {
+		g.LANCidr = "10.66.0.0/24"
+	}
+	if g.LANGateway == "" {
+		g.LANGateway = "10.66.0.1"
+	}
+	if g.GuestIP == "" {
+		g.GuestIP = "10.66.0.15"
+	}
+	if g.IntnetName == "" {
+		g.IntnetName = intnetFallback
+	}
+	if g.IntnetName == "" {
+		g.IntnetName = "quarantine-net"
+	}
+	if g.Uplink == "" {
+		g.Uplink = "nat"
+	}
+	if g.Username == "" {
+		g.Username = "quarantine"
+	}
+	if g.Password == "" {
+		g.Password = "quarantine"
+	}
+	if g.SSHHostPort <= 0 {
+		g.SSHHostPort = 2222
+	}
+	if g.MemoryMB <= 0 {
+		g.MemoryMB = 1024
+	}
+	if g.CPUCount <= 0 {
+		g.CPUCount = 1
+	}
+	if g.DiskSizeGB <= 0 {
+		g.DiskSizeGB = 16
+	}
+	return g
 }
 
 type ProxyConfig struct {
@@ -117,11 +178,6 @@ type ManifestConfig struct {
 	ContentMaxKB            int    `json:"contentMaxKb"`
 }
 
-type RegshotConfig struct {
-	GuestDir     string `json:"guestDir"`
-	HostToolsDir string `json:"hostToolsDir"`
-}
-
 // Load reads and validates quarantine-vm.json.
 func Load(path string) (*Config, error) {
 	raw, err := os.ReadFile(path)
@@ -148,7 +204,10 @@ func Load(path string) (*Config, error) {
 	if cfg.Manifest.ScanMode == "" {
 		cfg.Manifest.ScanMode = "events"
 	}
-	if cfg.Manifest.RegistryEngine == "" {
+	if cfg.Manifest.RegistryEngine == "" || strings.EqualFold(cfg.Manifest.RegistryEngine, "cli") ||
+		strings.EqualFold(cfg.Manifest.RegistryEngine, "payload") ||
+		strings.EqualFold(cfg.Manifest.RegistryEngine, "legacy") ||
+		strings.EqualFold(cfg.Manifest.RegistryEngine, "powershell") {
 		cfg.Manifest.RegistryEngine = "hive"
 	}
 	if cfg.Guest.CopyTargetDir == "" {
@@ -246,6 +305,11 @@ func ProjectRoot(configPath string) string {
 // DataDir returns vmDataDir.
 func (c *Config) DataDir() string {
 	return c.VMDataDir
+}
+
+// IsGatewayMode reports whether network.mode is the Linux gateway path.
+func (c *Config) IsGatewayMode() bool {
+	return strings.EqualFold(strings.TrimSpace(c.Network.Mode), "gateway")
 }
 
 // VMFolder returns {vmDataDir}/{vmName}.

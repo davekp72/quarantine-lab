@@ -154,22 +154,88 @@ function Get-QuarantinePcapDnsQueries {
 
     if (-not (Test-Path -LiteralPath $PcapPath)) { return @() }
 
-    $fromEpoch = $From.ToUnixTimeSeconds()
-    $toEpoch = $To.ToUnixTimeSeconds()
-    $filter = ('frame.time_epoch >= {0} and frame.time_epoch <= {1} and dns.flags.response == 0' -f $fromEpoch, $toEpoch)
+    $item = Get-Item -LiteralPath $PcapPath
+    $fileFrom = [datetimeoffset]$item.CreationTimeUtc
+    $fileTo = [datetimeoffset]$item.LastWriteTimeUtc
+    if ($fileTo -lt $fileFrom) { $fileTo = $fileFrom }
+    # Fast reject: file entirely outside evidence window (with slack for clock skew).
+    if ($fileTo -lt $From.AddMinutes(-5) -or $fileFrom -gt $To.AddMinutes(5)) {
+        return @()
+    }
 
-    $argList = @(
-        '-r', $PcapPath,
-        '-Y', $filter,
-        '-T', 'fields',
-        '-E', 'separator=	',
-        '-e', 'frame.time_epoch',
-        '-e', 'dns.qname',
-        '-e', 'dns.qtype'
+    $probe = @(& $TsharkPath -r $PcapPath -c 5 -T fields -e frame.time_epoch 2>$null)
+    $relative = $false
+    foreach ($p in $probe) {
+        $v = 0.0
+        if ([double]::TryParse([string]$p, [ref]$v) -and $v -gt 0 -and $v -lt 1000000000) {
+            $relative = $true
+            break
+        }
+    }
+
+    $nameFields = @(
+        @('dns.qry.name', 'dns.qry.type'),
+        @('dns.qname', 'dns.qtype')
     )
+    $output = $null
+    foreach ($fields in $nameFields) {
+        if ($relative) {
+            # VirtualBox NIC traces often use relative epochs (1970-based), not wall clock.
+            $filter = 'dns.flags.response == 0'
+        } else {
+            $fromEpoch = $From.ToUnixTimeSeconds()
+            $toEpoch = $To.ToUnixTimeSeconds()
+            $filter = ('frame.time_epoch >= {0} and frame.time_epoch <= {1} and dns.flags.response == 0' -f $fromEpoch, $toEpoch)
+        }
+        $argList = @(
+            '-r', $PcapPath,
+            '-Y', $filter,
+            '-T', 'fields',
+            '-E', 'separator=	',
+            '-e', 'frame.time_epoch',
+            '-e', $fields[0],
+            '-e', $fields[1]
+        )
+        $output = & $TsharkPath @argList 2>$null
+        if ($output -match '\S') { break }
+    }
+    if (-not ($output -match '\S')) { return @() }
 
-    $output = & $TsharkPath @argList 2>$null
-    if ($LASTEXITCODE -ne 0 -and -not $output) { return @() }
+    $maxRel = 0.0
+    $minRel = [double]::MaxValue
+    if ($relative) {
+        foreach ($line in @($output)) {
+            $epochText = (($line -split "`t", 2)[0])
+            $epoch = 0.0
+            if ([double]::TryParse($epochText, [ref]$epoch)) {
+                if ($epoch -gt $maxRel) { $maxRel = $epoch }
+                if ($epoch -lt $minRel) { $minRel = $epoch }
+            }
+        }
+        if ($minRel -eq [double]::MaxValue) { $minRel = 0.0 }
+
+        # Prefer full-capture duration (VBox relative clock often spans more than wall-clock file age).
+        $capinfos = Join-Path (Split-Path -Parent $TsharkPath) 'capinfos.exe'
+        if (Test-Path -LiteralPath $capinfos) {
+            $ciOut = & $capinfos -u $PcapPath 2>$null | Out-String
+            if ($ciOut -match '(?i)Capture duration:\s*([\d.]+)\s*seconds') {
+                $dur = 0.0
+                if ([double]::TryParse($Matches[1], [ref]$dur) -and $dur -gt $maxRel) {
+                    $maxRel = $dur
+                    $minRel = 0.0
+                }
+            }
+        }
+    }
+
+    $wallSecs = [math]::Max(($fileTo - $fileFrom).TotalSeconds, 0.001)
+    $relSpan = [math]::Max($maxRel - $minRel, 0.001)
+    # When relative duration disagrees with file age, end-anchoring skews late packets past the window.
+    $useLinearScale = $relative -and ($relSpan -gt ($wallSecs * 1.25))
+
+    # Small slack so packets at the capture/preserve boundary are not dropped.
+    $fromBound = $From.AddSeconds(-2)
+    $toBound = $To.AddSeconds(2)
 
     $results = @()
     foreach ($line in @($output)) {
@@ -184,13 +250,23 @@ function Get-QuarantinePcapDnsQueries {
 
         $epoch = 0.0
         if (-not [double]::TryParse($epochText, [ref]$epoch)) { continue }
-        $ts = [datetimeoffset]::FromUnixTimeSeconds([long][math]::Floor($epoch))
-        if ($ts -lt $From -or $ts -gt $To) { continue }
+
+        if ($relative) {
+            if ($useLinearScale) {
+                $ts = $fileFrom.AddSeconds((($epoch - $minRel) / $relSpan) * $wallSecs)
+            } else {
+                # Relative clock roughly matches wall duration — anchor to last write.
+                $ts = $fileTo.AddSeconds($epoch - $maxRel)
+            }
+        } else {
+            $ts = [datetimeoffset]::FromUnixTimeSeconds([long][math]::Floor($epoch))
+        }
+        if ($ts -lt $fromBound -or $ts -gt $toBound) { continue }
 
         $results += [pscustomobject]@{
-            t     = $ts.ToUniversalTime().ToString('o')
-            query = $query
-            type  = $qtype
+            t      = $ts.ToUniversalTime().ToString('o')
+            query  = $query
+            type   = $qtype
             source = 'pcap'
         }
     }
@@ -287,7 +363,8 @@ function Get-QuarantineNetworkEvidence {
 
     $tshark = Find-QuarantineTsharkCommand
     if ($pcapLogDir -and (Test-Path -LiteralPath $pcapLogDir) -and $tshark) {
-        $pcapFiles = Get-ChildItem -LiteralPath $pcapLogDir -Filter '*.pcap' -File -ErrorAction SilentlyContinue
+        $pcapFiles = @(Get-ChildItem -LiteralPath $pcapLogDir -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Extension -in @('.pcap', '.pcapng') })
         foreach ($file in $pcapFiles) {
             $pcaps += $file.FullName
             $dns += Get-QuarantinePcapDnsQueries -PcapPath $file.FullName -From $From -To $To -TsharkPath $tshark
@@ -319,7 +396,9 @@ function Get-QuarantineNetworkEvidence {
     } elseif ($sortedDns.Count -eq 0 -and $sortedRequests.Count -eq 0) {
         $message = 'Proxy/PCAP sources were scanned but no DNS or HTTP requests matched the snapshot time window.'
     } elseif (@($proxyDns).Count -gt 0 -and $pcapDnsCount -eq 0) {
-        $message = 'DNS hosts inferred from proxy HTTP traffic (loopback PCAP does not capture UDP 53). Sysmon DNS merged when present.'
+        $message = 'DNS hosts inferred from proxy HTTP traffic (no UDP/53 in PCAP). Use capture mode guest-nic (VirtualBox NIC trace) and/or Sysmon DNS Event 22.'
+    } elseif ($pcapDnsCount -gt 0) {
+        $message = "DNS from PCAP ($pcapDnsCount queries). Sysmon DNS merged when present."
     }
 
     return [pscustomobject]@{
@@ -352,14 +431,22 @@ function Merge-QuarantineSysmonDnsEvidence {
     $merged = @()
     foreach ($entry in @($DnsEntries)) { $merged += $entry }
 
-    foreach ($ev in @($SysmonEvents)) {
+    # Unwrap PowerShell 5.1 ConvertFrom-Json nesting: @(bigJsonArray) can become Count=1.
+    $events = @($SysmonEvents)
+    if ($events.Count -eq 1 -and $events[0] -is [System.Array]) {
+        $events = @($events[0])
+    }
+
+    foreach ($ev in $events) {
+        if ($null -eq $ev -or $ev -is [System.Array]) { continue }
         $eid = if ($ev.PSObject.Properties['eid']) { [int]$ev.eid } else { 0 }
         $kind = if ($ev.PSObject.Properties['t']) { [string]$ev.t } elseif ($ev.PSObject.Properties['type']) { [string]$ev.type } else { '' }
         if ($eid -ne 22 -and $kind -ne 'DnsQuery') { continue }
         $query = if ($ev.PSObject.Properties['queryName']) { [string]$ev.queryName } else { '' }
         if ([string]::IsNullOrWhiteSpace($query)) { continue }
 
-        $timeText = if ($ev.PSObject.Properties['t']) { [string]$ev.t } elseif ($ev.PSObject.Properties['time']) { [string]$ev.time } else { '' }
+        # `t` is event type (DnsQuery); timestamp is `time`.
+        $timeText = if ($ev.PSObject.Properties['time'] -and $ev.time) { [string]$ev.time } else { '' }
         $ts = ConvertTo-QuarantineNetworkInstant -Text $timeText
         if ($ts) {
             if ($From -and $ts -lt $From) { continue }

@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"bytes"
 	"container/heap"
 	"crypto/sha256"
 	"encoding/hex"
@@ -12,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"www.velocidex.com/golang/regparser"
 )
 
 // HiveSpec describes a guest hive to extract and its registry prefix.
@@ -41,14 +44,16 @@ type LocalHiveFile struct {
 }
 
 type hiveWalkResult struct {
-	meta    HiveMeta
-	records []IndexRecord // sorted by SortKey
+	meta      HiveMeta
+	records   []IndexRecord // sorted by SortKey
+	localPath string
 }
 
 // BuildIndexFromLocalHives walks already-copied hive files in parallel and writes sorted index + meta.
 func BuildIndexFromLocalHives(snapshotName, indexPath, metaPath string, files []LocalHiveFile) (*IndexMeta, error) {
 	meta := &IndexMeta{
 		Engine:   "hive",
+		Format:   IndexFormatSlim,
 		Snapshot: snapshotName,
 		BuiltAt:  time.Now().UTC().Format(time.RFC3339),
 		Digests:  map[string]string{},
@@ -72,8 +77,6 @@ func BuildIndexFromLocalHives(snapshotName, indexPath, metaPath string, files []
 	}
 
 	records := mergeSortedRecords(chunks)
-	aliasCurrentControlSet(&records)
-	sortRecords(records) // CCS aliases appended unsorted
 
 	if err := WriteIndexSorted(indexPath, records); err != nil {
 		return nil, err
@@ -92,6 +95,7 @@ func BuildIndexFromDisk(dx DiskExtractor, snapshotName, indexPath, metaPath, wor
 	}
 	meta := &IndexMeta{
 		Engine:   "hive",
+		Format:   IndexFormatSlim,
 		Snapshot: snapshotName,
 		BuiltAt:  time.Now().UTC().Format(time.RFC3339),
 		Digests:  map[string]string{},
@@ -99,6 +103,7 @@ func BuildIndexFromDisk(dx DiskExtractor, snapshotName, indexPath, metaPath, wor
 
 	sysResults := extractAndWalkParallel(dx, snapshotName, workDir, systemHives)
 	var sysChunks [][]IndexRecord
+	var softwarePath string
 	for _, r := range sysResults {
 		meta.Hives = append(meta.Hives, r.meta)
 		if r.meta.Error != "" {
@@ -111,10 +116,11 @@ func BuildIndexFromDisk(dx DiskExtractor, snapshotName, indexPath, metaPath, wor
 		if len(r.records) > 0 {
 			sysChunks = append(sysChunks, r.records)
 		}
+		if r.meta.Prefix == `HKLM:\SOFTWARE` && r.localPath != "" && r.meta.Error == "" {
+			softwarePath = r.localPath
+		}
 	}
-	sysRecords := mergeSortedRecords(sysChunks)
-
-	userHives := discoverUserHives(&sysRecords)
+	userHives := discoverUserHivesFromHive(softwarePath)
 	userResults := extractAndWalkParallel(dx, snapshotName, workDir, userHives)
 	var userChunks [][]IndexRecord
 	for _, r := range userResults {
@@ -132,8 +138,6 @@ func BuildIndexFromDisk(dx DiskExtractor, snapshotName, indexPath, metaPath, wor
 	}
 
 	records := mergeSortedRecords(append(sysChunks, userChunks...))
-	aliasCurrentControlSet(&records)
-	sortRecords(records)
 
 	if err := WriteIndexSorted(indexPath, records); err != nil {
 		return nil, err
@@ -178,27 +182,21 @@ func walkLocalHivesParallel(files []LocalHiveFile) []hiveWalkResult {
 
 func walkOneLocalHive(f LocalHiveFile) hiveWalkResult {
 	hm := HiveMeta{GuestPath: f.GuestPath, Prefix: f.Prefix}
-	st, err := os.Stat(f.LocalPath)
+	data, err := os.ReadFile(f.LocalPath)
 	if err != nil {
 		hm.Error = err.Error()
-		return hiveWalkResult{meta: hm}
+		return hiveWalkResult{meta: hm, localPath: f.LocalPath}
 	}
-	hm.Size = st.Size()
-
-	var recs []IndexRecord
-	n, err := WalkHiveFile(f.LocalPath, f.Prefix, &recs)
+	hm.Size = int64(len(data))
+	sum := sha256.Sum256(data)
+	hm.SHA256 = hex.EncodeToString(sum[:])
+	recs, err := walkHiveBytes(data, f.Prefix, int64(len(data)) >= parallelHiveBytes)
 	if err != nil {
 		hm.Error = err.Error()
-		return hiveWalkResult{meta: hm}
+		return hiveWalkResult{meta: hm, localPath: f.LocalPath}
 	}
-	hm.Entries = n
-	// Hash after walk so the OS page cache from the parse is reused (no parallel double-read).
-	if raw, rerr := os.ReadFile(f.LocalPath); rerr == nil {
-		sum := sha256.Sum256(raw)
-		hm.SHA256 = hex.EncodeToString(sum[:])
-	}
-	sortRecords(recs)
-	return hiveWalkResult{meta: hm, records: recs}
+	hm.Entries = len(recs)
+	return hiveWalkResult{meta: hm, records: recs, localPath: f.LocalPath}
 }
 
 func extractAndWalkParallel(dx DiskExtractor, snapshotName, workDir string, specs []HiveSpec) []hiveWalkResult {
@@ -235,26 +233,26 @@ func extractAndWalkParallel(dx DiskExtractor, snapshotName, workDir string, spec
 func extractAndWalkOne(dx DiskExtractor, snapshotName, workDir string, spec HiveSpec) hiveWalkResult {
 	hm := HiveMeta{GuestPath: spec.GuestPath, Prefix: spec.Prefix}
 	local := filepath.Join(workDir, sanitizeName(strings.ReplaceAll(spec.GuestPath, `\`, `_`)))
-	size, err := dx.ExtractFile(snapshotName, spec.GuestPath, local)
+	_, err := dx.ExtractFile(snapshotName, spec.GuestPath, local)
 	if err != nil {
 		hm.Error = err.Error()
-		return hiveWalkResult{meta: hm}
+		return hiveWalkResult{meta: hm, localPath: local}
 	}
-	hm.Size = size
-
-	var recs []IndexRecord
-	n, err := WalkHiveFile(local, spec.Prefix, &recs)
+	data, err := os.ReadFile(local)
 	if err != nil {
 		hm.Error = err.Error()
-		return hiveWalkResult{meta: hm}
+		return hiveWalkResult{meta: hm, localPath: local}
 	}
-	hm.Entries = n
-	if raw, rerr := os.ReadFile(local); rerr == nil {
-		sum := sha256.Sum256(raw)
-		hm.SHA256 = hex.EncodeToString(sum[:])
+	hm.Size = int64(len(data))
+	sum := sha256.Sum256(data)
+	hm.SHA256 = hex.EncodeToString(sum[:])
+	recs, err := walkHiveBytes(data, spec.Prefix, int64(len(data)) >= parallelHiveBytes)
+	if err != nil {
+		hm.Error = err.Error()
+		return hiveWalkResult{meta: hm, localPath: local}
 	}
-	sortRecords(recs)
-	return hiveWalkResult{meta: hm, records: recs}
+	hm.Entries = len(recs)
+	return hiveWalkResult{meta: hm, records: recs, localPath: local}
 }
 
 func sortRecords(records []IndexRecord) {
@@ -347,79 +345,48 @@ func sanitizeName(s string) string {
 	return s
 }
 
-// discoverUserHives finds ProfileList SIDs already walked from SOFTWARE and maps to NTUSER.DAT.
-func discoverUserHives(records *[]IndexRecord) []HiveSpec {
-	const prefix = `HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\`
-	type profile struct {
-		sid  string
-		path string
+func discoverUserHivesFromHive(softwarePath string) []HiveSpec {
+	if softwarePath == "" {
+		return nil
 	}
-	bySID := map[string]*profile{}
-	for _, rec := range *records {
-		if !strings.HasPrefix(strings.ToUpper(rec.K), strings.ToUpper(prefix)) {
+	data, err := os.ReadFile(softwarePath)
+	if err != nil {
+		return nil
+	}
+	reg, err := regparser.NewRegistry(bytes.NewReader(data))
+	if err != nil {
+		return nil
+	}
+	node := reg.OpenKey(`Microsoft\Windows NT\CurrentVersion\ProfileList`)
+	if node == nil {
+		return nil
+	}
+	var specs []HiveSpec
+	for _, sub := range node.Subkeys() {
+		if sub == nil {
 			continue
 		}
-		rest := rec.K[len(prefix):]
-		sid := strings.SplitN(rest, `\`, 2)[0]
+		sid := sub.Name()
 		if !strings.HasPrefix(strings.ToUpper(sid), "S-1-5-21-") {
 			continue
 		}
-		p := bySID[sid]
-		if p == nil {
-			p = &profile{sid: sid}
-			bySID[sid] = p
-		}
-		if strings.EqualFold(rec.N, "ProfileImagePath") {
-			if s, ok := rec.V.(string); ok {
-				p.path = trimRegString(s)
+		var img string
+		for _, val := range sub.Values() {
+			if val == nil || !strings.EqualFold(val.ValueName(), "ProfileImagePath") {
+				continue
+			}
+			raw, _ := valuePayload(val.ValueData(), val.TypeString())
+			if s, ok := raw.(string); ok {
+				img = trimRegString(s)
 			}
 		}
-	}
-	var specs []HiveSpec
-	for _, p := range bySID {
-		if p.path == "" {
+		if img == "" {
 			continue
 		}
-		guest := strings.ReplaceAll(p.path, `%SystemDrive%`, `C:`)
+		guest := strings.ReplaceAll(img, `%SystemDrive%`, `C:`)
 		guest = strings.ReplaceAll(guest, `%systemdrive%`, `C:`)
 		guest = strings.TrimRight(guest, `\`) + `\NTUSER.DAT`
-		specs = append(specs, HiveSpec{
-			GuestPath: guest,
-			Prefix:    `HKU:\` + p.sid,
-		})
+		specs = append(specs, HiveSpec{GuestPath: guest, Prefix: `HKU:\` + sid})
 	}
 	return specs
-}
-
-func aliasCurrentControlSet(records *[]IndexRecord) {
-	var current uint32
-	found := false
-	for _, rec := range *records {
-		if strings.EqualFold(rec.K, `HKLM:\SYSTEM\Select`) && strings.EqualFold(rec.N, "Current") {
-			if s, ok := rec.V.(string); ok {
-				var v uint64
-				fmt.Sscanf(s, "0x%x", &v)
-				current = uint32(v)
-				found = true
-			}
-			break
-		}
-	}
-	if !found || current == 0 {
-		current = 1
-	}
-	csName := fmt.Sprintf("ControlSet%03d", current)
-	srcPrefix := `HKLM:\SYSTEM\` + csName
-	dstPrefix := `HKLM:\SYSTEM\CurrentControlSet`
-	var extras []IndexRecord
-	for _, rec := range *records {
-		if !strings.HasPrefix(strings.ToUpper(rec.K), strings.ToUpper(srcPrefix)) {
-			continue
-		}
-		suffix := rec.K[len(srcPrefix):]
-		clone := rec
-		clone.K = dstPrefix + suffix
-		extras = append(extras, clone)
-	}
-	*records = append(*records, extras...)
 }

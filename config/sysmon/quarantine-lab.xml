@@ -45,12 +45,8 @@
     <RuleGroup name="DnsQuery" groupRelation="or">
       <DnsQuery onmatch="exclude">
         <QueryName condition="end with">.local</QueryName>
-      </DnsQuery>
-      <DnsQuery onmatch="include">
-        <QueryName condition="end with">.com</QueryName>
-        <QueryName condition="end with">.net</QueryName>
-        <QueryName condition="end with">.org</QueryName>
-        <QueryName condition="end with">.io</QueryName>
+        <QueryName condition="end with">.lan</QueryName>
+        <QueryName condition="end with">.internal</QueryName>
       </DnsQuery>
     </RuleGroup>
 

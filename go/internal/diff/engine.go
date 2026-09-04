@@ -245,13 +245,18 @@ func Compare(fromPath, toPath string, left, right *evidence.Manifest) (*Result, 
 }
 
 // ApplyHiveRegistryDiff replaces manifest registry delta with a hive-index merge-join.
-func ApplyHiveRegistryDiff(res *Result, fromIndex, toIndex string, fromMeta, toMeta *registry.IndexMeta) error {
+func ApplyHiveRegistryDiff(res *Result, fromIndex, toIndex string, fromMeta, toMeta *registry.IndexMeta, fromHives, toHives []registry.LocalHiveFile) error {
 	if res == nil {
 		return fmt.Errorf("result required")
 	}
 	idiff, err := registry.DiffIndexes(fromIndex, toIndex)
 	if err != nil {
 		return err
+	}
+	if len(fromHives) > 0 || len(toHives) > 0 {
+		registry.HydrateRecordValues(toHives, idiff.Added)
+		registry.HydrateRecordValues(fromHives, idiff.Removed)
+		registry.HydrateValueChanges(fromHives, toHives, idiff.Modified)
 	}
 	added := make([]evidence.RegistryEntry, 0, len(idiff.Added))
 	for _, r := range idiff.Added {

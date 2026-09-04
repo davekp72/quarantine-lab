@@ -461,7 +461,9 @@ function Get-QuarantineCaptureStatus {
 
     $running = $false
     $pcapBytes = 0
-    if ($state -and $state.pid) {
+    if ($state -and $state.mode -in @('guest-nic', 'vbox-nictrace') -and $state.pcapPath) {
+        $running = $true
+    } elseif ($state -and $state.pid) {
         $running = Test-ProcessRunning -ProcessId ([int]$state.pid)
     }
     if ($state -and $state.pcapPath -and (Test-Path -LiteralPath $state.pcapPath)) {
@@ -497,6 +499,82 @@ function Start-QuarantineCapture {
         return
     }
 
+    $logDir = $capture.logDir
+    if (-not (Test-Path -LiteralPath $logDir)) {
+        New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+    }
+
+    $statePath = Join-Path $logDir 'capture.state.json'
+    $captureMode = if ($capture.mode) { [string]$capture.mode } else { 'guest-nic' }
+    if (Test-Path -LiteralPath $statePath) {
+        $existing = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+        $modeExisting = if ($existing.mode) { [string]$existing.mode } else { '' }
+        $sameMode = $modeExisting -eq $captureMode -or (
+            $captureMode -in @('guest-nic', 'vbox-nictrace') -and $modeExisting -in @('guest-nic', 'vbox-nictrace')
+        )
+        if ($sameMode -and $modeExisting -in @('guest-nic', 'vbox-nictrace')) {
+            Write-Host 'Capture already running (VirtualBox NIC trace).'
+            Write-Host "  PCAP: $($existing.pcapPath)"
+            return
+        }
+        if ($sameMode -and $existing.pid -and (Test-ProcessRunning -ProcessId ([int]$existing.pid))) {
+            Write-Host "Capture already running (PID $($existing.pid))."
+            Write-Host "  PCAP: $($existing.pcapPath)"
+            return
+        }
+        # Stale or wrong mode (e.g. old loopback-proxy while config is guest-nic).
+        Write-Host "Stopping previous capture (mode=$modeExisting) before starting $captureMode..."
+        Stop-QuarantineCapture -ConfigPath $ConfigPath
+    }
+
+    $session = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $pcapPath = Join-Path $logDir "quarantine-$session.pcap"
+    $guestIp = if ($capture.guestIp) { $capture.guestIp } else { '10.0.2.15' }
+
+    if ($captureMode -in @('guest-nic', 'vbox-nictrace')) {
+        $vmName = [string]$cfg.vmName
+        $vbox = if ($cfg.vboxManagePath) { [string]$cfg.vboxManagePath } else { $null }
+        if (-not $vbox -or -not (Test-Path -LiteralPath $vbox)) {
+            $msg = 'VBoxManage not found; cannot start guest-nic capture.'
+            if ($Required) { throw $msg }
+            Write-Warning $msg
+            return
+        }
+        $powerLine = & $vbox showvminfo $vmName --machinereadable 2>&1 |
+            Where-Object { $_ -match '^VMState=' } | Select-Object -First 1
+        if ($powerLine -notmatch 'running') {
+            $msg = "VM '$vmName' is not running; start the VM before guest-nic packet capture (DNS via VirtualBox NIC trace)."
+            if ($Required) { throw $msg }
+            Write-Warning $msg
+            return
+        }
+
+        $fileOut = & $vbox controlvm $vmName nictracefile1 $pcapPath 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to set nictrace file:`n$fileOut"
+        }
+        $onOut = & $vbox controlvm $vmName nictrace1 on 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to enable nictrace:`n$onOut"
+        }
+
+        $capState = [ordered]@{
+            pid       = 0
+            pcapPath  = $pcapPath
+            interface = 'vbox-nic1'
+            filter    = 'all guest NIC frames (includes UDP/53 DNS)'
+            guestIp   = $guestIp
+            mode      = 'guest-nic'
+            startedAt = (Get-Date).ToString('o')
+        }
+        ($capState | ConvertTo-Json) | Set-Content -LiteralPath $statePath -Encoding UTF8
+
+        Write-Host 'Packet capture started (VirtualBox NIC trace).'
+        Write-Host '  Mode: guest-nic (captures guest DNS to 10.0.2.3 and all NIC traffic)'
+        Write-Host "  PCAP: $pcapPath"
+        return
+    }
+
     $tshark = Find-TsharkCommand
     if (-not $tshark) {
         $msg = 'tshark not found. Packet capture skipped. Install Wireshark (includes Npcap) for PCAPs: https://www.wireshark.org/download.html'
@@ -505,34 +583,15 @@ function Start-QuarantineCapture {
         return
     }
 
-    $logDir = $capture.logDir
-    if (-not (Test-Path -LiteralPath $logDir)) {
-        New-Item -ItemType Directory -Path $logDir -Force | Out-Null
-    }
-
-    $statePath = Join-Path $logDir 'capture.state.json'
-    if (Test-Path -LiteralPath $statePath) {
-        $existing = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
-        if ($existing.pid -and (Test-ProcessRunning -ProcessId ([int]$existing.pid))) {
-            Write-Host "Capture already running (PID $($existing.pid))."
-            Write-Host "  PCAP: $($existing.pcapPath)"
-            return
-        }
-    }
-
-    $captureMode = if ($capture.mode) { $capture.mode } else { 'loopback-proxy' }
     $iface = Get-QuarantineCaptureInterface -Preferred $capture.interface -TsharkPath $tshark -Mode $captureMode
     if (-not $iface) {
         throw 'Could not detect capture interface. Set network.capture.interface in config (use "loopback" for NAT VMs).'
     }
 
-    $guestIp = if ($capture.guestIp) { $capture.guestIp } else { '10.0.2.15' }
     $proxyPort = [int]$cfg.network.proxy.listenPort
     $pacPort = [int]$cfg.network.proxy.pacPort
     $ifaceLine = (& $tshark -D 2>&1 | Where-Object { $_ -match "^$iface\." } | Select-Object -First 1)
     $bpf = Get-QuarantineCaptureFilter -Mode $captureMode -GuestIp $guestIp -ProxyPort $proxyPort -PacPort $pacPort -InterfaceName $ifaceLine
-    $session = Get-Date -Format 'yyyyMMdd-HHmmss'
-    $pcapPath = Join-Path $logDir "quarantine-$session.pcap"
 
     $pcapPathEsc = $pcapPath -replace '"', '\"'
     $bpfEsc = $bpf -replace '"', '\"'
@@ -559,7 +618,7 @@ function Start-QuarantineCapture {
     Write-Host "  Filter: $bpf"
     Write-Host "  PCAP: $pcapPath"
     if ($captureMode -eq 'loopback-proxy') {
-        Write-Host '  Note: loopback capture records proxy/PAC traffic (guest NAT IP is not visible on host NICs).'
+        Write-Host '  Note: loopback capture records proxy/PAC TCP only — guest DNS (UDP/53) is not visible. Prefer mode guest-nic.'
     }
 }
 
@@ -578,6 +637,16 @@ function Initialize-QuarantineNetworkServices {
 
     $cfg = Get-QuarantineNetworkConfig -ConfigPath $ConfigPath
     $networkMode = if ($cfg.network.mode) { $cfg.network.mode.ToLowerInvariant() } else { '' }
+    if ($networkMode -eq 'gateway') {
+        $goExe = Join-Path $script:ProjectRoot 'go\quarantine.exe'
+        if (Test-Path -LiteralPath $goExe) {
+            & $goExe --config $ConfigPath gateway start | Out-Null
+            if (-not $SkipCapture -and $cfg.network.capture.enabled) {
+                & $goExe --config $ConfigPath capture start | Out-Null
+            }
+        }
+        return
+    }
     if ($networkMode -ne 'quarantine') { return }
 
     if (-not $SkipProxy -and $cfg.network.proxy.enabled) {
@@ -609,7 +678,16 @@ function Stop-QuarantineCapture {
     }
 
     $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
-    Stop-QuarantineManagedProcess -ProcessId ([int]$state.pid) -Label 'tshark'
+    $mode = if ($state.mode) { [string]$state.mode } else { '' }
+    if ($mode -in @('guest-nic', 'vbox-nictrace')) {
+        $vmName = [string]$cfg.vmName
+        $vbox = if ($cfg.vboxManagePath) { [string]$cfg.vboxManagePath } else { $null }
+        if ($vbox -and (Test-Path -LiteralPath $vbox)) {
+            & $vbox controlvm $vmName nictrace1 off 2>&1 | Out-Null
+        }
+    } elseif ($state.pid) {
+        Stop-QuarantineManagedProcess -ProcessId ([int]$state.pid) -Label 'tshark'
+    }
     Write-Host "PCAP saved: $($state.pcapPath)"
     Remove-Item -LiteralPath $statePath -Force
 }
@@ -718,6 +796,91 @@ Run Configure-QuarantineGuestNetwork.ps1 inside the guest once, then baseline.
 "@
 }
 
+function Enable-QuarantineGatewayNetwork {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [string]$ConfigPath,
+
+        [Parameter()]
+        [switch]$SkipCapture
+    )
+
+    $cfg = Get-QuarantineNetworkConfig -ConfigPath $ConfigPath
+    $vmName = $cfg.vmName
+    $vbox = if ($cfg.vboxManagePath) { $cfg.vboxManagePath } else { throw 'vboxManagePath missing in config.' }
+    $gw = $cfg.network.gateway
+    if (-not $gw) {
+        throw 'network.gateway is missing from config. See config/quarantine-vm.example.json.'
+    }
+    $gwName = if ($gw.vmName) { $gw.vmName } else { 'Quarantine-Gateway' }
+    $intnet = if ($gw.intnetName) { $gw.intnetName } elseif ($cfg.network.intnetName) { $cfg.network.intnetName } else { 'quarantine-net' }
+    $lanGw = if ($gw.lanGateway) { $gw.lanGateway } else { '10.66.0.1' }
+    $guestIp = if ($gw.guestIp) { $gw.guestIp } else { '10.66.0.15' }
+
+    # Prefer Go CLI for create/start when available.
+    $goExe = Join-Path $script:ProjectRoot 'go\quarantine.exe'
+    if (Test-Path -LiteralPath $goExe) {
+        & $goExe --config $ConfigPath gateway start
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning 'gateway start via Go failed — ensure the gateway VM exists (quarantine gateway create).'
+        }
+    } else {
+        $gwState = & $vbox showvminfo $gwName --machinereadable 2>&1 |
+            Where-Object { "$_".Trim() -match '^VMState=' } |
+            Select-Object -First 1
+        $gwPower = ("$gwState".Trim() -replace '^VMState="([^"]+)".*', '$1').ToLowerInvariant()
+        if ($gwPower -ne 'running') {
+            & $vbox startvm $gwName --type headless 2>&1 | Out-Null
+        }
+    }
+
+    $powerLine = & $vbox showvminfo $vmName --machinereadable 2>&1 |
+        Where-Object { "$_".Trim() -match '^VMState=' } |
+        Select-Object -First 1
+    $powerState = ("$powerLine".Trim() -replace '^VMState="([^"]+)".*', '$1').ToLowerInvariant()
+    if ($powerState -eq 'saved') {
+        & $vbox discardstate $vmName 2>&1 | Out-Null
+        Start-Sleep -Seconds 1
+    } elseif ($powerState -in @('running', 'paused', 'starting')) {
+        Write-Host 'Stopping lab VM before attaching to gateway intnet...'
+        & $vbox controlvm $vmName poweroff 2>&1 | Out-Null
+        Start-Sleep -Seconds 2
+    }
+
+    $modOut = & $vbox modifyvm $vmName --nic1 intnet --intnet1 $intnet --cableconnected1 on 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $modText = if ($modOut) { ($modOut | Out-String).Trim() } else { 'Unknown VirtualBox error.' }
+        throw "Failed to set lab VM NIC to intnet '$intnet'.`n$modText"
+    }
+
+    # Persist guest addressing hints in config JSON
+    if ($ConfigPath -and (Test-Path -LiteralPath $ConfigPath)) {
+        $raw = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
+        $raw.network.mode = 'gateway'
+        $raw.network.guestGateway = $lanGw
+        $raw.network.guestDns = $lanGw
+        if ($raw.network.capture) {
+            $raw.network.capture.mode = 'gateway'
+            $raw.network.capture.guestIp = $guestIp
+        }
+        ($raw | ConvertTo-Json -Depth 10) | Set-Content -LiteralPath $ConfigPath -Encoding UTF8
+    }
+
+    Write-Host @"
+
+Gateway network enabled for '$vmName':
+  Lab NIC: intnet $intnet
+  Guest IP: $guestIp  Gateway/DNS: $lanGw
+  Transparent MITM + PAC fallback on gateway :8080
+  Capture: gateway tcpdump (.\quarantine-vm.ps1 capture start)
+
+In the guest (Admin, once):
+  Configure-QuarantineGuestNetwork.ps1 -Mode gateway
+  Then baseline on the host.
+"@
+}
+
 function Find-QuarantineProxyCA {
     param([string]$LogDir)
 
@@ -801,7 +964,6 @@ Export-ModuleMember -Function @(
     'Get-QuarantineCaptureStatus',
     'Initialize-QuarantineNetworkServices',
     'Enable-QuarantineVMNetwork',
+    'Enable-QuarantineGatewayNetwork',
     'Export-QuarantineProxyCA',
-    'Find-MitmproxyCommand',
-    'Find-TsharkCommand'
-)
+    'Find-Mitmproxy

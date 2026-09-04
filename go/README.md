@@ -21,13 +21,13 @@ wails build
 From the repo root (uses `config/quarantine-vm.json`):
 
 ```powershell
-.\quarantine-go.ps1 status
-.\quarantine-go.ps1 snapshot --name CleanSession --force
-.\quarantine-go.ps1 preserve --label hostfile
-.\quarantine-go.ps1 reset --clean
-.\quarantine-go.ps1 manifest diff --from CleanSession --to hostfile --refresh
-.\quarantine-go.ps1 manifest view --from CleanSession --to hostfile --refresh
-.\quarantine-go.ps1 ui
+.\quarantine-vm.ps1 status
+.\quarantine-vm.ps1 snapshot -SnapshotName CleanSession -Force
+.\quarantine-vm.ps1 preserve -SnapshotName hostfile
+.\quarantine-vm.ps1 reset -Clean
+.\quarantine-vm.ps1 manifest diff -FromSnapshot CleanSession -ToSnapshot hostfile -Refresh
+.\quarantine-vm.ps1 ui
+.\quarantine-vm.ps1 -Rebuild ui
 ```
 
 Or run the binary directly:
@@ -42,6 +42,8 @@ cd go
 | Package | Role |
 |---------|------|
 | `internal/config` | Load `quarantine-vm.json` |
+| `internal/gateway` | Linux Quarantine-Gateway VM (create/provision/capture/CA) |
+| `internal/network` | NIC modes including `gateway` |
 | `internal/vbox` | VBoxManage wrapper |
 | `internal/vm` | Snapshot / preserve / reset / baseline |
 | `internal/guest` | Guestcontrol copy/run |
@@ -51,15 +53,13 @@ cd go
 | `internal/registry` | Reg export parser + tree builder |
 | `internal/network` | NIC modes |
 | `internal/proxy` | mitmproxy subprocess |
-| `internal/capture` | tshark PCAP |
+| `internal/capture` | VirtualBox NIC trace / PCAP |
 | `internal/inbox` | Transient shared folder |
 | `cmd/quarantine/frontend/dist` | Wails report UI (files/registry trees, live file preview) |
 
-## Migration from PowerShell
+## PowerShell vs Go
 
-The legacy entry point `quarantine-vm.ps1` remains for now. The Go app reads the same config, sidecars under `manifest.logDir`, and VBox VM layout. Guest capture still uses the existing PowerShell scripts in `guest/` and `manifest/` (deployed via `manifest deploy`).
-
-Once parity is verified in your lab, prefer `quarantine-go.ps1` / `quarantine.exe` for daily workflow.
+`quarantine-vm.ps1` prefers the Go binary for daily commands (`start`, `proxy`, `capture`, `manifest`, `ui`, …). Setup-only PowerShell paths remain for `create`, `install`, `guest-additions`, `payload`, `proxy export-ca`, and similar. Force the PowerShell path with `$env:QUARANTINE_FORCE_PS=1`.
 
 ## Tests
 

@@ -1,33 +1,138 @@
 package registry
 
 import (
+	"bytes"
 	"encoding/binary"
-	"encoding/hex"
 	"fmt"
+	"hash/fnv"
 	"os"
+	"runtime"
+	"strconv"
 	"strings"
+	"sync"
 
 	"www.velocidex.com/golang/regparser"
 )
 
+const parallelHiveBytes = 8 << 20 // walk large hives by top-level key in parallel
+
 // WalkHiveFile parses a REGF hive and appends IndexRecords under prefix.
 func WalkHiveFile(hivePath, prefix string, out *[]IndexRecord) (int, error) {
-	f, err := os.Open(hivePath)
+	data, err := os.ReadFile(hivePath)
 	if err != nil {
 		return 0, err
 	}
-	defer f.Close()
-	reg, err := regparser.NewRegistry(f)
+	recs, err := walkHiveBytes(data, prefix, int64(len(data)) >= parallelHiveBytes)
 	if err != nil {
 		return 0, err
+	}
+	*out = append(*out, recs...)
+	return len(recs), nil
+}
+
+func walkHiveBytes(data []byte, prefix string, parallel bool) ([]IndexRecord, error) {
+	r := bytes.NewReader(data)
+	reg, err := regparser.NewRegistry(r)
+	if err != nil {
+		return nil, err
 	}
 	root := reg.OpenKey("")
 	if root == nil {
-		return 0, fmt.Errorf("hive root missing: %s", hivePath)
+		return nil, fmt.Errorf("hive root missing")
 	}
-	before := len(*out)
-	walkKeyNode(root, normalizeRegKey(prefix, ""), out)
-	return len(*out) - before, nil
+	rootPath := normalizeRegKey(prefix, "")
+
+	var rootRecs []IndexRecord
+	emitValues(root, rootPath, &rootRecs)
+
+	subs := root.Subkeys()
+	names := make([]string, 0, len(subs))
+	for _, sub := range subs {
+		if sub == nil {
+			continue
+		}
+		n := sub.Name()
+		if n != "" {
+			names = append(names, n)
+		}
+	}
+
+	if !parallel || len(names) < 4 {
+		out := make([]IndexRecord, 0, estimateRecords(len(data)))
+		out = append(out, rootRecs...)
+		for _, name := range names {
+			child := findSubkey(root, name)
+			walkKeyNode(child, rootPath+`\`+name, &out)
+		}
+		sortRecords(out)
+		return out, nil
+	}
+
+	workers := runtime.GOMAXPROCS(0)
+	if workers > len(names) {
+		workers = len(names)
+	}
+	if workers < 2 {
+		workers = 2
+	}
+	chunks := make([][]IndexRecord, len(names))
+	ch := make(chan int)
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rr := bytes.NewReader(data)
+			preg, err := regparser.NewRegistry(rr)
+			if err != nil {
+				return
+			}
+			for i := range ch {
+				node := preg.OpenKey(names[i])
+				var recs []IndexRecord
+				walkKeyNode(node, rootPath+`\`+names[i], &recs)
+				sortRecords(recs)
+				chunks[i] = recs
+			}
+		}()
+	}
+	for i := range names {
+		ch <- i
+	}
+	close(ch)
+	wg.Wait()
+
+	sortRecords(rootRecs)
+	all := make([][]IndexRecord, 0, 1+len(chunks))
+	if len(rootRecs) > 0 {
+		all = append(all, rootRecs)
+	}
+	all = append(all, chunks...)
+	return mergeSortedRecords(all), nil
+}
+
+func findSubkey(node *regparser.CM_KEY_NODE, name string) *regparser.CM_KEY_NODE {
+	if node == nil {
+		return nil
+	}
+	want := strings.ToLower(name)
+	for _, sub := range node.Subkeys() {
+		if sub != nil && strings.ToLower(sub.Name()) == want {
+			return sub
+		}
+	}
+	return nil
+}
+
+func estimateRecords(hiveBytes int) int {
+	n := hiveBytes / 180
+	if n < 256 {
+		return 256
+	}
+	if n > 600000 {
+		return 600000
+	}
+	return n
 }
 
 func walkKeyNode(node *regparser.CM_KEY_NODE, keyPath string, out *[]IndexRecord) {
@@ -37,22 +142,7 @@ func walkKeyNode(node *regparser.CM_KEY_NODE, keyPath string, out *[]IndexRecord
 	if shouldSkipRegistryKey(keyPath) {
 		return
 	}
-	for _, val := range node.Values() {
-		if val == nil {
-			continue
-		}
-		name := val.ValueName()
-		typ := val.TypeString()
-		vd := val.ValueData()
-		raw, data := valuePayload(vd, typ)
-		h := ContentHash(typ, valueForHash(raw, data))
-		v, size, keep := ValueForStorage(typ, raw, data)
-		rec := IndexRecord{K: keyPath, N: name, T: typ, H: h, Size: size}
-		if keep {
-			rec.V = v
-		}
-		*out = append(*out, rec)
-	}
+	emitValues(node, keyPath, out)
 	for _, sub := range node.Subkeys() {
 		if sub == nil {
 			continue
@@ -61,9 +151,85 @@ func walkKeyNode(node *regparser.CM_KEY_NODE, keyPath string, out *[]IndexRecord
 		if childName == "" {
 			continue
 		}
-		childPath := keyPath + `\` + childName
-		walkKeyNode(sub, childPath, out)
+		walkKeyNode(sub, keyPath+`\`+childName, out)
 	}
+}
+
+func emitValues(node *regparser.CM_KEY_NODE, keyPath string, out *[]IndexRecord) {
+	for _, val := range node.Values() {
+		if val == nil {
+			continue
+		}
+		data := rawValueBytes(val)
+		typ := val.Type()
+		rec := IndexRecord{
+			K:    keyPath,
+			N:    val.ValueName(),
+			T:    regTypeName(typ),
+			H:    contentHashRaw(typ, data),
+			Size: len(data),
+		}
+		*out = append(*out, rec)
+	}
+}
+
+func rawValueBytes(val *regparser.CM_KEY_VALUE) []byte {
+	dataSize := val.DataLength()
+	if dataSize&0x80000000 > 0 {
+		dataSize ^= 0x80000000
+		return regparser.ParseSafeArray_byte(
+			val.Reader,
+			val.Offset+val.Profile.Off_CM_KEY_VALUE_Data,
+			4,
+		)
+	}
+	cell := val.Profile.HCELL(val.Reader, 0x1000+int64(val.Data()))
+	if cell.Signature() == 0x6264 /* db */ {
+		big := val.Profile.CM_BIG_DATA(val.Reader, cell.Payload())
+		listCell := val.Profile.HCELL(val.Reader, 0x1000+int64(big.List()))
+		segmentList := regparser.ParseSafeArray_uint32(val.Reader, listCell.Payload(), int(big.Count()))
+		var out []byte
+		remain := dataSize
+		for _, offset := range segmentList {
+			seg := val.Profile.HCELL(val.Reader, 0x1000+int64(offset))
+			if !seg.Allocated() {
+				continue
+			}
+			n := seg.DataSize()
+			if n > remain {
+				n = remain
+			}
+			out = append(out, regparser.ParseSafeArray_byte(val.Reader, seg.Payload(), int(n))...)
+			remain -= n
+			if remain == 0 {
+				break
+			}
+		}
+		return out
+	}
+	return regparser.ParseSafeArray_byte(val.Reader, cell.Payload(), int(dataSize))
+}
+
+func contentHashRaw(typ uint32, data []byte) string {
+	h := fnv.New64a()
+	var t [4]byte
+	binary.LittleEndian.PutUint32(t[:], typ)
+	_, _ = h.Write(t[:])
+	_, _ = h.Write(data)
+	return strconv.FormatUint(h.Sum64(), 16)
+}
+
+func regTypeName(t uint32) string {
+	return regparser.RegTypeToString(t)
+}
+
+func trimRegString(s string) string {
+	s = strings.TrimRight(s, "\x00")
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, 0); i >= 0 {
+		s = s[:i]
+	}
+	return s
 }
 
 func valuePayload(vd *regparser.ValueData, typ string) (any, []byte) {
@@ -98,59 +264,8 @@ func valuePayload(vd *regparser.ValueData, typ string) (any, []byte) {
 		if len(data) == 0 {
 			return nil, nil
 		}
-		return hex.EncodeToString(data), data
+		return fmt.Sprintf("%x", data), data
 	}
-}
-
-func trimRegString(s string) string {
-	s = strings.TrimRight(s, "\x00")
-	s = strings.TrimSpace(s)
-	if i := strings.IndexByte(s, 0); i >= 0 {
-		s = s[:i]
-	}
-	return s
-}
-
-func valueForHash(raw any, data []byte) any {
-	if raw != nil {
-		return raw
-	}
-	if len(data) > 0 {
-		return hex.EncodeToString(data)
-	}
-	return ""
-}
-
-// ReadDWORDFromHive reads a REG_DWORD at path\name from a hive file (best-effort).
-func ReadDWORDFromHive(hivePath, keyPath, valueName string) (uint32, bool) {
-	f, err := os.Open(hivePath)
-	if err != nil {
-		return 0, false
-	}
-	defer f.Close()
-	reg, err := regparser.NewRegistry(f)
-	if err != nil {
-		return 0, false
-	}
-	node := reg.OpenKey(keyPath)
-	if node == nil {
-		return 0, false
-	}
-	want := strings.ToLower(valueName)
-	for _, val := range node.Values() {
-		if strings.ToLower(val.ValueName()) != want {
-			continue
-		}
-		vd := val.ValueData()
-		if vd == nil {
-			return 0, false
-		}
-		if len(vd.Data) >= 4 {
-			return binary.LittleEndian.Uint32(vd.Data[:4]), true
-		}
-		return uint32(vd.Uint64), true
-	}
-	return 0, false
 }
 
 func shouldSkipRegistryKey(key string) bool {

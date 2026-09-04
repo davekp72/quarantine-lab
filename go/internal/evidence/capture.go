@@ -44,15 +44,7 @@ func (s *Service) deployManifestScript(leaf string, creds guest.Credentials) err
 }
 
 func (s *Service) deployPrivDeps(creds guest.Credentials) error {
-	guestDir := s.guestDir()
-	if err := s.deployToGuest(s.manifestScript("QuarantineGuestPriv.psm1"), guestDir, creds); err != nil {
-		return err
-	}
-	priv := filepath.Join(s.ProjectRoot, "guest", "Invoke-QuarantinePrivilegedHklmRegistryExport.ps1")
-	if _, err := os.Stat(priv); err == nil {
-		return s.deployToGuest(priv, guestDir, creds)
-	}
-	return nil
+	return s.deployToGuest(s.manifestScript("QuarantineGuestPriv.psm1"), s.guestDir(), creds)
 }
 
 func (s *Service) runGuestPS(creds guest.Credentials, scriptLeaf string, args []string) (string, error) {
@@ -75,16 +67,10 @@ func (s *Service) copyFromGuest(guestPath, hostPath string, creds guest.Credenti
 	return s.Guest.CopyFrom(guestPath, hostPath, creds)
 }
 
-// MarkLiveSnapshot captures live USN/registry sidecars via guestcontrol (no host PowerShell).
+// MarkLiveSnapshot captures live USN/event sidecars via guestcontrol (no host PowerShell).
+// Registry hives require the quarantine agent (MarkLiveSnapshot with agent.enabled).
 func (s *Service) markLiveSnapshotLegacy(snapshotName string) (string, error) {
 	snap := s.Cfg.ResolveSnapshotName(snapshotName)
-	engine := strings.ToLower(strings.TrimSpace(s.Cfg.Manifest.RegistryEngine))
-	if engine == "" {
-		engine = "cli"
-	}
-	if engine == "regshot" {
-		return "", fmt.Errorf("regshot registry engine is not supported in the Go UI yet")
-	}
 
 	isEvidence := strings.HasPrefix(strings.ToLower(snap), "evidence-")
 	baseline := strings.TrimSpace(s.Cfg.Manifest.SessionBaselineSnapshot)
@@ -102,15 +88,9 @@ func (s *Service) markLiveSnapshotLegacy(snapshotName string) (string, error) {
 		}
 	}
 
-	if err := s.capturePayloadRegistryCLI(snap); err != nil {
+	if err := s.ensurePayloadSidecar(snap); err != nil {
 		return "", err
 	}
-
-	includeHklm := !(isEvidence && baseline != "" && engine == "cli")
-	if includeHklm {
-		_ = s.captureHklmRegistryCLI(snap)
-	}
-
 	return s.PublishFromSidecars(snap)
 }
 
@@ -250,210 +230,5 @@ func (s *Service) captureEvidenceEvents(snapshotName, fromBaseline string) error
 	for _, c := range copies {
 		_ = s.copyFromGuest(c.guest, c.host, creds)
 	}
-
-	guestHklmOut := filepath.Join(guestDir, "hklm-registry-meta-host.json")
-	if err := s.deployToGuest(
-		filepath.Join(s.ProjectRoot, "guest", "Invoke-QuarantinePrivilegedHklmRegistryExport.ps1"),
-		guestDir, creds,
-	); err == nil {
-		_, _ = s.runGuestPS(creds, "Invoke-QuarantinePrivilegedHklmRegistryExport.ps1", []string{"-OutFile", guestHklmOut})
-		_ = s.importHklmFromGuestMeta(snapshotName, guestHklmOut, creds)
-	}
 	return nil
-}
-
-func (s *Service) capturePayloadRegistryCLI(snapshotName string) error {
-	if strings.TrimSpace(s.Cfg.Payload.Username) == "" {
-		return fmt.Errorf("payload.username not configured")
-	}
-	creds := s.Guest.PayloadCreds()
-	guestDir := s.guestDir()
-	if strings.TrimSpace(s.Cfg.Payload.CopyTargetDir) != "" {
-		guestDir = s.Cfg.Payload.CopyTargetDir
-	}
-	guestOutDir := filepath.Join(guestDir, "payload-registry-cli")
-	guestMeta := filepath.Join(guestOutDir, "payload-registry-meta.json")
-
-	if err := s.deployManifestScript("Export-QuarantineGuestPayloadRegistryCli.ps1", creds); err != nil {
-		return err
-	}
-	if _, err := s.runGuestPS(creds, "Export-QuarantineGuestPayloadRegistryCli.ps1", []string{
-		"-OutDir", guestOutDir,
-		"-OutMetaFile", guestMeta,
-	}); err != nil {
-		return fmt.Errorf("payload registry export: %w", err)
-	}
-
-	hostRegDir := s.Cfg.SidecarPath(snapshotName, "-payload-registry")
-	if err := os.MkdirAll(hostRegDir, 0o755); err != nil {
-		return err
-	}
-	hostMeta := filepath.Join(hostRegDir, "payload-registry-meta.json")
-	if err := s.copyFromGuest(guestMeta, hostMeta, creds); err != nil {
-		return fmt.Errorf("payload registry meta: %w", err)
-	}
-	return s.buildPayloadRegistrySidecar(snapshotName, hostMeta, hostRegDir, creds, guestDir)
-}
-
-type payloadMeta struct {
-	SID      string   `json:"sid"`
-	UserName string   `json:"userName"`
-	RegFiles []string `json:"regFiles"`
-}
-
-func (s *Service) buildPayloadRegistrySidecar(snapshotName, hostMeta, hostRegDir string, creds guest.Credentials, guestDir string) error {
-	raw, err := os.ReadFile(hostMeta)
-	if err != nil {
-		return err
-	}
-	var meta payloadMeta
-	if err := jsonutil.Unmarshal(raw, &meta); err != nil {
-		return err
-	}
-
-	seen := map[string]bool{}
-	var entries []RegistryEntry
-	for _, guestReg := range meta.RegFiles {
-		leaf := filepath.Base(guestReg)
-		hostReg := filepath.Join(hostRegDir, leaf)
-		guestPath := guestReg
-		if !strings.Contains(guestReg, `\`) {
-			guestPath = filepath.Join(guestDir, "payload-registry-cli", leaf)
-		}
-		if err := s.copyFromGuest(guestPath, hostReg, creds); err != nil {
-			continue
-		}
-		content, err := os.ReadFile(hostReg)
-		if err != nil {
-			continue
-		}
-		parsed, err := parseRegExportFile(string(content), meta.SID)
-		if err != nil {
-			continue
-		}
-		for _, e := range parsed {
-			key := e.K + "|" + e.N
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-			entries = append(entries, e)
-		}
-	}
-
-	export := map[string]any{
-		"engine":     "cli",
-		"capturedAt": time.Now().UTC().Format(time.RFC3339),
-		"snapshot":   snapshotName,
-		"userName":   meta.UserName,
-		"sid":        meta.SID,
-		"entryCount": len(entries),
-		"regHostDir": hostRegDir,
-		"registry":   entries,
-	}
-	out, err := json.MarshalIndent(export, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(s.Cfg.SidecarPath(snapshotName, "-payload-registry.json"), out, 0o644)
-}
-
-func mapRegKey(key, sid string) string {
-	key = strings.TrimSpace(key)
-	replacements := []struct{ prefix, repl string }{
-		{"HKEY_CURRENT_USER\\", "HKU:\\" + sid + "\\"},
-		{"HKCU\\", "HKU:\\" + sid + "\\"},
-		{"HKEY_USERS\\", "HKU:\\"},
-		{"HKU\\", "HKU:\\"},
-		{"HKEY_LOCAL_MACHINE\\", "HKLM:\\"},
-		{"HKLM\\", "HKLM:\\"},
-	}
-	for _, r := range replacements {
-		if strings.HasPrefix(strings.ToUpper(key), strings.ToUpper(r.prefix)) {
-			return r.repl + key[len(r.prefix):]
-		}
-	}
-	return key
-}
-
-func (s *Service) captureHklmRegistryCLI(snapshotName string) error {
-	creds := s.Guest.GuestCreds()
-	guestDir := s.guestDir()
-	guestOut := filepath.Join(guestDir, "hklm-registry-meta-host.json")
-	priv := filepath.Join(s.ProjectRoot, "guest", "Invoke-QuarantinePrivilegedHklmRegistryExport.ps1")
-	if err := s.deployToGuest(priv, guestDir, creds); err != nil {
-		return err
-	}
-	if err := s.deployPrivDeps(creds); err != nil {
-		return err
-	}
-	if _, err := s.runGuestPS(creds, "Invoke-QuarantinePrivilegedHklmRegistryExport.ps1", []string{"-OutFile", guestOut}); err != nil {
-		return err
-	}
-	return s.importHklmFromGuestMeta(snapshotName, guestOut, creds)
-}
-
-func (s *Service) importHklmFromGuestMeta(snapshotName, guestMetaPath string, creds guest.Credentials) error {
-	hostRegDir := s.Cfg.SidecarPath(snapshotName, "-hklm-registry")
-	if err := os.MkdirAll(hostRegDir, 0o755); err != nil {
-		return err
-	}
-	hostMeta := filepath.Join(hostRegDir, "hklm-registry-meta.json")
-	if err := s.copyFromGuest(guestMetaPath, hostMeta, creds); err != nil {
-		return err
-	}
-	raw, err := os.ReadFile(hostMeta)
-	if err != nil {
-		return err
-	}
-	var meta payloadMeta
-	if err := jsonutil.Unmarshal(raw, &meta); err != nil {
-		return err
-	}
-
-	seen := map[string]bool{}
-	var entries []RegistryEntry
-	guestCliDir := filepath.Join(s.guestDir(), "hklm-registry-cli")
-	for _, guestReg := range meta.RegFiles {
-		leaf := filepath.Base(guestReg)
-		hostReg := filepath.Join(hostRegDir, leaf)
-		guestPath := guestReg
-		if !strings.Contains(guestReg, `\`) {
-			guestPath = filepath.Join(guestCliDir, leaf)
-		}
-		if err := s.copyFromGuest(guestPath, hostReg, creds); err != nil {
-			continue
-		}
-		content, err := os.ReadFile(hostReg)
-		if err != nil {
-			continue
-		}
-		parsed, err := parseRegExportFile(string(content), "LOCAL_MACHINE")
-		if err != nil {
-			continue
-		}
-		for _, e := range parsed {
-			key := e.K + "|" + e.N
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-			entries = append(entries, e)
-		}
-	}
-
-	export := map[string]any{
-		"engine":     "cli",
-		"scope":      "hklm",
-		"capturedAt": time.Now().UTC().Format(time.RFC3339),
-		"snapshot":   snapshotName,
-		"entryCount": len(entries),
-		"regHostDir": hostRegDir,
-		"registry":   entries,
-	}
-	out, err := json.MarshalIndent(export, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(s.Cfg.SidecarPath(snapshotName, "-hklm-registry.json"), out, 0o644)
 }

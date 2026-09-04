@@ -128,10 +128,22 @@ function extractNetworkHost(text) {
   return raw.split('/')[0].split('?')[0].split(':')[0];
 }
 
-function isNetworkHostNoise(text) {
+export function isNetworkHostNoise(text) {
   const host = extractNetworkHost(text);
   if (!host) return false;
+  if (host === 'home.arpa' || host.endsWith('.home.arpa')) return true;
+  if (host.endsWith('.local') || host === 'localhost' || host === 'localhost.') return true;
   return NETWORK_HOST_SUFFIXES.some((suffix) => host === suffix || host.endsWith('.' + suffix));
+}
+
+export function isNetworkDnsNoise(entry) {
+  if (!entry) return false;
+  return isNetworkHostNoise(entry.query || entry.qname || entry.host || '');
+}
+
+export function isNetworkRequestNoise(entry) {
+  if (!entry) return false;
+  return isNetworkHostNoise(entry.host || entry.url || entry.path || '');
 }
 
 export function isNoise(text) {
@@ -190,6 +202,8 @@ export function filterDiff(diff, hideNoise) {
   const base = stripUsnLeafFiles(diff);
   if (!base || !hideNoise) return base;
   const files = base.files || {};
+  const dns = (base.network?.dns || []).filter((e) => !isNetworkDnsNoise(e));
+  const requests = (base.network?.requests || []).filter((e) => !isNetworkRequestNoise(e));
   const filtered = {
     ...base,
     files: {
@@ -205,6 +219,11 @@ export function filterDiff(diff, hideNoise) {
       ...base.usn,
       events: (base.usn.events || []).filter((e) => !isUsnNoise(e)),
     } : base.usn,
+    network: base.network ? {
+      ...base.network,
+      dns,
+      requests,
+    } : base.network,
   };
   filtered.summary = {
     ...(base.summary || {}),
@@ -212,6 +231,8 @@ export function filterDiff(diff, hideNoise) {
     filesRemoved: filtered.files.removed.length,
     filesModified: filtered.files.modified.length,
     sysmonAdded: filtered.sysmon.added.length,
+    dnsQueries: dns.length,
+    networkRequests: requests.length,
     registryAdded: (base.registry?.added || []).length,
     registryRemoved: (base.registry?.removed || []).length,
     registryModified: (base.registry?.modified || []).length,

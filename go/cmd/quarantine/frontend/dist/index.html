@@ -13,6 +13,25 @@
       <div id="vm-status" class="muted">Loading...</div>
 
       <section class="side-block">
+        <h2>Gateway</h2>
+        <div id="gateway-status" class="capture-status stopped">—</div>
+        <p id="gateway-detail" class="muted capture-detail"></p>
+        <p class="muted snap-hint">Linux gateway: routing, DNS, transparent TLS MITM, LAN PCAP.</p>
+      </section>
+
+      <section class="side-block">
+        <h2>Network capture</h2>
+        <div id="capture-status" class="capture-status stopped">Stopped</div>
+        <p id="capture-detail" class="muted capture-detail"></p>
+        <div class="btn-row">
+          <button id="btn-capture-start" type="button" class="btn-primary">Start</button>
+          <button id="btn-capture-stop" type="button">Stop</button>
+          <button id="btn-capture-refresh" type="button">Refresh</button>
+        </div>
+        <p class="muted snap-hint">PCAP via gateway tcpdump (or guest NIC). Start before the session; stop after Preserve.</p>
+      </section>
+
+      <section class="side-block">
         <h2>Snapshots</h2>
         <button id="btn-refresh-snaps" type="button">Refresh list</button>
         <ul id="snap-list" class="snap-list"></ul>

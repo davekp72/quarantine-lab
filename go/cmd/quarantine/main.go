@@ -57,6 +57,7 @@ func main() {
 	root.AddCommand(networkCmd(&cfgPath))
 	root.AddCommand(proxyCmd(&cfgPath))
 	root.AddCommand(captureCmd(&cfgPath))
+	root.AddCommand(gatewayCmd(&cfgPath))
 	root.AddCommand(inboxCmd(&cfgPath))
 	root.AddCommand(deployCmd(&cfgPath))
 	root.AddCommand(setupCmd(&cfgPath))
@@ -326,7 +327,7 @@ func manifestCmd(cfgPath *string) *cobra.Command {
 
 func networkCmd(cfgPath *string) *cobra.Command {
 	cmd := &cobra.Command{Use: "network", Short: "Network mode"}
-	for _, mode := range []string{"quarantine", "offline", "nat", "intnet", "none", "hostonly"} {
+	for _, mode := range []string{"quarantine", "gateway", "offline", "nat", "intnet", "none", "hostonly"} {
 		m := mode
 		cmd.AddCommand(&cobra.Command{
 			Use:  m,
@@ -335,7 +336,11 @@ func networkCmd(cfgPath *string) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				return a.Network.SetMode(m)
+				if err := a.Network.SetMode(m); err != nil {
+					return err
+				}
+				fmt.Printf("Network mode set to %s\n", a.Cfg.Network.Mode)
+				return nil
 			},
 		})
 	}
@@ -347,12 +352,16 @@ func proxyCmd(cfgPath *string) *cobra.Command {
 	cmd.AddCommand(&cobra.Command{
 		Use: "start", RunE: func(cmd *cobra.Command, args []string) error {
 			a, err := app.New(*cfgPath); if err != nil { return err }
-			return a.Proxy.Start()
+			return a.Proxy.StartIfHostMode()
 		},
 	})
 	cmd.AddCommand(&cobra.Command{
 		Use: "stop", RunE: func(cmd *cobra.Command, args []string) error {
 			a, err := app.New(*cfgPath); if err != nil { return err }
+			if a.Cfg.IsGatewayMode() {
+				fmt.Println("Network mode is gateway — host proxy stop is a no-op.")
+				return nil
+			}
 			return a.Proxy.Stop()
 		},
 	})
@@ -360,6 +369,13 @@ func proxyCmd(cfgPath *string) *cobra.Command {
 		Use: "status", RunE: func(cmd *cobra.Command, args []string) error {
 			a, err := app.New(*cfgPath); if err != nil { return err }
 			fmt.Println(a.Proxy.Status()); return nil
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use: "export-ca", RunE: func(cmd *cobra.Command, args []string) error {
+			a, err := app.New(*cfgPath); if err != nil { return err }
+			_, err = a.Proxy.ExportCA(a.Gateway.ExportCA)
+			return err
 		},
 	})
 	return cmd
@@ -378,6 +394,102 @@ func captureCmd(cfgPath *string) *cobra.Command {
 		Use: "stop", RunE: func(cmd *cobra.Command, args []string) error {
 			a, err := app.New(*cfgPath); if err != nil { return err }
 			return a.Capture.Stop()
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use: "status", RunE: func(cmd *cobra.Command, args []string) error {
+			a, err := app.New(*cfgPath); if err != nil { return err }
+			fmt.Println(a.Capture.Status()); return nil
+		},
+	})
+	return cmd
+}
+
+func gatewayCmd(cfgPath *string) *cobra.Command {
+	cmd := &cobra.Command{Use: "gateway", Short: "Linux quarantine gateway VM"}
+	cmd.AddCommand(&cobra.Command{
+		Use: "create", Short: "Create gateway VM shell (NAT + intnet)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			a, err := app.New(*cfgPath)
+			if err != nil {
+				return err
+			}
+			msg, err := a.Gateway.Create()
+			if msg != "" {
+				fmt.Println(msg)
+			}
+			return err
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use: "start", RunE: func(cmd *cobra.Command, args []string) error {
+			a, err := app.New(*cfgPath)
+			if err != nil {
+				return err
+			}
+			return a.Gateway.Start()
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use: "stop", RunE: func(cmd *cobra.Command, args []string) error {
+			a, err := app.New(*cfgPath)
+			if err != nil {
+				return err
+			}
+			return a.Gateway.Stop()
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use: "status", RunE: func(cmd *cobra.Command, args []string) error {
+			a, err := app.New(*cfgPath)
+			if err != nil {
+				return err
+			}
+			fmt.Println(a.Gateway.Status())
+			return nil
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use: "provision", Short: "Copy scripts and run first-boot on gateway",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			a, err := app.New(*cfgPath)
+			if err != nil {
+				return err
+			}
+			msg, err := a.Gateway.Provision()
+			if msg != "" {
+				fmt.Println(msg)
+			}
+			return err
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use: "export-ca", Short: "Copy mitm CA from gateway to host",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			a, err := app.New(*cfgPath)
+			if err != nil {
+				return err
+			}
+			path, err := a.Gateway.ExportCA()
+			if err != nil {
+				return err
+			}
+			fmt.Println(path)
+			return nil
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use: "sync-logs", Short: "Pull PCAPs and proxy logs from gateway",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			a, err := app.New(*cfgPath)
+			if err != nil {
+				return err
+			}
+			msg, err := a.Gateway.SyncLogs()
+			if msg != "" {
+				fmt.Println(msg)
+			}
+			return err
 		},
 	})
 	return cmd

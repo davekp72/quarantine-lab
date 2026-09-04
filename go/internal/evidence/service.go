@@ -524,8 +524,6 @@ func (s *Service) DeployGuestScripts() error {
 	scripts := []string{
 		"Get-QuarantineGuestUsnDelta.ps1",
 		"Get-QuarantineGuestSysmonEvents.ps1",
-		"Export-QuarantineGuestPayloadRegistryCli.ps1",
-		"Export-QuarantineGuestHklmRegistryCli.ps1",
 		"Export-QuarantineGuestChangedFiles.ps1",
 		"Get-QuarantineGuestServiceInstallEvents.ps1",
 		"Set-QuarantineGuestUsnBaseline.ps1",
@@ -567,12 +565,12 @@ func (s *Service) ensurePayloadSidecar(snap string) error {
 		}
 	}
 	payload := map[string]any{
-		"engine":     "cli",
+		"engine":     "hive",
 		"capturedAt": capturedAt,
 		"snapshot":   snap,
 		"entryCount": 0,
 		"registry":   []any{},
-		"warnings":   []string{"HKCU not captured — empty payload registry synthesized at publish time"},
+		"warnings":   []string{"Registry compare uses hive-index dumps; empty payload sidecar synthesized at publish time"},
 	}
 	raw, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
@@ -608,8 +606,6 @@ func (s *Service) RemoveSnapshotArtifacts(snapshotName string) []string {
 		s.Cfg.SidecarPath(snapshotName, "-changed-files.json"),
 		s.Cfg.SidecarPath(snapshotName, "-registry-index.jsonl.gz"),
 		s.Cfg.SidecarPath(snapshotName, "-registry-meta.json"),
-		filepath.Join(logDir, safe+"-regshot.hivu"),
-		filepath.Join(logDir, safe+"-regshot-compare.txt"),
 	}
 	for _, path := range files {
 		if err := os.Remove(path); err == nil {

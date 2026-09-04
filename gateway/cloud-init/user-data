@@ -1,0 +1,30 @@
+#cloud-config
+hostname: quarantine-gateway
+manage_etc_hosts: true
+users:
+  - name: quarantine
+    groups: [sudo]
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: false
+    plain_text_passwd: quarantine
+ssh_pwauth: true
+package_update: true
+packages:
+  - nftables
+  - dnsmasq
+  - tcpdump
+  - python3
+  - python3-pip
+  - python3-venv
+  - curl
+  - openssl
+runcmd:
+  - mkdir -p /opt/quarantine-gateway-src
+  - |
+    if [ -d /mnt/quarantine-gateway ]; then
+      cp -a /mnt/quarantine-gateway/. /opt/quarantine-gateway-src/
+      chmod +x /opt/quarantine-gateway-src/first-boot.sh
+      /opt/quarantine-gateway-src/first-boot.sh
+    fi
+final_message: "Quarantine Gateway cloud-init finished"

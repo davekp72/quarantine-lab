@@ -46,3 +46,15 @@ export function ListLogFilesWails() {
 export function TailLogFileWails(path, maxLines) {
   return window.go.app.App.TailLogFileWails(path, maxLines);
 }
+export function CaptureStatusWails() {
+  return window.go.app.App.CaptureStatusWails();
+}
+export function StartCaptureWails() {
+  return window.go.app.App.StartCaptureWails();
+}
+export function StopCaptureWails() {
+  return window.go.app.App.StopCaptureWails();
+}
+export function GatewayStatusWails() {
+  return window.go.app.App.GatewayStatusWails();
+}

@@ -2,7 +2,7 @@
 
 PowerShell utility to create and manage an **isolated VirtualBox Windows guest** for opening suspicious email, malware samples, and other quarantine work.
 
-> **Go rewrite:** A Go + Wails implementation lives in [`go/`](go/README.md). Launch with `.\quarantine-go.ps1` (builds `go/quarantine.exe` on first run). Same config and sidecar layout; Wails UI replaces static `session.html` for dynamic diff browsing and on-demand snapshot disk reads.
+> **Entry point:** `.\quarantine-vm.ps1` (Go CLI/UI when available; PowerShell for setup-only commands).
 
 The VM is configured with conservative defaults: host→guest clipboard (one-way paste), no drag-drop, USB disabled, recording off, and **internal networking (`intnet`)** so the guest has no host or internet access unless you change that.
 
@@ -48,10 +48,12 @@ The VM is configured with conservative defaults: host→guest clipboard (one-way
 | `snapshots` | List snapshots (`live` = resume session, `disk` = cold boot) |
 | `reset` | Restore and start; live snapshots skip POST/login. `-Clean` / `-SnapshotName` |
 | `status` | Show VM name and power state |
-| `network quarantine` | Internet-only via host mitmproxy (NAT + logging) |
+| `network quarantine` | Internet-only via host mitmproxy (NAT + logging) — legacy |
+| `network gateway` | Internet via Linux gateway VM (routing + transparent MITM + capture) |
 | `network offline` | Fully isolated (`intnet`) |
-| `proxy start\|stop\|status` | Manage mitmproxy on the host |
-| `capture start\|stop` | Manage tshark PCAP capture on the host |
+| `gateway create\|start\|provision\|status` | Linux quarantine gateway appliance |
+| `proxy start\|stop\|status\|export-ca` | Host mitmproxy (legacy) or export CA (gateway-aware) |
+| `capture start\|stop` | PCAP via gateway tcpdump or guest-nic |
 
 ## Snapshots (manual only)
 
@@ -167,24 +169,63 @@ Default: **intnet** (offline) — guest NIC on an isolated internal network (no 
 | Mode / command | Behavior |
 |----------------|----------|
 | `network offline` / `intnet` | No internet, no LAN (recommended for offline analysis) |
-| `network quarantine` | NAT + host mitmproxy — internet only, RFC1918 blocked, HTTP(S) logged |
+| `network gateway` | Lab guest → Linux gateway VM (routing + DNS + transparent TLS MITM + LAN PCAP) |
+| `network quarantine` | Legacy: NAT + host mitmproxy — internet only, RFC1918 blocked, HTTP(S) logged |
 | `hostonly` | Host ↔ guest only (requires VirtualBox host networking driver) |
 | `none` | No NIC |
 | `nat` | Raw internet (use only during Windows setup) |
 
-### Quarantine networking (internet-only + logging)
+### Quarantine gateway (recommended internet path)
 
-Use when you need the guest to reach the **public internet** but **not** your LAN or host services.
+Lab guest sits on intnet `quarantine-net` with a static address (`10.66.0.15`). The **Quarantine-Gateway** Linux VM is the default router/DNS (`10.66.0.1`), runs nftables forwarding, transparent mitmproxy for TCP/80+443, and tcpdump on the LAN.
 
-**Architecture:** guest → `10.0.2.2:8080` (mitmproxy on host) → internet. DNS via VirtualBox NAT (`10.0.2.3`). Enforcement is two-layer: guest Windows Firewall (only proxy + DNS outbound) and mitmproxy ACL (blocks RFC1918 even if guest rules are bypassed).
+```
+Lab guest 10.66.0.15 ──intnet──► Gateway 10.66.0.1 ──NAT──► Internet
+                                 ├ dnsmasq (DNS)
+                                 ├ mitmproxy transparent (:8082) + PAC/explicit (:8080)
+                                 └ tcpdump → host logs/pcap after capture stop
+```
+
+**One-time host setup:**
+
+```powershell
+.\quarantine-vm.ps1 gateway create
+# Attach Ubuntu Server ISO, install (OpenSSH + Guest Additions), then:
+.\quarantine-vm.ps1 gateway provision
+.\quarantine-vm.ps1 gateway export-ca   # or: proxy export-ca
+```
+
+See `gateway/README.md` for appliance details.
+
+**One-time guest setup** (Admin, then baseline):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Configure-QuarantineGuestNetwork.ps1 -Mode gateway
+# On host:
+.\quarantine-vm.ps1 stop
+.\quarantine-vm.ps1 baseline
+```
+
+**Enable for a session:**
+
+```powershell
+.\quarantine-vm.ps1 network gateway
+.\quarantine-vm.ps1 start
+.\quarantine-vm.ps1 capture start
+# ... analyze ...
+.\quarantine-vm.ps1 capture stop   # pulls PCAPs + mitm logs to D:\Vbox\LabVM\logs\
+```
+
+### Legacy quarantine networking (host mitmproxy)
+
+Use when you need the guest to reach the **public internet** but **not** your LAN or host services, without a gateway VM.
+
+**Architecture:** guest → `10.0.2.2:8080` (mitmproxy on host) → internet. DNS via VirtualBox NAT (`10.0.2.3`). Packet capture default is **guest-nic** (VirtualBox NIC trace).
 
 **Host prerequisites:**
 
 ```powershell
 .\Setup-Dependencies.ps1       # creates .venv and installs mitmproxy from requirements.txt
-# Optional PCAP capture:
-# Install Wireshark (includes Npcap + tshark): https://www.wireshark.org/download.html
-.\Setup-Dependencies.ps1       # verifies tools and creates log dirs
 ```
 
 **One-time guest setup** (run inside VM as Administrator, then baseline on host):
@@ -219,7 +260,7 @@ powershell -ExecutionPolicy Bypass -File \\path\to\network\guest\Configure-Quara
 | `D:\Vbox\LabVM\logs\proxy\{session}\flows.mitm` | mitmproxy flow dump (replayable) |
 | `D:\Vbox\LabVM\logs\proxy\{session}\access.log` | URL / method / timestamp |
 | `D:\Vbox\LabVM\logs\proxy\{session}\errors.log` | Blocked private-IP attempts |
-| `D:\Vbox\LabVM\logs\pcap\quarantine-*.pcap` | Wireshark capture (NAT guest traffic) |
+| `D:\Vbox\LabVM\logs\pcap\quarantine-*.pcap` | Wireshark/VirtualBox NIC trace (includes guest DNS UDP/53) |
 
 Review flows: `.venv\Scripts\mitmproxy.exe -r D:\Vbox\LabVM\logs\proxy\{session}\flows.mitm`  
 Review PCAPs: open in Wireshark.

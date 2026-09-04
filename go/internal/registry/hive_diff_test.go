@@ -3,7 +3,9 @@ package registry
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestDiffIndexesMergeJoin(t *testing.T) {
@@ -43,6 +45,57 @@ func TestDiffIndexesMergeJoin(t *testing.T) {
 	}
 	if d.Modified[0].V0 != "before" || d.Modified[0].V1 != "after" {
 		t.Fatalf("before/after=%v/%v", d.Modified[0].V0, d.Modified[0].V1)
+	}
+}
+
+func TestWriteIndexJSONEscapes(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "idx.jsonl.gz")
+	// Non-ASCII / control bytes must not become Go \xNN escapes (invalid JSON).
+	recs := []IndexRecord{
+		{K: "HKLM:\\SOFTWARE\\\x01weird", N: "näme", T: "REG_SZ", H: "1", Size: 1},
+	}
+	if err := WriteIndexSorted(path, recs); err != nil {
+		t.Fatal(err)
+	}
+	r, err := OpenIndex(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if !r.Next() {
+		t.Fatal(r.Err())
+	}
+	got := r.Record()
+	if got.K != recs[0].K || got.N != recs[0].N {
+		t.Fatalf("got=%+v", got)
+	}
+}
+
+func TestWriteIndexCompactRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "idx.jsonl.gz")
+	recs := []IndexRecord{
+		{K: `HKLM:\SOFTWARE\A`, N: "X", T: "REG_SZ", H: "abc", Size: 4},
+		{K: `HKU:\.DEFAULT\System\SUS`, N: "SUS", T: "REG_SZ", H: "def", Size: 3, V: "SUS"},
+	}
+	if err := WriteIndexSorted(path, recs); err != nil {
+		t.Fatal(err)
+	}
+	r, err := OpenIndex(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	var got []IndexRecord
+	for r.Next() {
+		got = append(got, r.Record())
+	}
+	if r.Err() != nil {
+		t.Fatal(r.Err())
+	}
+	if len(got) != 2 || got[0].K != recs[0].K || got[1].V != "SUS" || got[0].H != "abc" {
+		t.Fatalf("got=%+v", got)
 	}
 }
 
@@ -105,6 +158,85 @@ func TestBuildIndexFromLocalHivesParallel(t *testing.T) {
 	}
 	if n != meta.EntryCount {
 		t.Fatalf("read %d meta %d", n, meta.EntryCount)
+	}
+}
+
+func TestBuildIndexCleanSessionTiming(t *testing.T) {
+	dir := `D:\Vbox\LabVM\logs\manifests\CleanSession-hives`
+	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
+		t.Skip("no CleanSession-hives dir")
+	}
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	known := map[string]string{
+		"SOFTWARE": `HKLM:\SOFTWARE`,
+		"SYSTEM":   `HKLM:\SYSTEM`,
+		"DEFAULT":  `HKU:\.DEFAULT`,
+		"SAM":      `HKLM:\SAM`,
+		"SECURITY": `HKLM:\SECURITY`,
+	}
+	var files []LocalHiveFile
+	for _, e := range ents {
+		if e.IsDir() || e.Name() == "manifest.json" {
+			continue
+		}
+		prefix := known[e.Name()]
+		if prefix == "" && strings.HasPrefix(e.Name(), "NTUSER_") {
+			prefix = `HKU:\` + strings.TrimPrefix(e.Name(), "NTUSER_")
+		}
+		if prefix == "" {
+			continue
+		}
+		files = append(files, LocalHiveFile{
+			LocalPath: filepath.Join(dir, e.Name()),
+			GuestPath: e.Name(),
+			Prefix:    prefix,
+		})
+	}
+	if len(files) == 0 {
+		t.Skip("no hive files")
+	}
+	out := t.TempDir()
+	start := time.Now()
+	meta, err := BuildIndexFromLocalHives("CleanSession", filepath.Join(out, "idx.jsonl.gz"), filepath.Join(out, "meta.json"), files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("full index: %d entries from %d hives in %s", meta.EntryCount, len(files), time.Since(start).Round(time.Millisecond))
+	if meta.EntryCount < 10000 {
+		t.Fatalf("expected large index, got %d", meta.EntryCount)
+	}
+}
+
+func TestWalkHiveSOFTWARETiming(t *testing.T) {
+	candidates := []string{
+		`D:\Vbox\LabVM\logs\manifests\CleanSession-hives\SOFTWARE`,
+		os.Getenv("QUARANTINE_SOFTWARE_HIVE"),
+	}
+	var hive string
+	for _, c := range candidates {
+		if c == "" {
+			continue
+		}
+		if st, err := os.Stat(c); err == nil && !st.IsDir() {
+			hive = c
+			break
+		}
+	}
+	if hive == "" {
+		t.Skip("no SOFTWARE hive on disk")
+	}
+	start := time.Now()
+	var records []IndexRecord
+	n, err := WalkHiveFile(hive, `HKLM:\SOFTWARE`, &records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("SOFTWARE walk: %d entries in %s (%s)", n, time.Since(start).Round(time.Millisecond), hive)
+	if n < 1000 {
+		t.Fatalf("expected a large SOFTWARE hive, got %d", n)
 	}
 }
 

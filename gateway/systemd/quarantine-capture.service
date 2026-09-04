@@ -1,0 +1,15 @@
+[Unit]
+Description=Quarantine gateway packet capture (tcpdump LAN)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/quarantine-gateway/ifaces.env
+ExecStart=/usr/local/sbin/quarantine-capture-start
+ExecStop=/usr/local/sbin/quarantine-capture-stop
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

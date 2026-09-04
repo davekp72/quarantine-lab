@@ -5,9 +5,6 @@
 #>
 Set-StrictMode -Version Latest
 
-if (-not (Get-Command ConvertFrom-RegshotCompareLog -ErrorAction SilentlyContinue)) {
-    . (Join-Path $PSScriptRoot 'ConvertFrom-RegshotCompareLog.ps1')
-}
 if (-not (Get-Command Get-QuarantineNetworkEvidence -ErrorAction SilentlyContinue)) {
     . (Join-Path $PSScriptRoot 'Get-QuarantineNetworkEvidence.ps1')
 }
@@ -466,18 +463,8 @@ function Get-QuarantineManifestCompareWarnings {
 
     $fromHku = if ($Left.PSObject.Properties['userRegistryCount']) { [int]$Left.userRegistryCount } else { @($Left.registry | Where-Object { $_.k -match '^HKU:\\' }).Count }
     $toHku = if ($Right.PSObject.Properties['userRegistryCount']) { [int]$Right.userRegistryCount } else { @($Right.registry | Where-Object { $_.k -match '^HKU:\\' }).Count }
-    $regshotEngine = ($Right.PSObject.Properties['registryEngine'] -and [string]$Right.registryEngine -eq 'regshot') -or
-        ($Right.PSObject.Properties['regshot'] -and $Right.regshot)
-    $cliEngine = ($Left.PSObject.Properties['registryEngine'] -and [string]$Left.registryEngine -eq 'cli') -or
-        ($Right.PSObject.Properties['registryEngine'] -and [string]$Right.registryEngine -eq 'cli')
-    if (-not $regshotEngine -and -not $cliEngine -and ($fromHku -eq 0 -or $toHku -eq 0)) {
-        [void]$warnings.Add("HKU (local user) registry missing from one or both manifests (From: $fromHku entries, To: $toHku entries). User registry changes will not appear until live snapshot mark or NTUSER.DAT offline load succeeds.")
-    }
-    if ($cliEngine -and ($fromHku -eq 0 -or $toHku -eq 0)) {
-        [void]$warnings.Add('Payload registry sidecar missing for one or both snapshots. Live snapshot/preserve marks reg.exe export automatically; re-run manifest mark if needed.')
-    }
-    if ($regshotEngine -and (-not $Right.regshot -or -not $Right.regshot.compareLog)) {
-        [void]$warnings.Add('Regshot registry compare missing on To manifest. Run reset -Clean, regshot copy, then manifest view -Refresh.')
+    if ($fromHku -eq 0 -or $toHku -eq 0) {
+        [void]$warnings.Add("HKU (local user) registry missing from one or both manifests (From: $fromHku entries, To: $toHku entries). User registry changes come from host hive-index dumps (agent reg save), not guest reg.exe.")
     }
 
     foreach ($side in @(@{ Label = 'From'; Manifest = $Left }, @{ Label = 'To'; Manifest = $Right })) {
@@ -579,81 +566,56 @@ function Get-QuarantineManifestDiff {
     $addedReg = @()
     $removedReg = @()
     $modifiedReg = @()
-    $registryDiffSource = 'legacy'
+    $registryDiffSource = 'hive'
 
-    $useRegshot = $false
-    if ($right.PSObject.Properties['registryEngine'] -and [string]$right.registryEngine -eq 'regshot') {
-        $useRegshot = $true
-    } elseif ($right.PSObject.Properties['regshot'] -and $right.regshot) {
-        $useRegshot = $true
+    foreach ($k in ($rightReg.Keys | Where-Object { -not $leftReg.ContainsKey($_) } | Sort-Object)) {
+        $r = $rightReg[$k]
+        $addedReg += [pscustomobject]@{
+            key   = [string]$r.k
+            name  = [string]$r.n
+            type  = [string]$r.t
+            value = [string]$r.v
+        }
     }
-
-    if ($useRegshot -and $right.regshot) {
-        $registryDiffSource = 'regshot'
-        $addedReg = @($right.regshot.added)
-        $removedReg = @($right.regshot.removed)
-        $modifiedReg = @($right.regshot.modified)
-        if (@($addedReg).Count -eq 0 -and @($removedReg).Count -eq 0 -and @($modifiedReg).Count -eq 0) {
-            $logPath = if ($right.regshot.PSObject.Properties['compareLog']) { [string]$right.regshot.compareLog } else { '' }
-            if ($logPath -and (Test-Path -LiteralPath $logPath)) {
-                $parsed = ConvertFrom-RegshotCompareLog -Path $logPath
-                $addedReg = @($parsed.added)
-                $removedReg = @($parsed.removed)
-                $modifiedReg = @($parsed.modified)
-            }
+    foreach ($k in ($leftReg.Keys | Where-Object { -not $rightReg.ContainsKey($_) } | Sort-Object)) {
+        $r = $leftReg[$k]
+        $removedReg += [pscustomobject]@{
+            key   = [string]$r.k
+            name  = [string]$r.n
+            type  = [string]$r.t
+            value = [string]$r.v
         }
-    } else {
-        foreach ($k in ($rightReg.Keys | Where-Object { -not $leftReg.ContainsKey($_) } | Sort-Object)) {
-            $r = $rightReg[$k]
-            $addedReg += [pscustomobject]@{
-                key   = [string]$r.k
-                name  = [string]$r.n
-                type  = [string]$r.t
-                value = [string]$r.v
-            }
-        }
-        foreach ($k in ($leftReg.Keys | Where-Object { -not $rightReg.ContainsKey($_) } | Sort-Object)) {
-            $r = $leftReg[$k]
-            $removedReg += [pscustomobject]@{
-                key   = [string]$r.k
-                name  = [string]$r.n
-                type  = [string]$r.t
-                value = [string]$r.v
-            }
-        }
-        foreach ($k in $leftReg.Keys) {
-            if (-not $rightReg.ContainsKey($k)) { continue }
-            if ($leftReg[$k].h -ne $rightReg[$k].h) {
-                $modifiedReg += [pscustomobject]@{
-                    key      = [string]$leftReg[$k].k
-                    name     = [string]$leftReg[$k].n
-                    fromValue = [string]$leftReg[$k].v
-                    toValue   = [string]$rightReg[$k].v
-                }
+    }
+    foreach ($k in $leftReg.Keys) {
+        if (-not $rightReg.ContainsKey($k)) { continue }
+        if ($leftReg[$k].h -ne $rightReg[$k].h) {
+            $modifiedReg += [pscustomobject]@{
+                key      = [string]$leftReg[$k].k
+                name     = [string]$leftReg[$k].n
+                fromValue = [string]$leftReg[$k].v
+                toValue   = [string]$rightReg[$k].v
             }
         }
     }
 
     $registryVolatileFiltered = 0
-    if (-not $useRegshot) {
-        $filteredAdded = New-Object System.Collections.Generic.List[object]
-        foreach ($item in @($addedReg)) {
-            if (Test-QuarantineVolatileRegistryEntry -Entry $item) { $registryVolatileFiltered++ } else { $filteredAdded.Add($item) | Out-Null }
-        }
-        $addedReg = $filteredAdded.ToArray()
-
-        $filteredRemoved = New-Object System.Collections.Generic.List[object]
-        foreach ($item in @($removedReg)) {
-            if (Test-QuarantineVolatileRegistryEntry -Entry $item) { $registryVolatileFiltered++ } else { $filteredRemoved.Add($item) | Out-Null }
-        }
-        $removedReg = $filteredRemoved.ToArray()
-
-        $filteredModified = New-Object System.Collections.Generic.List[object]
-        foreach ($item in @($modifiedReg)) {
-            if (Test-QuarantineVolatileRegistryEntry -Entry $item) { $registryVolatileFiltered++ } else { $filteredModified.Add($item) | Out-Null }
-        }
-        $modifiedReg = $filteredModified.ToArray()
+    $filteredAdded = New-Object System.Collections.Generic.List[object]
+    foreach ($item in @($addedReg)) {
+        if (Test-QuarantineVolatileRegistryEntry -Entry $item) { $registryVolatileFiltered++ } else { $filteredAdded.Add($item) | Out-Null }
     }
+    $addedReg = $filteredAdded.ToArray()
+
+    $filteredRemoved = New-Object System.Collections.Generic.List[object]
+    foreach ($item in @($removedReg)) {
+        if (Test-QuarantineVolatileRegistryEntry -Entry $item) { $registryVolatileFiltered++ } else { $filteredRemoved.Add($item) | Out-Null }
+    }
+    $removedReg = $filteredRemoved.ToArray()
+
+    $filteredModified = New-Object System.Collections.Generic.List[object]
+    foreach ($item in @($modifiedReg)) {
+        if (Test-QuarantineVolatileRegistryEntry -Entry $item) { $registryVolatileFiltered++ } else { $filteredModified.Add($item) | Out-Null }
+    }
+    $modifiedReg = $filteredModified.ToArray()
 
     $leftTasks = @{}
     foreach ($t in @($left.tasks)) {
