@@ -9,7 +9,7 @@
   Modes:
     host-nat (default) — VirtualBox NAT + host mitmproxy at 10.0.2.2
     gateway            — Linux gateway on intnet (static 10.66.0.15, GW/DNS 10.66.0.1).
-                         With dual-NIC (intnet + NAT for agent), keeps default route on LAN.
+                         Host reaches the guest agent via the gateway (no extra NAT NIC).
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File .\Configure-QuarantineGuestNetwork.ps1
@@ -82,32 +82,13 @@ Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet
 $upAdapters = @(Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | Sort-Object ifIndex)
 if ($upAdapters.Count -eq 0) {
     Write-Warning 'No active network adapter found; configure IP/DNS manually.'
-} elseif ($Mode -eq 'gateway' -and $GuestIP -and $GatewayIP) {
-    # Dual-NIC layout from host: NIC1=intnet (sample traffic), NIC2=NAT (agent port-forward only).
-    # Prefer the non-VBox-NAT adapter for the quarantine LAN; demote NAT so it never wins the default route.
-    function Test-IsVBoxNatAdapter {
-        param([int]$IfIndex)
-        $addrs = @(Get-NetIPAddress -InterfaceIndex $IfIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+	} elseif ($Mode -eq 'gateway' -and $GuestIP -and $GatewayIP) {
+    $lan = $upAdapters | Where-Object {
+        $ips = @(Get-NetIPAddress -InterfaceIndex $_.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
             Select-Object -ExpandProperty IPAddress)
-        foreach ($ip in $addrs) {
-            if ($ip -like '10.0.2.*') { return $true }
-        }
-        return $false
-    }
-
-    $lan = $null
-    $nat = $null
-    foreach ($a in $upAdapters) {
-        if (Test-IsVBoxNatAdapter -IfIndex $a.ifIndex) {
-            if (-not $nat) { $nat = $a }
-        } else {
-            if (-not $lan) { $lan = $a }
-        }
-    }
+        ($ips | Where-Object { $_ -eq $GuestIP -or $_ -like '10.66.*' })
+    } | Select-Object -First 1
     if (-not $lan) { $lan = $upAdapters[0] }
-    if (-not $nat -and $upAdapters.Count -gt 1) {
-        $nat = $upAdapters | Where-Object { $_.ifIndex -ne $lan.ifIndex } | Select-Object -First 1
-    }
 
     Get-NetIPAddress -InterfaceIndex $lan.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
         Where-Object { $_.IPAddress -ne $GuestIP } |
@@ -120,11 +101,11 @@ if ($upAdapters.Count -eq 0) {
     Set-DnsClientServerAddress -InterfaceIndex $lan.ifIndex -ServerAddresses $DnsServer
     Write-Host "  LAN (intnet): static $GuestIP/$PrefixLength gw $GatewayIP metric 10 on $($lan.Name)"
 
-    if ($nat) {
-        Remove-NetRoute -InterfaceIndex $nat.ifIndex -DestinationPrefix '0.0.0.0/0' -Confirm:$false -ErrorAction SilentlyContinue
-        Set-NetIPInterface -InterfaceIndex $nat.ifIndex -InterfaceMetric 5000 -ErrorAction SilentlyContinue
-        Set-DnsClientServerAddress -InterfaceIndex $nat.ifIndex -ResetServerAddresses -ErrorAction SilentlyContinue
-        Write-Host "  NAT (agent PF): metric 5000, no default route on $($nat.Name)"
+    foreach ($extra in $upAdapters) {
+        if ($extra.ifIndex -eq $lan.ifIndex) { continue }
+        Remove-NetRoute -InterfaceIndex $extra.ifIndex -DestinationPrefix '0.0.0.0/0' -Confirm:$false -ErrorAction SilentlyContinue
+        Set-NetIPInterface -InterfaceIndex $extra.ifIndex -InterfaceMetric 5000 -ErrorAction SilentlyContinue
+        Write-Host "  Extra adapter $($extra.Name): metric 5000, no default route (unused in gateway mode)"
     }
 } else {
     $adapter = $upAdapters[0]
@@ -139,7 +120,9 @@ $ruleNames = @(
     'Quarantine Allow PAC',
     'Quarantine Allow DNS',
     'Quarantine Allow DNS TCP',
+    'Quarantine Allow DHCP',
     'Quarantine Allow Gateway Any',
+    'Quarantine Allow Agent In',
     'Quarantine Allow HTTP',
     'Quarantine Allow HTTPS'
 )
@@ -156,6 +139,9 @@ New-NetFirewallRule -DisplayName 'Quarantine Allow DNS' -Name 'Quarantine-Allow-
     -Direction Outbound -Action Allow -Protocol UDP -RemoteAddress $DnsServer -RemotePort 53 | Out-Null
 New-NetFirewallRule -DisplayName 'Quarantine Allow DNS TCP' -Name 'Quarantine-Allow-DNS-TCP' -Group $groupName `
     -Direction Outbound -Action Allow -Protocol TCP -RemoteAddress $DnsServer -RemotePort 53 | Out-Null
+# DHCP (needed if NAT ever falls back to DHCP instead of static 10.0.2.15)
+New-NetFirewallRule -DisplayName 'Quarantine Allow DHCP' -Name 'Quarantine-Allow-DHCP' -Group $groupName `
+    -Direction Outbound -Action Allow -Protocol UDP -RemotePort 67,68 | Out-Null
 
 if ($Mode -eq 'gateway') {
     # Transparent MITM: allow HTTP/HTTPS to internet via gateway (nftables REDIRECT on gateway).
@@ -165,6 +151,8 @@ if ($Mode -eq 'gateway') {
         -Direction Outbound -Action Allow -Protocol TCP -RemotePort 443 | Out-Null
     New-NetFirewallRule -DisplayName 'Quarantine Allow Gateway Any' -Name 'Quarantine-Allow-Gateway-Any' -Group $groupName `
         -Direction Outbound -Action Allow -Protocol Any -RemoteAddress $GatewayIP | Out-Null
+    New-NetFirewallRule -DisplayName 'Quarantine Allow Agent In' -Name 'Quarantine-Allow-Agent-In' -Group $groupName `
+        -Direction Inbound -Action Allow -Protocol TCP -LocalPort 9443 -RemoteAddress $GatewayIP | Out-Null
 }
 
 Set-NetFirewallProfile -Profile Domain, Public, Private -DefaultOutboundAction Block -ErrorAction SilentlyContinue
@@ -199,6 +187,10 @@ Test from guest:
   - Internet HTTP(S) should work (transparent MITM in gateway mode, or PAC in host-nat)
   - ping 192.168.x.x should fail (blocked on gateway/host policy)
 "@
+if ($Mode -eq 'gateway') {
+    Restart-Service -Name QuarantineLabAgent -ErrorAction SilentlyContinue
+    Write-Host '  Restarted QuarantineLabAgent (if installed).'
+}
 if (-not $caInstalled) {
     Write-Host '  If browsers show SSL errors, run Install-QuarantineProxyCA.ps1 as Admin.'
 }

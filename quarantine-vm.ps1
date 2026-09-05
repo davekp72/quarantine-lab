@@ -244,9 +244,35 @@ function Test-QuarantineBinaryStale {
 
 function Invoke-QuarantineNativeCommand {
     param([Parameter(Mandatory)][string[]]$Command)
-    & $Command[0] @($Command[1..($Command.Count - 1)]) 2>&1 | ForEach-Object { Write-Host $_ }
-    if ($LASTEXITCODE -ne 0) {
-        throw "Command failed ($LASTEXITCODE): $($Command -join ' ')"
+    $exe = $Command[0]
+    $argList = @()
+    if ($Command.Count -gt 1) {
+        $argList = $Command[1..($Command.Count - 1)]
+    }
+    # Resolve bare tool names (wails often lives in GOPATH\bin, which may be missing from PATH).
+    if ($exe -notmatch '[\\/]' -and -not (Get-Command $exe -ErrorAction SilentlyContinue)) {
+        $resolved = $null
+        if ($exe -eq 'wails') {
+            $goBin = ''
+            try { $goBin = ((& go env GOPATH) | Select-Object -First 1).Trim() } catch { $goBin = '' }
+            if ($goBin) {
+                $candidate = Join-Path $goBin "bin\wails.exe"
+                if (Test-Path -LiteralPath $candidate) { $resolved = $candidate }
+            }
+            if (-not $resolved) {
+                $fallback = Join-Path $env:USERPROFILE 'go\bin\wails.exe'
+                if (Test-Path -LiteralPath $fallback) { $resolved = $fallback }
+            }
+        }
+        if ($resolved) {
+            $exe = $resolved
+        } else {
+            throw "Command not found: $($Command[0]). For Wails UI builds, install with: go install github.com/wailsapp/wails/v2/cmd/wails@latest"
+        }
+    }
+    & $exe @argList 2>&1 | ForEach-Object { Write-Host $_ }
+    if ($null -eq $LASTEXITCODE -or $LASTEXITCODE -ne 0) {
+        throw "Command failed ($LASTEXITCODE): $exe $($argList -join ' ')"
     }
 }
 

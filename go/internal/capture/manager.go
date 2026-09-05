@@ -10,15 +10,19 @@ import (
 	"time"
 
 	"github.com/quarantine-lab/quarantine/internal/config"
+	"github.com/quarantine-lab/quarantine/internal/gateway"
 	"github.com/quarantine-lab/quarantine/internal/vbox"
 )
 
 // GatewayCapture controls tcpdump on the Linux gateway VM.
 type GatewayCapture interface {
 	StartCapture() (string, error)
-	StopCapture() (string, error)
+	StopCapture(pcapGuestPath string) (gateway.PullResult, error)
 	Status() string
 }
+
+// PullResult is host-side paths produced by stopping a capture session.
+type PullResult = gateway.PullResult
 
 // Manager runs host packet capture (VirtualBox NIC trace, gateway tcpdump, or legacy tshark).
 type Manager struct {
@@ -216,7 +220,7 @@ func (m *Manager) Start() (string, error) {
 		} else if !same {
 			fmt.Printf("Stopping previous capture (mode=%s) before starting %s...\n", st.Mode, mode)
 			if st.Mode == "gateway" && m.Gateway != nil {
-				_, _ = m.Gateway.StopCapture()
+				_, _ = m.Gateway.StopCapture(st.PcapPath)
 			} else if st.Mode == "guest-nic" || st.Mode == "vbox-nictrace" {
 				if m.VBox != nil {
 					_, _ = m.VBox.RunWithTimeout(time.Minute, "controlvm", m.Cfg.VMName, "nictrace1", "off")
@@ -305,35 +309,54 @@ func (m *Manager) Start() (string, error) {
 
 // Stop stops capture.
 func (m *Manager) Stop() error {
+	_, err := m.StopWithResult()
+	return err
+}
+
+// StopWithResult stops capture and returns host paths for the PCAP/proxy artifacts.
+func (m *Manager) StopWithResult() (PullResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	st := m.readState()
 	if st.Mode == "gateway" || m.mode() == "gateway" {
-		var syncMsg string
+		// Skip expensive gateway sync when there is no session (e.g. preserve with capture already off).
+		if st.PcapPath == "" && st.StartedAt == "" {
+			fmt.Println("No capture session found.")
+			m.clearState()
+			return PullResult{}, nil
+		}
+		var pull PullResult
 		if m.Gateway != nil {
-			msg, err := m.Gateway.StopCapture()
-			syncMsg = msg
+			res, err := m.Gateway.StopCapture(st.PcapPath)
+			pull = res
 			if err != nil {
 				fmt.Printf("Gateway capture stop warning: %v\n", err)
 			}
 		}
-		if st.PcapPath != "" {
+		if pull.PcapPath != "" {
+			fmt.Printf("PCAP (gateway): %s\n", pull.PcapPath)
+		} else if st.PcapPath != "" {
 			fmt.Printf("PCAP (gateway): %s\n", st.PcapPath)
 		}
-		if syncMsg != "" {
-			fmt.Println(syncMsg)
+		if pull.Message != "" {
+			fmt.Println(pull.Message)
 		}
 		m.clearState()
-		return nil
+		return pull, nil
 	}
 
-	active := m.nicTraceActive(true)
-	if st.PcapPath == "" && st.PID == 0 && !active {
-		fmt.Println("No capture session found.")
-		return nil
+	guestNic := st.Mode == "guest-nic" || st.Mode == "vbox-nictrace" || st.Mode == ""
+	// Avoid showvminfo when state already says guest-nic is on — that call was a common delay.
+	active := false
+	if st.PcapPath == "" && st.PID == 0 {
+		active = m.nicTraceActive(true)
+		if !active {
+			fmt.Println("No capture session found.")
+			return PullResult{}, nil
+		}
 	}
-	if st.Mode == "guest-nic" || st.Mode == "vbox-nictrace" || st.Mode == "" || active {
+	if guestNic || active {
 		if m.VBox != nil {
 			_, _ = m.VBox.RunWithTimeout(time.Minute, "controlvm", m.Cfg.VMName, "nictrace1", "off")
 		}
@@ -342,15 +365,17 @@ func (m *Manager) Stop() error {
 			_ = p.Kill()
 		}
 	}
+	pull := PullResult{PcapPath: st.PcapPath, Message: "Capture stopped."}
 	if st.PcapPath != "" {
 		fmt.Printf("PCAP saved: %s\n", st.PcapPath)
+		pull.Message = "PCAP saved: " + st.PcapPath
 	} else {
 		fmt.Println("Capture stopped.")
 	}
 	m.nicCheckedAt = time.Now()
 	m.nicCachedOn = false
 	m.clearState()
-	return nil
+	return pull, nil
 }
 
 // Status returns a short human-readable state (verifies VBox nictrace).

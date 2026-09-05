@@ -76,7 +76,12 @@ func (c *Client) get(ctx context.Context, path string, out any) error {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
-	resp, err := c.HTTP.Do(req)
+	client := c.HTTP
+	if _, hasDeadline := ctx.Deadline(); hasDeadline && client != nil {
+		// Honour short UI/status deadlines instead of the capture-oriented client timeout.
+		client = &http.Client{Timeout: 0, Transport: client.Transport}
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("agent request: %w", err)
 	}

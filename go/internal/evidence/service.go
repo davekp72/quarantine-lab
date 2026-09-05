@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -586,6 +587,101 @@ func (s *Service) DiffOutputPath(fromSnap, toSnap string) string {
 	return filepath.Join(s.Cfg.ManifestLogDir(), fmt.Sprintf("diff-%s-vs-%s.diff.json", from, to))
 }
 
+// NetworkArtifactsDir returns the snapshot-scoped network evidence folder.
+func (s *Service) NetworkArtifactsDir(snapshotName string) string {
+	return s.Cfg.SidecarPath(snapshotName, "-network")
+}
+
+// AttachNetworkArtifacts moves host PCAP/proxy files into {Safe}-network/ for a preserve snapshot.
+// Source files/dirs are removed after a successful move so flat logs/ do not keep orphans.
+func (s *Service) AttachNetworkArtifacts(snapshotName, pcapPath, proxyDir string) (string, error) {
+	if strings.TrimSpace(snapshotName) == "" {
+		return "", fmt.Errorf("snapshot name required")
+	}
+	pcapPath = strings.TrimSpace(pcapPath)
+	proxyDir = strings.TrimSpace(proxyDir)
+	if pcapPath == "" && proxyDir == "" {
+		return "", nil
+	}
+
+	dest := s.NetworkArtifactsDir(snapshotName)
+	_ = os.RemoveAll(dest)
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		return "", err
+	}
+
+	meta := map[string]any{
+		"snapshot":  snapshotName,
+		"attachedAt": time.Now().UTC().Format(time.RFC3339),
+	}
+
+	if pcapPath != "" {
+		if st, err := os.Stat(pcapPath); err == nil && !st.IsDir() {
+			destPcap := filepath.Join(dest, "capture.pcap")
+			if err := moveFile(pcapPath, destPcap); err != nil {
+				return dest, fmt.Errorf("attach pcap: %w", err)
+			}
+			meta["pcap"] = "capture.pcap"
+			meta["pcapBytes"] = st.Size()
+			meta["pcapSource"] = filepath.Base(pcapPath)
+		}
+	}
+
+	if proxyDir != "" {
+		if st, err := os.Stat(proxyDir); err == nil && st.IsDir() {
+			copied := 0
+			for _, name := range []string{"access.log", "errors.log", "access-transparent.log"} {
+				src := filepath.Join(proxyDir, name)
+				if _, err := os.Stat(src); err != nil {
+					continue
+				}
+				if err := moveFile(src, filepath.Join(dest, name)); err != nil {
+					return dest, fmt.Errorf("attach %s: %w", name, err)
+				}
+				copied++
+			}
+			meta["proxyFiles"] = copied
+			meta["proxySource"] = filepath.Base(proxyDir)
+			_ = os.RemoveAll(proxyDir)
+		}
+	}
+
+	raw, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return dest, err
+	}
+	if err := os.WriteFile(filepath.Join(dest, "meta.json"), raw, 0o644); err != nil {
+		return dest, err
+	}
+	return dest, nil
+}
+
+func moveFile(src, dst string) error {
+	if err := os.Rename(src, dst); err == nil {
+		return nil
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(out, in)
+	closeErr := out.Close()
+	if copyErr != nil {
+		_ = os.Remove(dst)
+		return copyErr
+	}
+	if closeErr != nil {
+		_ = os.Remove(dst)
+		return closeErr
+	}
+	return os.Remove(src)
+}
+
 // RemoveSnapshotArtifacts deletes host-side manifest JSON, sidecars, and related diff files.
 func (s *Service) RemoveSnapshotArtifacts(snapshotName string) []string {
 	logDir := s.Cfg.ManifestLogDir()
@@ -617,6 +713,7 @@ func (s *Service) RemoveSnapshotArtifacts(snapshotName string) []string {
 		s.Cfg.SidecarPath(snapshotName, "-payload-registry"),
 		s.Cfg.SidecarPath(snapshotName, "-hklm-registry"),
 		s.Cfg.SidecarPath(snapshotName, "-hives"),
+		s.Cfg.SidecarPath(snapshotName, "-network"),
 	}
 	for _, dir := range dirs {
 		if err := os.RemoveAll(dir); err == nil {

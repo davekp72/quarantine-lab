@@ -245,6 +245,11 @@ function Remove-QuarantineSnapshotManifestArtifacts {
         (Get-QuarantineVMPayloadRegistryRegHostDir -ConfigPath $ConfigPath -SnapshotName $SnapshotName),
         (Get-QuarantineVMHklmRegistryRegHostDir -ConfigPath $ConfigPath -SnapshotName $SnapshotName)
     )
+    # Hive dump + network (PCAP/proxy) sidecars live beside manifests.
+    $dirs += @(
+        (Join-Path $logDir "$safe-hives"),
+        (Join-Path $logDir "$safe-network")
+    )
     foreach ($dir in $dirs) {
         if ($dir -and (Test-Path -LiteralPath $dir)) {
             Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue

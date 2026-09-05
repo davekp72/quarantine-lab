@@ -423,6 +423,15 @@ func (s *Service) AgentHealth(ctx context.Context) (*types.HealthResponse, error
 	return h, err
 }
 
+// AgentHealthQuick is for UI/status polls: short path, no guest token sync.
+func (s *Service) AgentHealthQuick(ctx context.Context) (*types.HealthResponse, error) {
+	client, err := s.agentClient()
+	if err != nil {
+		return nil, err
+	}
+	return client.Health(ctx)
+}
+
 func randomAgentToken() string {
 	b := make([]byte, 32)
 	_, _ = rand.Read(b)

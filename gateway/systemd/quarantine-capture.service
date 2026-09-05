@@ -7,7 +7,12 @@ Wants=network-online.target
 Type=simple
 EnvironmentFile=-/etc/quarantine-gateway/ifaces.env
 ExecStart=/usr/local/sbin/quarantine-capture-start
+# ExecStop must not call systemctl stop (deadlock). Script only signals tcpdump.
 ExecStop=/usr/local/sbin/quarantine-capture-stop
+TimeoutStopSec=5
+KillMode=mixed
+KillSignal=SIGTERM
+FinalKillSignal=SIGKILL
 Restart=on-failure
 RestartSec=2
 

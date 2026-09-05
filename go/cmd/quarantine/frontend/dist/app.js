@@ -355,6 +355,7 @@ async function launchSnapshot() {
     const result = await api.LaunchSnapshotWails(name, false);
     msg.textContent = result || `Launched: ${name}`;
     await refreshStatus();
+    await refreshCaptureStatus();
   } catch (e) {
     msg.textContent = String(e);
   } finally {
@@ -411,12 +412,13 @@ async function preserveEvidence() {
   const msg = $('#snap-action-msg');
   const btn = $('#btn-preserve');
   setBusy(btn, true, 'Preserving…');
-  msg.textContent = 'Preserving evidence… (live capture may take several minutes)';
+  msg.textContent = 'Preserving evidence… (stops capture, then snapshot)';
   try {
     const name = await api.PreserveEvidenceWails('');
     msg.textContent = `Evidence: ${name}`;
     await loadSnapshots($('#from-snap').value, name);
     await refreshStatus();
+    await refreshCaptureStatus();
   } catch (e) {
     msg.textContent = String(e);
   } finally {
@@ -1137,10 +1139,22 @@ EventsOn('applog', (entry) => {
 });
 
 (async () => {
-  await refreshStatus();
-  await refreshGatewayStatus();
-  await refreshCaptureStatus();
-  await loadSnapshots();
+  // Load panels independently so one slow/hung call cannot leave the whole UI on "Loading…".
+  const results = await Promise.allSettled([
+    refreshStatus(),
+    refreshGatewayStatus(),
+    refreshCaptureStatus(),
+    loadSnapshots(),
+  ]);
+  const failed = results.filter((r) => r.status === 'rejected');
+  if (failed.length) {
+    const msg = failed.map((r) => String(r.reason)).join('; ');
+    const el = $('#snap-action-msg');
+    if (el) el.textContent = msg;
+    if ($('#vm-status')?.textContent === 'Loading...') {
+      $('#vm-status').textContent = 'Status error — see activity log';
+    }
+  }
   renderOverview();
   setInterval(() => {
     refreshCaptureStatus().catch(() => {});
@@ -1148,4 +1162,7 @@ EventsOn('applog', (entry) => {
   }, 10000);
 })().catch((e) => {
   $('#snap-action-msg').textContent = String(e);
+  if ($('#vm-status')?.textContent === 'Loading...') {
+    $('#vm-status').textContent = 'Failed to load';
+  }
 });

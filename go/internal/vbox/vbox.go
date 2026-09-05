@@ -451,6 +451,23 @@ func (c *Client) NatPFDeleteOn(vmName string, nic int, ruleName string) error {
 	return ignoreNatPFMissing(err)
 }
 
+// GuestPropertyGet reads a VirtualBox guest property value.
+func (c *Client) GuestPropertyGet(vmName, key string) (string, error) {
+	out, err := c.RunWithTimeout(30*time.Second, "guestproperty", "get", vmName, key)
+	if err != nil {
+		return "", err
+	}
+	line := strings.TrimSpace(out)
+	if strings.HasPrefix(strings.ToLower(line), "no value") {
+		return "", fmt.Errorf("guest property not set: %s", key)
+	}
+	const prefix = "Value:"
+	if i := strings.Index(line, prefix); i >= 0 {
+		return strings.TrimSpace(line[i+len(prefix):]), nil
+	}
+	return line, nil
+}
+
 func vmSessionActive(state string) bool {
 	switch state {
 	case "running", "paused", "starting", "stopping":

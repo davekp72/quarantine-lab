@@ -195,7 +195,7 @@ func preserveCmd(cfgPath *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			name, err := a.VM.Preserve(context.Background(), label)
+			name, err := a.PreserveEvidenceWails(label)
 			if err != nil {
 				return err
 			}
@@ -684,7 +684,7 @@ func agentCmd(cfgPath *string) *cobra.Command {
 	cmd.AddCommand(setTok)
 	cmd.AddCommand(&cobra.Command{
 		Use:   "health",
-		Short: "Query agent /health via NAT port forward",
+		Short: "Query agent /health (NAT, or Linux gateway in gateway mode)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			a, err := app.New(*cfgPath)
 			if err != nil {

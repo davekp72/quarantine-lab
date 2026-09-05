@@ -30,11 +30,15 @@ func New(cfg *config.Config, vb *vbox.Client) *Service {
 	return &Service{Cfg: cfg, VBox: vb}
 }
 
-// EnsureAgentPortForward adds NAT rule host:port -> guest:port for quarantine-agent.
-// Uses the first NIC that is configured as NAT (nic1 in quarantine mode, nic2 in gateway mode).
+// EnsureAgentPortForward makes the host agent port reach the guest.
+// Quarantine/NAT mode: VirtualBox NAT PF on the lab VM.
+// Gateway mode: VirtualBox NAT PF on the Linux gateway, then nftables DNAT to the lab LAN IP.
 func (s *Service) EnsureAgentPortForward() error {
 	if !s.Cfg.Agent.Enabled {
 		return nil
+	}
+	if strings.EqualFold(strings.TrimSpace(s.Cfg.Network.Mode), "gateway") {
+		return s.ensureGatewayAgentPortForward()
 	}
 	port := s.Cfg.Agent.Port
 	if port <= 0 {
@@ -47,10 +51,36 @@ func (s *Service) EnsureAgentPortForward() error {
 	nic := s.natNicSlot()
 	rule := fmt.Sprintf("%s,tcp,,%d,,%d", name, port, port)
 
-	// Remove stale rule on both common slots (ignore if missing).
 	_ = s.VBox.NatPFDeleteOn(s.Cfg.VMName, 1, name)
 	_ = s.VBox.NatPFDeleteOn(s.Cfg.VMName, 2, name)
 	return s.VBox.NatPFAddOn(s.Cfg.VMName, nic, rule)
+}
+
+func (s *Service) ensureGatewayAgentPortForward() error {
+	port := s.Cfg.Agent.Port
+	if port <= 0 {
+		port = 9443
+	}
+	name := s.Cfg.Agent.NatRuleName
+	if name == "" {
+		name = "quarantine-agent"
+	}
+	g := s.Cfg.Network.Gateway.WithDefaults(s.Cfg.Network.IntnetName)
+	rule := fmt.Sprintf("%s,tcp,,%d,,%d", name, port, port)
+
+	// Lab VM must not hold host:9443 — that was the dual-NIC dead end.
+	_ = s.VBox.NatPFDeleteOn(s.Cfg.VMName, 1, name)
+	_ = s.VBox.NatPFDeleteOn(s.Cfg.VMName, 2, name)
+	_ = s.VBox.NatPFDeleteOn(g.VMName, 1, name)
+	if err := s.VBox.NatPFAddOn(g.VMName, 1, rule); err != nil {
+		return fmt.Errorf("gateway NAT port forward: %w", err)
+	}
+	if af, ok := s.Gateway.(interface{ ApplyAgentLANForward() error }); ok {
+		if err := af.ApplyAgentLANForward(); err != nil {
+			return fmt.Errorf("gateway LAN DNAT: %w", err)
+		}
+	}
+	return nil
 }
 
 // RemoveAgentPortForward deletes the agent NAT rule.
@@ -125,7 +155,7 @@ func (s *Service) SetMode(mode string) error {
 			s.Cfg.Network.Capture.Mode = "gateway"
 		}
 		if err := s.EnsureAgentPortForward(); err != nil {
-			return fmt.Errorf("agent NAT port forward (nic2): %w", err)
+			return fmt.Errorf("agent via gateway: %w", err)
 		}
 		if err := s.persistNetworkMode("gateway"); err != nil {
 			return fmt.Errorf("persist network mode: %w", err)

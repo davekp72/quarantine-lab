@@ -587,7 +587,10 @@ func (a *App) GetVMStatusWails() (map[string]string, error) {
 	}
 	if a.Cfg.Agent.Enabled {
 		m["agentEnabled"] = "true"
-		if health, err := a.Evidence.AgentHealth(ctx); err == nil {
+		// Short timeout — never block the UI on a hung NAT/agent socket.
+		healthCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if health, err := a.Evidence.AgentHealthQuick(healthCtx); err == nil {
 			m["agentVersion"] = health.Version
 			m["agentPayloadSession"] = fmt.Sprintf("%v", health.PayloadSession)
 			m["agentSysmon"] = fmt.Sprintf("%v", health.SysmonAvailable)
@@ -597,6 +600,9 @@ func (a *App) GetVMStatusWails() (map[string]string, error) {
 		} else {
 			m["agentStatus"] = "unreachable"
 			m["agentError"] = err.Error()
+			if hint := a.agentNatHint(); hint != "" {
+				m["agentError"] = err.Error() + " — " + hint
+			}
 		}
 	}
 	m["networkMode"] = a.Cfg.Network.Mode
@@ -604,6 +610,14 @@ func (a *App) GetVMStatusWails() (map[string]string, error) {
 		m["gateway"] = "on"
 	}
 	return m, nil
+}
+
+// agentNatHint explains common dual-NIC gateway failures (APIPA on NAT blocks port-forward).
+func (a *App) agentNatHint() string {
+	if a.VM == nil || !a.Cfg.IsGatewayMode() {
+		return ""
+	}
+	return "host should reach the agent via the Linux gateway (127.0.0.1:9443 → gateway NAT → 10.66.0.15:9443)"
 }
 
 // InstallAgentWails deploys agent files to the guest and prints elevated install steps.
@@ -658,14 +672,15 @@ func (a *App) SyncAgentTokenWails() (string, error) {
 	return "Token synced", nil
 }
 
-// AgentHealthWails returns agent /health JSON for the UI.
+// AgentHealthWails returns agent /health JSON for the UI/CLI.
 func (a *App) AgentHealthWails() (map[string]any, error) {
-	ctx := a.WailsCtx
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	h, err := a.Evidence.AgentHealth(ctx)
+	healthCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	h, err := a.Evidence.AgentHealthQuick(healthCtx)
 	if err != nil {
+		if hint := a.agentNatHint(); hint != "" {
+			return nil, fmt.Errorf("%w — %s", err, hint)
+		}
 		return nil, err
 	}
 	raw, err := json.Marshal(h)
@@ -810,6 +825,58 @@ func (a *App) TakeSnapshotWails(name, description string, force bool) error {
 	return nil
 }
 
+// stopCaptureIfRunning finalizes PCAP/proxy logs when a capture session is active.
+// Errors are logged but not returned — preserve/launch should not fail on capture.
+func (a *App) stopCaptureIfRunning(reason string) {
+	a.stopCaptureAndAttach("", reason)
+}
+
+// stopCaptureAndAttach stops capture; when snapshotName is set, moves PCAP/proxy into {snap}-network/.
+func (a *App) stopCaptureAndAttach(snapshotName, reason string) {
+	if a.Capture == nil || !a.Cfg.Network.Capture.Enabled {
+		return
+	}
+	info := a.Capture.Info()
+	if !info.Running {
+		return
+	}
+	a.logInfo(fmt.Sprintf("Stopping packet capture (%s)…", reason))
+	pull, err := a.Capture.StopWithResult()
+	if err != nil {
+		a.logInfo("Packet capture stop warning: " + err.Error())
+		return
+	}
+	a.logInfo("Packet capture stopped")
+	if snapshotName == "" || a.Evidence == nil {
+		return
+	}
+	if pull.PcapPath == "" && pull.ProxyDir == "" {
+		return
+	}
+	dest, err := a.Evidence.AttachNetworkArtifacts(snapshotName, pull.PcapPath, pull.ProxyDir)
+	if err != nil {
+		a.logInfo("Attach network artifacts warning: " + err.Error())
+		return
+	}
+	if dest != "" {
+		a.logInfo("Network evidence attached: " + dest)
+	}
+}
+
+// startCaptureAfterLaunch starts capture when enabled (best-effort; does not fail launch).
+func (a *App) startCaptureAfterLaunch() {
+	if a.Capture == nil || !a.Cfg.Network.Capture.Enabled {
+		return
+	}
+	a.logInfo("Starting packet capture…")
+	path, err := a.Capture.Start()
+	if err != nil {
+		a.logInfo("Packet capture not started: " + err.Error())
+		return
+	}
+	a.logInfo("Packet capture started: " + path)
+}
+
 // PreserveEvidenceWails captures sidecars then saves an Evidence-* snapshot.
 func (a *App) PreserveEvidenceWails(label string) (string, error) {
 	ctx := a.WailsCtx
@@ -827,6 +894,7 @@ func (a *App) PreserveEvidenceWails(label string) (string, error) {
 	if capErr := a.captureLiveManifest(name, false); capErr != nil {
 		return "", capErr
 	}
+	a.stopCaptureAndAttach(name, "preserve")
 	a.logInfo(fmt.Sprintf("Taking snapshot %q…", name))
 	if err := a.VM.SaveSnapshot(ctx, name, "Evidence preserve", false, true); err != nil {
 		a.logError(err.Error())
@@ -870,6 +938,7 @@ func (a *App) LaunchSnapshotWails(name string, clean bool) (string, error) {
 		a.logError(err.Error())
 		return "", err
 	}
+	a.startCaptureAfterLaunch()
 	launched := name
 	if clean {
 		launched = a.Cfg.CleanSnapshot
@@ -999,28 +1068,26 @@ func (a *App) StopCaptureWails() (map[string]any, error) {
 }
 
 // GatewayStatusWails returns Linux gateway VM status for the UI sidebar.
+// Uses VirtualBox state only — never guestcontrol (that can block the VBox lock for minutes).
 func (a *App) GatewayStatusWails() (map[string]any, error) {
 	mode := a.Cfg.Network.Mode
 	g := a.Cfg.Network.Gateway.WithDefaults(a.Cfg.Network.IntnetName)
 	out := map[string]any{
-		"enabled":     a.Cfg.IsGatewayMode() || g.Enabled,
-		"mode":        mode,
-		"vmName":      g.VMName,
-		"lanGateway":  g.LANGateway,
-		"guestIp":     g.GuestIP,
-		"intnetName":  g.IntnetName,
-		"status":      "unavailable",
+		"enabled":    a.Cfg.IsGatewayMode() || g.Enabled,
+		"mode":       mode,
+		"vmName":     g.VMName,
+		"lanGateway": g.LANGateway,
+		"guestIp":    g.GuestIP,
+		"intnetName": g.IntnetName,
+		"status":     "unavailable",
 	}
-	if a.Gateway == nil {
-		return out, nil
-	}
-	st := a.Gateway.Status()
-	out["status"] = st
 	state, err := a.VM.VBox.VMState(g.VMName)
 	if err != nil {
 		out["vmState"] = "missing"
-	} else {
-		out["vmState"] = state
+		out["status"] = fmt.Sprintf("%s missing", g.VMName)
+		return out, nil
 	}
+	out["vmState"] = state
+	out["status"] = fmt.Sprintf("%s state=%s lan=%s", g.VMName, state, g.LANGateway)
 	return out, nil
 }

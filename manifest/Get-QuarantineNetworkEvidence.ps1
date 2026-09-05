@@ -361,6 +361,20 @@ function Get-QuarantineNetworkEvidence {
         }
     }
 
+    $manifestLogDir = if ($cfg.manifest -and $cfg.manifest.logDir) {
+        [string]$cfg.manifest.logDir
+    } else { '' }
+    if ($manifestLogDir -and (Test-Path -LiteralPath $manifestLogDir)) {
+        Get-ChildItem -LiteralPath $manifestLogDir -Directory -Filter '*-network' -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                $access = Join-Path $_.FullName 'access.log'
+                if (Test-Path -LiteralPath $access) {
+                    $proxyLogs += $access
+                    $requests += Read-QuarantineProxyAccessLog -Path $access -From $From -To $To
+                }
+            }
+    }
+
     $tshark = Find-QuarantineTsharkCommand
     if ($pcapLogDir -and (Test-Path -LiteralPath $pcapLogDir) -and $tshark) {
         $pcapFiles = @(Get-ChildItem -LiteralPath $pcapLogDir -File -ErrorAction SilentlyContinue |
@@ -369,6 +383,17 @@ function Get-QuarantineNetworkEvidence {
             $pcaps += $file.FullName
             $dns += Get-QuarantinePcapDnsQueries -PcapPath $file.FullName -From $From -To $To -TsharkPath $tshark
         }
+    }
+    if ($manifestLogDir -and (Test-Path -LiteralPath $manifestLogDir) -and $tshark) {
+        Get-ChildItem -LiteralPath $manifestLogDir -Directory -Filter '*-network' -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                Get-ChildItem -LiteralPath $_.FullName -File -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Extension -in @('.pcap', '.pcapng') } |
+                    ForEach-Object {
+                        $pcaps += $_.FullName
+                        $dns += Get-QuarantinePcapDnsQueries -PcapPath $_.FullName -From $From -To $To -TsharkPath $tshark
+                    }
+            }
     }
 
     $sortedDns = @($dns | Sort-Object { $_.t }, { $_.query })

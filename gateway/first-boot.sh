@@ -8,6 +8,8 @@ OPT=/opt/quarantine-gateway
 LOG=/var/log/quarantine
 LAN_CIDR="${QUARANTINE_LAN_CIDR:-10.66.0.0/24}"
 LAN_IP="${QUARANTINE_LAN_GATEWAY:-10.66.0.1}"
+GUEST_IP="${QUARANTINE_GUEST_IP:-10.66.0.15}"
+AGENT_PORT="${QUARANTINE_AGENT_PORT:-9443}"
 LAN_IF="${QUARANTINE_LAN_IF:-}"
 WAN_IF="${QUARANTINE_WAN_IF:-}"
 
@@ -30,7 +32,11 @@ detect_ifaces() {
 }
 detect_ifaces
 
-echo "WAN=$WAN_IF LAN=$LAN_IF LAN_IP=$LAN_IP" | tee /etc/quarantine-gateway/ifaces.env
+echo "WAN=$WAN_IF" >/etc/quarantine-gateway/ifaces.env
+echo "LAN=$LAN_IF" >>/etc/quarantine-gateway/ifaces.env
+echo "LAN_IF=$LAN_IF" >>/etc/quarantine-gateway/ifaces.env
+echo "LAN_IP=$LAN_IP" >>/etc/quarantine-gateway/ifaces.env
+echo "WAN=$WAN_IF LAN=$LAN_IF LAN_IP=$LAN_IP"
 
 # WAN DNS via VirtualBox NAT (10.0.2.3) — do this before apt/pip
 fix_wan_dns() {
@@ -144,6 +150,7 @@ systemctl restart dnsmasq || true
 
 # nftables — substitute interface names
 sed -e "s/__WAN__/${WAN_IF}/g" -e "s/__LAN__/${LAN_IF}/g" -e "s|__LAN_CIDR__|${LAN_CIDR}|g" \
+  -e "s/__LAN_IP__/${LAN_IP}/g" -e "s/__GUEST_IP__/${GUEST_IP}/g" -e "s/__AGENT_PORT__/${AGENT_PORT}/g" \
   "$OPT/nftables.conf" >/etc/nftables.conf
 systemctl enable nftables
 systemctl restart nftables

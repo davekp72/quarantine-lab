@@ -966,4 +966,6 @@ Export-ModuleMember -Function @(
     'Enable-QuarantineVMNetwork',
     'Enable-QuarantineGatewayNetwork',
     'Export-QuarantineProxyCA',
-    'Find-Mitmproxy
+    'Find-MitmproxyCommand',
+    'Find-TsharkCommand'
+)

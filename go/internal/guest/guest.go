@@ -108,6 +108,7 @@ func (c *Client) DeployGatewaySetup(projectRoot string) (string, error) {
 	}
 	files := []string{
 		filepath.Join(projectRoot, "network", "guest", "Configure-QuarantineGuestNetwork.ps1"),
+		filepath.Join(projectRoot, "network", "guest", "Repair-QuarantineAgentNat.ps1"),
 		filepath.Join(projectRoot, "network", "guest", "Install-QuarantineProxyCA.ps1"),
 		filepath.Join(projectRoot, "network", "proxy", "mitmproxy-ca-cert.cer"),
 	}
@@ -122,6 +123,7 @@ func (c *Client) DeployGatewaySetup(projectRoot string) (string, error) {
 	return fmt.Sprintf(`Gateway setup files copied to %s
 
   Configure-QuarantineGuestNetwork.ps1
+  Repair-QuarantineAgentNat.ps1
   Install-QuarantineProxyCA.ps1
   mitmproxy-ca-cert.cer
 
@@ -129,10 +131,14 @@ In the guest (elevated PowerShell):
 
   powershell -ExecutionPolicy Bypass -File %s\Configure-QuarantineGuestNetwork.ps1 -Mode gateway
 
+If agent health fails (NAT stuck on 169.254.x.x / APIPA):
+
+  powershell -ExecutionPolicy Bypass -File %s\Repair-QuarantineAgentNat.ps1
+
 If SSL warnings remain:
 
   powershell -ExecutionPolicy Bypass -File %s\Install-QuarantineProxyCA.ps1 -ProxyHost 10.66.0.1 -ProxyPort 8080 -PacPort 8080 -CaPath %s\mitmproxy-ca-cert.cer
-`, dir, dir, dir, dir), nil
+`, dir, dir, dir, dir, dir), nil
 }
 
 // TestGuestSession verifies guest credentials work.
