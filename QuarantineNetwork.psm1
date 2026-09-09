@@ -854,6 +854,12 @@ function Enable-QuarantineGatewayNetwork {
         throw "Failed to set lab VM NIC to intnet '$intnet'.`n$modText"
     }
 
+    # Remove any leftover NAT/host-only NIC that would bypass the gateway.
+    for ($slot = 2; $slot -le 4; $slot++) {
+        $null = & $vbox modifyvm $vmName "--nic$slot" none 2>&1
+    }
+    Write-Host "  Lab NIC2+ disabled (gateway-only path)."
+
     # Persist guest addressing hints in config JSON
     if ($ConfigPath -and (Test-Path -LiteralPath $ConfigPath)) {
         $raw = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json

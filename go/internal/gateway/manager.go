@@ -92,7 +92,8 @@ func (m *Manager) Create() (string, error) {
 
 	sshPort := g.SSHHostPort
 	_ = m.VBox.NatPFDelete(name, "gateway-ssh")
-	if err := m.VBox.NatPFAdd(name, fmt.Sprintf("gateway-ssh,tcp,,%d,,22", sshPort)); err != nil {
+	// Bind to loopback only — empty host IP exposes SSH on all host interfaces.
+	if err := m.VBox.NatPFAdd(name, fmt.Sprintf("gateway-ssh,tcp,127.0.0.1,%d,,22", sshPort)); err != nil {
 		return "", fmt.Errorf("ssh natpf: %w", err)
 	}
 
@@ -379,27 +380,34 @@ func shellSingleQuote(s string) string {
 
 // AttachLabGuest sets the lab Windows VM for gateway mode:
 //   NIC1 = intnet (quarantine LAN / sample traffic via Linux gateway)
-// Agent reachability is host → gateway NAT PF → DNAT to guest:9443 (no lab NAT NIC).
+//   NIC2+ = none (no lab NAT bypass)
+// Agent reachability is host → gateway NAT PF → DNAT to guest:9443.
 func (m *Manager) AttachLabGuest() error {
 	g := m.gw()
 	vm := m.Cfg.VMName
 	info, _ := m.VBox.RunWithTimeout(time.Minute, "showvminfo", vm, "--machinereadable")
 	nic1OK := nicMachineValue(info, 1) == "intnet" && nicMachineField(info, "intnet1") == g.IntnetName
+	nic2Gone := nicMachineValue(info, 2) == "none" || nicMachineValue(info, 2) == ""
 	state := nicMachineField(info, "VMState")
 	running := strings.EqualFold(state, "running") || strings.EqualFold(state, "paused")
 
-	if running && nic1OK {
-		// Drop the old dual-NIC agent path without bouncing the session.
-		if nicMachineValue(info, 2) == "nat" {
-			_, _ = m.VBox.RunWithTimeout(30*time.Second, "controlvm", vm, "setlinkstate2", "off")
-		}
+	if running && nic1OK && nic2Gone {
 		m.Cfg.Network.Mode = "gateway"
 		m.Cfg.Network.GuestGateway = g.LANGateway
 		m.Cfg.Network.GuestDNS = g.LANGateway
 		return nil
 	}
 
-	if !nic1OK {
+	if running && nic1OK && !nic2Gone {
+		// Soft-disable leftover NIC without reboot when possible.
+		_, _ = m.VBox.RunWithTimeout(30*time.Second, "controlvm", vm, "setlinkstate2", "off")
+		m.Cfg.Network.Mode = "gateway"
+		m.Cfg.Network.GuestGateway = g.LANGateway
+		m.Cfg.Network.GuestDNS = g.LANGateway
+		return nil
+	}
+
+	if !nic1OK || !nic2Gone {
 		if running {
 			_, _ = m.VBox.RunWithTimeout(2*time.Minute, "controlvm", vm, "poweroff")
 			time.Sleep(2 * time.Second)
@@ -409,6 +417,8 @@ func (m *Manager) AttachLabGuest() error {
 			"--intnet1", g.IntnetName,
 			"--cableconnected1", "on",
 			"--nic2", "none",
+			"--nic3", "none",
+			"--nic4", "none",
 		); err != nil {
 			return err
 		}
@@ -505,12 +515,76 @@ func (m *Manager) EnsureCaptureScripts() error {
 	return err
 }
 
+// EnsureMitmFlowCapture pushes the mitm addon/export helpers so HTTPS bodies land in flows.jsonl.
+func (m *Manager) EnsureMitmFlowCapture() error {
+	addon := filepath.Join(m.scriptsHostDir(), "mitm", "block_private.py")
+	exportPy := filepath.Join(m.scriptsHostDir(), "mitm", "export-flows-jsonl.py")
+	expl := filepath.Join(m.scriptsHostDir(), "systemd", "quarantine-mitm-explicit.service")
+	trans := filepath.Join(m.scriptsHostDir(), "systemd", "quarantine-mitm-transparent.service")
+	for _, pair := range [][2]string{
+		{addon, "/tmp/quarantine-block_private.py"},
+		{exportPy, "/tmp/quarantine-export-flows-jsonl.py"},
+		{expl, "/tmp/quarantine-mitm-explicit.service"},
+		{trans, "/tmp/quarantine-mitm-transparent.service"},
+	} {
+		if _, err := os.Stat(pair[0]); err != nil {
+			continue
+		}
+		if err := m.linuxCopyFileTo(pair[0], pair[1]); err != nil {
+			return fmt.Errorf("upload %s: %w", filepath.Base(pair[0]), err)
+		}
+	}
+	script := `set -e
+mkdir -p /usr/local/lib/quarantine /etc/quarantine-gateway /var/log/quarantine/proxy
+if [ -f /tmp/quarantine-block_private.py ]; then
+  install -m 0644 /tmp/quarantine-block_private.py /etc/quarantine-gateway/block_private.py
+fi
+if [ -f /tmp/quarantine-export-flows-jsonl.py ]; then
+  install -m 0644 /tmp/quarantine-export-flows-jsonl.py /usr/local/lib/quarantine/export-flows-jsonl.py
+fi
+if [ -f /tmp/quarantine-mitm-explicit.service ]; then
+  install -m 0644 /tmp/quarantine-mitm-explicit.service /etc/systemd/system/quarantine-mitm-explicit.service
+fi
+if [ -f /tmp/quarantine-mitm-transparent.service ]; then
+  install -m 0644 /tmp/quarantine-mitm-transparent.service /etc/systemd/system/quarantine-mitm-transparent.service
+fi
+systemctl daemon-reload
+# Restart only if units exist — picks up new addon env (flows.jsonl).
+systemctl try-restart quarantine-mitm-explicit quarantine-mitm-transparent 2>/dev/null || true
+`
+	_, err := m.linuxRunWithTimeout(90*time.Second, "sudo", "bash", "-c", script)
+	return err
+}
+
+// SyncGuestClock sets the gateway wall clock from the host (UTC) so proxy/pcap
+// timestamps align with snapshot capturedAt used by network evidence enrichment.
+func (m *Manager) SyncGuestClock() error {
+	stamp := time.Now().UTC().Format("2006-01-02 15:04:05")
+	script := fmt.Sprintf(`set -e
+if command -v timedatectl >/dev/null 2>&1; then
+  timedatectl set-ntp false 2>/dev/null || true
+  timedatectl set-time '%s' 2>/dev/null || date -u -s '%s'
+else
+  date -u -s '%s'
+fi
+date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ
+`, stamp, stamp, stamp)
+	out, err := m.linuxRunWithTimeout(30*time.Second, "sudo", "bash", "-c", script)
+	if err != nil {
+		return fmt.Errorf("sync gateway clock: %w (%s)", err, strings.TrimSpace(out))
+	}
+	fmt.Printf("Gateway clock synced to host UTC (%s → %s)\n", stamp, strings.TrimSpace(out))
+	return nil
+}
+
 // StartCapture starts tcpdump on the gateway LAN.
 func (m *Manager) StartCapture() (string, error) {
 	if err := m.Start(); err != nil {
 		return "", err
 	}
 	_ = m.EnsureCaptureScripts()
+	_ = m.EnsureMitmFlowCapture()
+	_ = m.SyncGuestClock()
 	if _, err := m.linuxRunWithTimeout(30*time.Second, "sudo", "systemctl", "reset-failed", "quarantine-capture"); err != nil {
 		_ = err
 	}
@@ -610,7 +684,8 @@ func (m *Manager) StopCapture(pcapGuestPath string) (PullResult, error) {
 	}
 	if copied > 0 || proxyOK {
 		cleanup += "; rm -f /var/log/quarantine/pcap/*.pcap /var/run/quarantine-capture.path"
-		cleanup += "; truncate -s 0 /var/log/quarantine/proxy/access.log /var/log/quarantine/proxy/errors.log /var/log/quarantine/proxy/access-transparent.log 2>/dev/null"
+		cleanup += "; truncate -s 0 /var/log/quarantine/proxy/access.log /var/log/quarantine/proxy/errors.log /var/log/quarantine/proxy/access-transparent.log /var/log/quarantine/proxy/flows.jsonl /var/log/quarantine/proxy/flows-transparent.jsonl 2>/dev/null"
+		cleanup += "; truncate -s 0 /var/log/quarantine/proxy/flows.mitm /var/log/quarantine/proxy/flows-transparent.mitm 2>/dev/null"
 	}
 	cleanup += "; true"
 	_, _ = m.linuxRunWithTimeout(20*time.Second, "sudo", "bash", "-c", cleanup)

@@ -7,18 +7,17 @@
   Then shut down and run .\quarantine-vm.ps1 baseline on the host to freeze into Clean.
 
   Modes:
-    host-nat (default) — VirtualBox NAT + host mitmproxy at 10.0.2.2
-    gateway            — Linux gateway on intnet (static 10.66.0.15, GW/DNS 10.66.0.1).
-                         Host reaches the guest agent via the gateway (no extra NAT NIC).
+    gateway (default) — Linux gateway on intnet (static 10.66.0.15, GW/DNS 10.66.0.1).
+                         Host reaches the guest agent via the gateway (no lab NAT NIC).
+    host-nat          — legacy VirtualBox NAT + host mitmproxy at 10.0.2.2 (prefer gateway).
 
 .EXAMPLE
-  powershell -ExecutionPolicy Bypass -File .\Configure-QuarantineGuestNetwork.ps1
   powershell -ExecutionPolicy Bypass -File .\Configure-QuarantineGuestNetwork.ps1 -Mode gateway
 #>
 [CmdletBinding()]
 param(
     [ValidateSet('host-nat', 'gateway')]
-    [string]$Mode = 'host-nat',
+    [string]$Mode = 'gateway',
 
     [string]$ProxyHost = '',
     [int]$ProxyPort = 8080,
@@ -78,6 +77,39 @@ Set-ItemProperty -Path $policyPath -Name ProxySettingsPerUser -Value 0 -Type DWo
 Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings' -Name ProxyEnable -Value 1
 Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings' -Name ProxyServer -Value "${ProxyHost}:${ProxyPort}"
 Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings' -Name AutoConfigURL -Value $PacUrl
+Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings' -Name ProxyOverride -Value "${ProxyHost};<local>"
+
+# WinHTTP (many services ignore WinINET)
+& netsh.exe winhttp set proxy "proxy-server=${ProxyHost}:${ProxyPort}" "bypass-list=${ProxyHost};<local>" | Out-Null
+Write-Host '  WinHTTP proxy set'
+
+# Patch payload / other interactive user hives so standard users get PAC (not only Admin HKCU)
+$payloadUser = 'jkcooper'
+$configPayload = Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'config\quarantine-vm.json'
+if (Test-Path -LiteralPath $configPayload) {
+    try {
+        $cfgUser = (Get-Content -LiteralPath $configPayload -Raw | ConvertFrom-Json).payload.username
+        if ($cfgUser) { $payloadUser = [string]$cfgUser }
+    } catch { }
+}
+foreach ($hive in @(Get-ChildItem 'Registry::HKEY_USERS' -ErrorAction SilentlyContinue)) {
+    $sid = $hive.PSChildName
+    if ($sid -notmatch '^S-1-5-21-' -or $sid -match '_Classes$') { continue }
+    $profilePath = (Get-ItemProperty -LiteralPath "Registry::$($hive.Name)\Volatile Environment" -ErrorAction SilentlyContinue).USERPROFILE
+    if (-not $profilePath) {
+        $profilePath = (Get-ItemProperty -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid" -ErrorAction SilentlyContinue).ProfileImagePath
+    }
+    if (-not $profilePath) { continue }
+    $leaf = Split-Path -Leaf $profilePath
+    if ($leaf -notin @($payloadUser, $env:USERNAME)) { continue }
+    $inet = "Registry::$($hive.Name)\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+    if (-not (Test-Path -LiteralPath $inet)) { New-Item -Path $inet -Force | Out-Null }
+    Set-ItemProperty -Path $inet -Name ProxyEnable -Value 1 -Type DWord
+    Set-ItemProperty -Path $inet -Name ProxyServer -Value "${ProxyHost}:${ProxyPort}"
+    Set-ItemProperty -Path $inet -Name AutoConfigURL -Value $PacUrl
+    Set-ItemProperty -Path $inet -Name ProxyOverride -Value "${ProxyHost};<local>"
+    Write-Host "  WinINET proxy set for loaded user $leaf"
+}
 
 $upAdapters = @(Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | Sort-Object ifIndex)
 if ($upAdapters.Count -eq 0) {
@@ -124,7 +156,8 @@ $ruleNames = @(
     'Quarantine Allow Gateway Any',
     'Quarantine Allow Agent In',
     'Quarantine Allow HTTP',
-    'Quarantine Allow HTTPS'
+    'Quarantine Allow HTTPS',
+    'Quarantine Block Gateway SSH'
 )
 foreach ($ruleName in $ruleNames) {
     Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue |
@@ -149,8 +182,9 @@ if ($Mode -eq 'gateway') {
         -Direction Outbound -Action Allow -Protocol TCP -RemotePort 80 | Out-Null
     New-NetFirewallRule -DisplayName 'Quarantine Allow HTTPS' -Name 'Quarantine-Allow-HTTPS' -Group $groupName `
         -Direction Outbound -Action Allow -Protocol TCP -RemotePort 443 | Out-Null
-    New-NetFirewallRule -DisplayName 'Quarantine Allow Gateway Any' -Name 'Quarantine-Allow-Gateway-Any' -Group $groupName `
-        -Direction Outbound -Action Allow -Protocol Any -RemoteAddress $GatewayIP | Out-Null
+    # Do not allow unrestricted access to the gateway IP (that exposed sshd).
+    New-NetFirewallRule -DisplayName 'Quarantine Block Gateway SSH' -Name 'Quarantine-Block-Gateway-SSH' -Group $groupName `
+        -Direction Outbound -Action Block -Protocol TCP -RemoteAddress $GatewayIP -RemotePort 22 | Out-Null
     New-NetFirewallRule -DisplayName 'Quarantine Allow Agent In' -Name 'Quarantine-Allow-Agent-In' -Group $groupName `
         -Direction Inbound -Action Allow -Protocol TCP -LocalPort 9443 -RemoteAddress $GatewayIP | Out-Null
 }

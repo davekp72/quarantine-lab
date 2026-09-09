@@ -271,8 +271,11 @@ function Invoke-QuarantineNativeCommand {
         }
     }
     & $exe @argList 2>&1 | ForEach-Object { Write-Host $_ }
-    if ($null -eq $LASTEXITCODE -or $LASTEXITCODE -ne 0) {
-        throw "Command failed ($LASTEXITCODE): $exe $($argList -join ' ')"
+    # StrictMode: $LASTEXITCODE may be unset if the native exe never ran.
+    $exitCode = Get-Variable -Name LASTEXITCODE -ValueOnly -ErrorAction SilentlyContinue
+    if ($null -eq $exitCode) { $exitCode = 0 }
+    if ($exitCode -ne 0) {
+        throw "Command failed ($exitCode): $exe $($argList -join ' ')"
     }
 }
 
@@ -427,7 +430,9 @@ function Invoke-QuarantineGo {
         $exe = $script:CliExe
     }
     & (Get-Item -LiteralPath $exe).FullName --config $ConfigPath @GoArgs
-    exit $LASTEXITCODE
+    $exitCode = Get-Variable -Name LASTEXITCODE -ValueOnly -ErrorAction SilentlyContinue
+    if ($null -eq $exitCode) { $exitCode = 0 }
+    exit $exitCode
 }
 
 if (Test-QuarantinePreferGo -ActionName $Action -Sub $SubAction) {

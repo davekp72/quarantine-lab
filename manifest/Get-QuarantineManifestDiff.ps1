@@ -772,7 +772,10 @@ function Get-QuarantineManifestDiff {
     $networkTo = ConvertTo-QuarantineNetworkInstant -Text $toCapturedText
     if ($networkFrom -and $networkTo) {
         try {
-            $networkEvidence = Get-QuarantineNetworkEvidence -ConfigPath $ConfigPath -From $networkFrom -To $networkTo
+            $fromSnapName = Get-ManifestStringProperty -Manifest $left -Name 'snapshot'
+            $toSnapName = Get-ManifestStringProperty -Manifest $right -Name 'snapshot'
+            $networkEvidence = Get-QuarantineNetworkEvidence -ConfigPath $ConfigPath -From $networkFrom -To $networkTo `
+                -FromSnapshot $fromSnapName -ToSnapshot $toSnapName
             $dnsMerged = Merge-QuarantineSysmonDnsEvidence `
                 -DnsEntries @($networkEvidence.dns) `
                 -SysmonEvents @($addedSysmon) `

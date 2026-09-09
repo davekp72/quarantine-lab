@@ -565,8 +565,61 @@ tbody tr.selected {
 
 .display-cap-btn:hover { border-color: var(--accent); }
 
+.http-flow-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-height: 0;
+  height: 100%;
+}
+.http-flow-panes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.65rem;
+  flex: 1;
+  min-height: 280px;
+}
+.http-flow-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  overflow: hidden;
+}
+.http-flow-pane-head {
+  flex-shrink: 0;
+  padding: 0.45rem 0.7rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.http-flow-pane-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0.65rem 0.7rem;
+}
+.http-flow-pane-scroll .content-block {
+  max-height: none;
+  margin: 0 0 0.5rem;
+}
+.http-flow-pane-scroll .content-block:last-child { margin-bottom: 0; }
+.hl-code { color: var(--text); tab-size: 2; }
+.hl-code .tok-key { color: #0550ae; }
+.hl-code .tok-str { color: #0a3069; }
+.hl-code .tok-num { color: #953800; }
+.hl-code .tok-kw { color: #cf222e; }
+.hl-code .tok-punc { color: #656d76; }
+.hl-code .tok-comment { color: #6e7781; font-style: italic; }
+.hl-code .tok-tag { color: #116329; }
+.hl-code .tok-attr { color: #0550ae; }
+
 @media (max-width: 900px) {
   .content-grid { grid-template-columns: 1fr; }
+  .http-flow-panes { grid-template-columns: 1fr; }
   .registry-browser { grid-template-columns: 1fr; }
   .registry-tree-panel {
     border-right: none;

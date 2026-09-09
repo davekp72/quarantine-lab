@@ -28,8 +28,26 @@ if [ -n "$PCAP" ] && [ -f "$PCAP" ]; then
   cp -a "$PCAP" "/tmp/$BASE"
   chmod 644 "/tmp/$BASE"
 fi
-tar -C /var/log/quarantine/proxy -cf /tmp/qproxy-bundle.tar \
-  access.log errors.log access-transparent.log 2>/dev/null
+
+PROXY=/var/log/quarantine/proxy
+MITM_BIN=/opt/quarantine-gateway/venv/bin/python
+EXPORT=/usr/local/lib/quarantine/export-flows-jsonl.py
+# Prefer live JSONL; if empty, export from mitm hardcopy (already decrypted).
+if [[ ! -s "$PROXY/flows.jsonl" && -s "$PROXY/flows.mitm" && -x "$MITM_BIN" && -f "$EXPORT" ]]; then
+  "$MITM_BIN" "$EXPORT" "$PROXY/flows.mitm" "$PROXY/flows.jsonl" 2>/tmp/quarantine-export-flows.err || true
+fi
+if [[ ! -s "$PROXY/flows-transparent.jsonl" && -s "$PROXY/flows-transparent.mitm" && -x "$MITM_BIN" && -f "$EXPORT" ]]; then
+  "$MITM_BIN" "$EXPORT" "$PROXY/flows-transparent.mitm" "$PROXY/flows-transparent.jsonl" 2>>/tmp/quarantine-export-flows.err || true
+fi
+# Merge transparent into primary flows.jsonl for a single evidence artifact.
+if [[ -s "$PROXY/flows-transparent.jsonl" ]]; then
+  cat "$PROXY/flows-transparent.jsonl" >>"$PROXY/flows.jsonl" 2>/dev/null || true
+fi
+
+tar -C "$PROXY" -cf /tmp/qproxy-bundle.tar \
+  access.log errors.log access-transparent.log \
+  flows.jsonl flows.mitm flows-transparent.jsonl flows-transparent.mitm \
+  2>/dev/null
 chmod 644 /tmp/qproxy-bundle.tar 2>/dev/null
 printf '%s\n' "$BASE"
 exit 0

@@ -22,6 +22,13 @@ func EnrichNetwork(cfgPath, projectRoot string, result *Result, fromCaptured, to
 	cfgPath = absPath(cfgPath)
 	projectRoot = absPath(projectRoot)
 	scriptPath := filepath.Join(projectRoot, "manifest", "Get-QuarantineNetworkEvidence.ps1")
+	fromSnap, toSnap := "", ""
+	if result.Meta.FromSnapshot != "" {
+		fromSnap = result.Meta.FromSnapshot
+	}
+	if result.Meta.ToSnapshot != "" {
+		toSnap = result.Meta.ToSnapshot
+	}
 	if _, err := os.Stat(scriptPath); err != nil {
 		result.Network = &NetworkSection{
 			Available: false,
@@ -40,7 +47,7 @@ $ErrorActionPreference = 'Continue'
 $from = ConvertTo-QuarantineNetworkInstant '%s'
 $to = ConvertTo-QuarantineNetworkInstant '%s'
 if (-not $from -or -not $to) { Write-Error 'invalid capture window'; exit 2 }
-$ev = Get-QuarantineNetworkEvidence -ConfigPath '%s' -From $from -To $to
+$ev = Get-QuarantineNetworkEvidence -ConfigPath '%s' -From $from -To $to -FromSnapshot '%s' -ToSnapshot '%s'
 [pscustomobject]@{
   available = [bool]$ev.available
   message = [string]$ev.message
@@ -54,7 +61,9 @@ $ev = Get-QuarantineNetworkEvidence -ConfigPath '%s' -From $from -To $to
 `, escapePSPath(scriptPath),
 		escapePSPath(fromCaptured),
 		escapePSPath(toCaptured),
-		escapePSPath(cfgPath))
+		escapePSPath(cfgPath),
+		escapePSPath(fromSnap),
+		escapePSPath(toSnap))
 
 	out, err := exec.Command("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", psScript).CombinedOutput()
 	text := strings.TrimSpace(string(out))
@@ -148,13 +157,19 @@ func mergeSysmonDNS(result *Result, fromCaptured, toCaptured string, addedSysmon
 			continue
 		}
 		seen[key] = true
-		result.Network.DNS = append(result.Network.DNS, map[string]any{
+		answers := parseSysmonDNSAnswers(stringFromMap(ev, "queryResults"))
+		row := map[string]any{
 			"t":      timeText,
 			"query":  query,
 			"type":   "",
 			"source": "sysmon",
 			"image":  stringFromMap(ev, "image"),
-		})
+		}
+		if len(answers) > 0 {
+			row["answers"] = answers
+			row["type"] = "A"
+		}
+		result.Network.DNS = append(result.Network.DNS, row)
 		added++
 	}
 
@@ -192,6 +207,67 @@ func isSysmonDNS(ev map[string]any) bool {
 		kind = strings.TrimSpace(stringFromMap(ev, "type"))
 	}
 	return strings.EqualFold(kind, "DnsQuery")
+}
+
+func parseSysmonDNSAnswers(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || strings.EqualFold(raw, "-") {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	// Sysmon QueryResults looks like: "type:  5 A;93.184.216.34;type:  5 AAAA;2606:..."
+	for _, part := range strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ';' || r == ',' || r == '\n' || r == '\r'
+	}) {
+		p := strings.TrimSpace(part)
+		if p == "" || strings.HasPrefix(strings.ToLower(p), "type:") {
+			continue
+		}
+		// Drop "AAAA:" / "A:" prefixes if present.
+		if i := strings.LastIndex(p, ":"); i >= 0 && strings.ContainsAny(p[:i], "Aa") {
+			// Keep IPv6 (multiple colons); only strip simple "A:1.2.3.4" style.
+			if strings.Count(p, ":") == 1 {
+				p = strings.TrimSpace(p[i+1:])
+			}
+		}
+		if !looksLikeIP(p) {
+			continue
+		}
+		if seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	return out
+}
+
+func looksLikeIP(s string) bool {
+	if s == "" {
+		return false
+	}
+	// IPv4
+	if strings.Count(s, ".") == 3 {
+		ok := true
+		for _, p := range strings.Split(s, ".") {
+			if p == "" {
+				ok = false
+				break
+			}
+			for _, c := range p {
+				if c < '0' || c > '9' {
+					ok = false
+					break
+				}
+			}
+		}
+		if ok {
+			return true
+		}
+	}
+	// IPv6 (very loose)
+	return strings.Contains(s, ":") && !strings.ContainsAny(s, " /")
 }
 
 func stringFromMap(m map[string]any, key string) string {

@@ -72,7 +72,8 @@
         <button data-tab="registry" type="button">Registry</button>
         <button data-tab="sysmon" type="button">Sysmon</button>
         <button data-tab="usn" type="button">USN</button>
-        <button data-tab="network" type="button">Network</button>
+        <button data-tab="network" type="button">HTTP</button>
+        <button data-tab="dns" type="button">DNS</button>
       </nav>
       <main>
         <div id="panel-overview" class="panel active"></div>
@@ -101,6 +102,7 @@
         <div id="panel-sysmon" class="panel"></div>
         <div id="panel-usn" class="panel"></div>
         <div id="panel-network" class="panel"></div>
+        <div id="panel-dns" class="panel"></div>
       </main>
       <section id="log-drawer" class="log-drawer hidden" aria-label="Log window">
         <div class="log-toolbar">
@@ -120,6 +122,7 @@
     </div>
   </div>
   <script src="wailsjs/runtime/runtime.js"></script>
+  <script src="highlight.js"></script>
   <script type="module" src="app.js"></script>
 </body>
 </html>

@@ -630,15 +630,25 @@ func (s *Service) AttachNetworkArtifacts(snapshotName, pcapPath, proxyDir string
 	if proxyDir != "" {
 		if st, err := os.Stat(proxyDir); err == nil && st.IsDir() {
 			copied := 0
-			for _, name := range []string{"access.log", "errors.log", "access-transparent.log"} {
+			for _, name := range []string{
+				"access.log", "errors.log", "access-transparent.log",
+				"flows.jsonl", "flows.mitm",
+				"flows-transparent.jsonl", "flows-transparent.mitm",
+			} {
 				src := filepath.Join(proxyDir, name)
-				if _, err := os.Stat(src); err != nil {
+				if st, err := os.Stat(src); err != nil || st.IsDir() {
 					continue
 				}
 				if err := moveFile(src, filepath.Join(dest, name)); err != nil {
 					return dest, fmt.Errorf("attach %s: %w", name, err)
 				}
 				copied++
+				if name == "flows.jsonl" {
+					meta["flows"] = "flows.jsonl"
+				}
+				if name == "flows.mitm" {
+					meta["flowsMitm"] = "flows.mitm"
+				}
 			}
 			meta["proxyFiles"] = copied
 			meta["proxySource"] = filepath.Base(proxyDir)

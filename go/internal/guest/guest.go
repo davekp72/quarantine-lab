@@ -108,7 +108,7 @@ func (c *Client) DeployGatewaySetup(projectRoot string) (string, error) {
 	}
 	files := []string{
 		filepath.Join(projectRoot, "network", "guest", "Configure-QuarantineGuestNetwork.ps1"),
-		filepath.Join(projectRoot, "network", "guest", "Repair-QuarantineAgentNat.ps1"),
+		filepath.Join(projectRoot, "network", "guest", "Harden-QuarantineGuestNetwork.ps1"),
 		filepath.Join(projectRoot, "network", "guest", "Install-QuarantineProxyCA.ps1"),
 		filepath.Join(projectRoot, "network", "proxy", "mitmproxy-ca-cert.cer"),
 	}
@@ -123,7 +123,7 @@ func (c *Client) DeployGatewaySetup(projectRoot string) (string, error) {
 	return fmt.Sprintf(`Gateway setup files copied to %s
 
   Configure-QuarantineGuestNetwork.ps1
-  Repair-QuarantineAgentNat.ps1
+  Harden-QuarantineGuestNetwork.ps1
   Install-QuarantineProxyCA.ps1
   mitmproxy-ca-cert.cer
 
@@ -131,13 +131,15 @@ In the guest (elevated PowerShell):
 
   powershell -ExecutionPolicy Bypass -File %s\Configure-QuarantineGuestNetwork.ps1 -Mode gateway
 
-If agent health fails (NAT stuck on 169.254.x.x / APIPA):
+Or gap-fix only:
 
-  powershell -ExecutionPolicy Bypass -File %s\Repair-QuarantineAgentNat.ps1
+  powershell -ExecutionPolicy Bypass -File %s\Harden-QuarantineGuestNetwork.ps1 -Mode gateway
 
 If SSL warnings remain:
 
   powershell -ExecutionPolicy Bypass -File %s\Install-QuarantineProxyCA.ps1 -ProxyHost 10.66.0.1 -ProxyPort 8080 -PacPort 8080 -CaPath %s\mitmproxy-ca-cert.cer
+
+Host reaches the agent only via the Linux gateway: 127.0.0.1:9443 → gateway → lab 10.66.0.15:9443 (no lab NAT NIC).
 `, dir, dir, dir, dir, dir), nil
 }
 

@@ -653,19 +653,22 @@
 
     (diff.network?.dns || []).forEach((d, idx) => {
       const label = d.query || '(unknown)';
+      const answers = Array.isArray(d.answers) ? d.answers.filter(Boolean) : [];
+      const answerText = answers.length ? answers.join(', ') : '—';
       rows.push({
         id: `network:dns:${idx}:${d.t}:${label}`,
         category: 'network',
         networkKind: 'dns',
         kind: 'added',
         noise: isNetworkHostNoise(label) || isNoise(`${label} ${d.image || ''}`),
-        searchText: `${label} ${d.type || ''} ${d.source || ''} ${d.image || ''}`,
+        searchText: `${label} ${answerText} ${d.type || ''} ${d.source || ''} ${d.image || ''}`,
         label,
         networkDetail: d,
         selectable: true,
         cells: [
           badge('added', d.source || 'dns'),
           label,
+          answerText,
           d.type || '—',
           d.t || '—'
         ]
@@ -789,14 +792,125 @@
 
     if (row.networkDetail) {
       const n = row.networkDetail;
-      meta.textContent = row.networkKind === 'dns'
-        ? `DNS lookup · ${n.source || 'unknown source'}`
-        : `HTTP/proxy request · ${n.source || 'unknown source'}`;
-      const pre = document.createElement('pre');
-      pre.className = 'content-block';
-      pre.textContent = JSON.stringify(n, null, 2);
-      body.appendChild(pre);
+      if (row.networkKind === 'dns') {
+        const kind = n.type === 'sni' ? 'TLS SNI' : n.type === 'inferred' ? 'Host (proxy)' : 'DNS lookup';
+        const answers = Array.isArray(n.answers) ? n.answers.filter(Boolean) : [];
+        meta.textContent = answers.length
+          ? `${kind} · ${n.source || 'unknown'} → ${answers.join(', ')}`
+          : `${kind} · ${n.source || 'unknown source'}`;
+        const pre = document.createElement('pre');
+        pre.className = 'content-block';
+        pre.textContent = JSON.stringify(n, null, 2);
+        body.appendChild(pre);
+        return;
+      }
+
+      const status = n.status != null ? ` · HTTP ${n.status}` : '';
+      meta.textContent = `${n.method || 'HTTP'} · ${n.source || 'proxy'}${status}`;
+      if (n.hasBody || n.request || n.response) {
+        body.appendChild(renderHttpFlowDetail(n));
+      } else {
+        const pre = document.createElement('pre');
+        pre.className = 'content-block';
+        pre.textContent = JSON.stringify(n, null, 2);
+        body.appendChild(pre);
+        const note = document.createElement('p');
+        note.className = 'muted';
+        note.textContent = 'No decrypted body in this evidence. Launch again after the mitm flows.jsonl update, then Preserve.';
+        body.appendChild(note);
+      }
     }
+  }
+
+  function renderHttpFlowDetail(n) {
+    const wrap = document.createElement('div');
+    wrap.className = 'http-flow-detail';
+
+    const urlEl = document.createElement('p');
+    urlEl.innerHTML = `<strong>${escapeHtml(n.method || '')}</strong> ${escapeHtml(n.url || '')}`;
+    wrap.appendChild(urlEl);
+
+    const resolved = Array.isArray(n.resolvedIps) ? n.resolvedIps.filter(Boolean) : [];
+    if (resolved.length) {
+      const r = document.createElement('p');
+      r.className = 'muted';
+      r.textContent = `Resolved → ${resolved.join(', ')}`;
+      wrap.appendChild(r);
+    }
+
+    const panes = document.createElement('div');
+    panes.className = 'http-flow-panes';
+
+    const makePane = (title, part) => {
+      const pane = document.createElement('div');
+      pane.className = 'http-flow-pane';
+      const head = document.createElement('div');
+      head.className = 'http-flow-pane-head';
+      head.textContent = title;
+      pane.appendChild(head);
+      const scroll = document.createElement('div');
+      scroll.className = 'http-flow-pane-scroll';
+      if (!part) {
+        const p = document.createElement('p');
+        p.className = 'muted';
+        p.textContent = '(none)';
+        scroll.appendChild(p);
+        pane.appendChild(scroll);
+        return pane;
+      }
+      const metaLine = document.createElement('p');
+      metaLine.className = 'muted';
+      const bits = [];
+      if (part.contentType) bits.push(part.contentType);
+      if (part.bodyBytes != null) bits.push(`${part.bodyBytes} bytes`);
+      if (part.bodyTruncated) bits.push('truncated');
+      if (part.encoding && part.encoding !== 'utf-8') bits.push(part.encoding);
+      metaLine.textContent = bits.join(' · ') || '';
+      scroll.appendChild(metaLine);
+
+      if (part.headers && typeof part.headers === 'object') {
+        const hdr = document.createElement('pre');
+        hdr.className = 'content-block headers hl-code';
+        const hdrText = Object.entries(part.headers)
+          .map(([k, v]) => `${k}: ${v}`)
+          .join('\n');
+        hdr.innerHTML = (typeof QuarantineHighlight !== 'undefined' && QuarantineHighlight.highlightHeaders)
+          ? QuarantineHighlight.highlightHeaders(hdrText)
+          : escapeHtml(hdrText);
+        scroll.appendChild(hdr);
+      }
+      const bodyPre = document.createElement('pre');
+      const hl = (typeof QuarantineHighlight !== 'undefined' && QuarantineHighlight.highlightBody)
+        ? QuarantineHighlight.highlightBody(part.body != null && part.body !== '' ? part.body : '', part.contentType || '')
+        : { html: escapeHtml(part.body != null && part.body !== '' ? part.body : '(empty body)'), lang: 'plain', pretty: false };
+      bodyPre.className = `content-block body hl-code lang-${hl.lang || 'plain'}`;
+      if (part.body == null || part.body === '') {
+        bodyPre.textContent = '(empty body)';
+      } else {
+        bodyPre.innerHTML = hl.html;
+      }
+      if (hl.pretty) {
+        metaLine.textContent = (metaLine.textContent ? metaLine.textContent + ' · ' : '') + 'pretty · ' + (hl.lang || '');
+      } else if (hl.lang && hl.lang !== 'plain') {
+        metaLine.textContent = (metaLine.textContent ? metaLine.textContent + ' · ' : '') + hl.lang;
+      }
+      scroll.appendChild(bodyPre);
+      pane.appendChild(scroll);
+      return pane;
+    };
+
+    panes.appendChild(makePane('Request', n.request));
+    panes.appendChild(makePane(n.status != null ? `Response (${n.status})` : 'Response', n.response));
+    wrap.appendChild(panes);
+    return wrap;
+  }
+
+  function escapeHtml(s) {
+    return String(s || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
   }
 
   function renderStats(rows, filters) {
@@ -849,6 +963,7 @@
         activeTab = cat === 'tasks' ? 'tasks'
           : cat === 'registry' ? 'registry'
           : cat === 'sysmon' ? 'sysmon'
+          : cat === 'network' && filterKind === 'dns' ? 'dns'
           : cat === 'network' ? 'network'
           : 'files';
         if (cat === 'network') {
@@ -1184,6 +1299,7 @@
           const tab = row.category === 'tasks' ? 'tasks'
             : row.category === 'registry' ? 'registry'
             : row.category === 'sysmon' ? 'sysmon'
+            : row.category === 'network' && row.networkKind === 'dns' ? 'dns'
             : row.category === 'network' ? 'network'
             : 'files';
           if (row.registryKey) {
@@ -1249,36 +1365,23 @@
     panel.innerHTML = '';
 
     if (!network) {
-      panel.innerHTML = '<div class="empty">No network section in this diff. Re-run manifest view to include proxy/PCAP data.</div>';
+      panel.innerHTML = '<div class="empty">No network section in this diff. Re-run Compare to include proxy/PCAP data.</div>';
       return;
     }
 
     const filters = getFilters();
-    let rows = buildRows().filter((r) => r.category === 'network' && rowPasses(r, filters));
-    if (networkSubFilter === 'dns') {
-      rows = rows.filter((r) => r.networkKind === 'dns');
-    } else if (networkSubFilter === 'requests') {
-      rows = rows.filter((r) => r.networkKind === 'request');
-    }
+    const rows = buildRows().filter((r) => r.category === 'network' && r.networkKind === 'request' && rowPasses(r, filters));
 
     const header = document.createElement('p');
     header.className = 'content-note';
     const windowText = network.windowFrom && network.windowTo
       ? `${network.windowFrom} → ${network.windowTo}`
       : 'snapshot capture window';
-    let headerText = `DNS and HTTP activity correlated to ${windowText}`;
-    headerText += ` · ${(network.dns || []).length} DNS · ${(network.requests || []).length} HTTP/proxy`;
+    let headerText = `HTTP/proxy activity · ${windowText}`;
+    headerText += ` · ${(network.requests || []).length} request(s)`;
     if (network.truncated) headerText += ' · list truncated';
     header.textContent = headerText;
     panel.appendChild(header);
-
-    if (!rows.length) {
-      const note = document.createElement('div');
-      note.className = 'empty';
-      note.textContent = network.message || 'No network events match current filters.';
-      panel.appendChild(note);
-      return;
-    }
 
     if (network.message) {
       const info = document.createElement('p');
@@ -1288,62 +1391,53 @@
       panel.appendChild(info);
     }
 
-    const subToolbar = document.createElement('div');
-    subToolbar.className = 'network-subtoolbar';
-    [['all', 'All'], ['dns', 'DNS only'], ['requests', 'HTTP/proxy only']].forEach(([key, label]) => {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'network-subtab' + ((networkSubFilter || 'all') === key ? ' active' : '');
-      btn.textContent = label;
-      btn.addEventListener('click', () => {
-        networkSubFilter = key === 'all' ? null : key;
-        render();
-      });
-      subToolbar.appendChild(btn);
-    });
-    panel.appendChild(subToolbar);
-
-    const sources = network.sources || {};
-    if (sources.proxyLogs?.length || sources.pcaps?.length) {
-      const srcNote = document.createElement('p');
-      srcNote.className = 'content-note network-sources';
-      const parts = [];
-      if (sources.proxyLogs?.length) parts.push(`${sources.proxyLogs.length} proxy log(s)`);
-      if (sources.pcaps?.length) parts.push(`${sources.pcaps.length} PCAP(s)`);
-      if (sources.tshark) parts.push('tshark');
-      srcNote.textContent = `Sources: ${parts.join(' · ')}`;
-      panel.appendChild(srcNote);
+    if (!rows.length) {
+      const note = document.createElement('div');
+      note.className = 'empty';
+      note.textContent = 'No HTTP/proxy requests match current filters. DNS is on the DNS tab.';
+      panel.appendChild(note);
+      return;
     }
 
-    const dnsRows = rows.filter((r) => r.networkKind === 'dns');
-    const reqRows = rows.filter((r) => r.networkKind === 'request');
+    const reqHost = document.createElement('div');
+    panel.appendChild(reqHost);
+    renderTable(reqHost, ['Method', 'URL', 'Host', 'Time (UTC)'], rows, 'network-requests');
+  }
 
-    if (!networkSubFilter || networkSubFilter === 'dns') {
-      const h = document.createElement('h3');
-      h.textContent = 'DNS lookups';
-      panel.appendChild(h);
-      const dnsHost = document.createElement('div');
-      panel.appendChild(dnsHost);
-      if (!dnsRows.length) {
-        dnsHost.innerHTML = '<div class="empty">No DNS lookups in this window.</div>';
-      } else {
-        renderTable(dnsHost, ['Source', 'Query', 'Type', 'Time (UTC)'], dnsRows, 'network-dns');
-      }
+  function renderDnsPanel() {
+    const panel = $('#panel-dns');
+    if (!panel) return;
+
+    const network = diff.network;
+    panel.innerHTML = '';
+
+    if (!network) {
+      panel.innerHTML = '<div class="empty">No network section in this diff. Re-run Compare to include proxy/PCAP data.</div>';
+      return;
     }
 
-    if (!networkSubFilter || networkSubFilter === 'requests') {
-      const h = document.createElement('h3');
-      h.className = networkSubFilter ? '' : 'network-section-heading';
-      h.textContent = 'HTTP / proxy requests';
-      panel.appendChild(h);
-      const reqHost = document.createElement('div');
-      panel.appendChild(reqHost);
-      if (!reqRows.length) {
-        reqHost.innerHTML = '<div class="empty">No HTTP/proxy requests in this window.</div>';
-      } else {
-        renderTable(reqHost, ['Method', 'URL', 'Host', 'Time (UTC)'], reqRows, 'network-requests');
-      }
+    const filters = getFilters();
+    const rows = buildRows().filter((r) => r.category === 'network' && r.networkKind === 'dns' && rowPasses(r, filters));
+
+    const header = document.createElement('p');
+    header.className = 'content-note';
+    const windowText = network.windowFrom && network.windowTo
+      ? `${network.windowFrom} → ${network.windowTo}`
+      : 'snapshot capture window';
+    header.textContent = `Name resolution · ${windowText} · ${(network.dns || []).length} lookup(s)`;
+    panel.appendChild(header);
+
+    if (!rows.length) {
+      const note = document.createElement('div');
+      note.className = 'empty';
+      note.textContent = 'No DNS / host resolution entries match current filters.';
+      panel.appendChild(note);
+      return;
     }
+
+    const dnsHost = document.createElement('div');
+    panel.appendChild(dnsHost);
+    renderTable(dnsHost, ['Source', 'Name', 'Resolved', 'Type', 'Time (UTC)'], rows, 'network-dns');
   }
 
   function renderUsnPanel() {
@@ -1422,6 +1516,7 @@
     );
     renderSysmonPanel();
     renderNetworkPanel();
+    renderDnsPanel();
     renderUsnPanel();
 
     if (selectedRowId) {

@@ -612,12 +612,12 @@ func (a *App) GetVMStatusWails() (map[string]string, error) {
 	return m, nil
 }
 
-// agentNatHint explains common dual-NIC gateway failures (APIPA on NAT blocks port-forward).
+// agentReachHint explains how the host reaches the guest agent (gateway-only).
 func (a *App) agentNatHint() string {
 	if a.VM == nil || !a.Cfg.IsGatewayMode() {
 		return ""
 	}
-	return "host should reach the agent via the Linux gateway (127.0.0.1:9443 → gateway NAT → 10.66.0.15:9443)"
+	return "host reaches the agent via the Linux gateway only (127.0.0.1:9443 → gateway NAT → lab LAN)"
 }
 
 // InstallAgentWails deploys agent files to the guest and prints elevated install steps.

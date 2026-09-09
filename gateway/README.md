@@ -8,9 +8,18 @@
 # Services
 #   dnsmasq          DNS (+ optional DHCP)
 #   nftables         forward + MASQUERADE + REDIRECT :80/:443 → mitm :8082
-#   mitmdump :8080   explicit proxy (PAC fallback)
+#                    SSH (:22) accepted on WAN only (host NAT PF); blocked from LAN guest
+#                    LAN→WAN drops RFC1918/link-local/CGNAT before general accept
+#   mitmdump :8080   explicit proxy (PAC fallback) — block_private resolves DNS
 #   mitmdump :8082   transparent MITM
 #   tcpdump          LAN PCAP under /var/log/quarantine/pcap
+#
+# Host NAT port-forwards (gateway VM) bind 127.0.0.1 only (SSH :2222, agent :9443).
+#
+# Re-apply nftables after template edits (from host):
+#   Copy gateway/nftables.conf + scripts/apply-nftables-harden.sh into the gateway, then:
+#     /tmp/apply-nftables-harden.sh '<gateway-sudo-password>'
+#   Or re-run: .\quarantine-vm.ps1 gateway provision
 #
 # Host commands (after implement)
 #   .\quarantine-vm.ps1 gateway create

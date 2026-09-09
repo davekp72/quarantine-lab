@@ -175,6 +175,8 @@ cp -a "$ROOT/." "$OPT/"
 # PAC for explicit fallback (gateway LAN IP)
 sed "s/__GATEWAY__/${LAN_IP}/g" "$OPT/mitm/quarantine.pac" >/etc/quarantine-gateway/quarantine.pac
 cp "$OPT/mitm/block_private.py" /etc/quarantine-gateway/block_private.py
+mkdir -p /usr/local/lib/quarantine
+install -m 0644 "$OPT/mitm/export-flows-jsonl.py" /usr/local/lib/quarantine/export-flows-jsonl.py
 
 install -m 0644 "$OPT/systemd/quarantine-mitm-explicit.service" /etc/systemd/system/
 install -m 0644 "$OPT/systemd/quarantine-mitm-transparent.service" /etc/systemd/system/

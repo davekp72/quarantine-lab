@@ -1007,34 +1007,138 @@ function renderNetwork() {
     panel.innerHTML = '<p class="muted">No network section in this diff.</p>';
     return;
   }
-  const dns = net.dns || [];
   const reqs = net.requests || [];
   const windowText = net.windowFrom && net.windowTo
     ? `${net.windowFrom} → ${net.windowTo}`
     : 'snapshot capture window';
-  let html = `<p class="muted">${windowText} · ${dns.length} DNS · ${reqs.length} HTTP/proxy</p>`;
+  let html = `<p class="muted">${windowText} · ${reqs.length} HTTP/proxy</p>`;
   if (hideNoiseEnabled()) {
     html += '<p class="muted">Routine Microsoft / connectivity noise hidden — uncheck Hide routine noise to show all.</p>';
   }
   if (net.message) {
     html += `<p class="muted">${net.message}</p>`;
   }
-  if (!dns.length && !reqs.length) {
-    html += '<p class="muted">No network events in this window.</p>';
+  if (!reqs.length) {
+    html += '<p class="muted">No HTTP/proxy requests in this window. DNS is on the DNS tab.</p>';
     panel.innerHTML = html;
     return;
   }
-  if (dns.length) {
-    html += `<h3>DNS lookups</h3><table><thead><tr><th>Source</th><th>Query</th><th>Type</th><th>Time</th></tr></thead><tbody>${
-      dns.slice(0, 500).map((r) => `<tr><td>${r.source || ''}</td><td>${r.qname || r.query || ''}</td><td>${r.qtype || r.type || ''}</td><td>${r.t || ''}</td></tr>`).join('')
-    }</tbody></table>`;
-  }
-  if (reqs.length) {
-    html += `<h3>HTTP / proxy</h3><table><thead><tr><th>Method</th><th>Host</th><th>Path</th><th>Time</th></tr></thead><tbody>${
-      reqs.slice(0, 500).map((r) => `<tr><td>${r.method || ''}</td><td>${r.host || ''}</td><td>${r.path || r.url || ''}</td><td>${r.t || ''}</td></tr>`).join('')
-    }</tbody></table>`;
-  }
+  html += `<div class="network-split">
+  <div class="net-req-list">
+    <table id="net-req-table"><thead><tr><th>Method</th><th>Status</th><th>Host</th><th>URL</th><th>Time</th></tr></thead><tbody>${
+      reqs.slice(0, 500).map((r, i) => `<tr data-req-idx="${i}" class="net-req-row${r.hasBody ? ' has-body' : ''}"><td>${r.method || ''}</td><td>${r.status ?? ''}</td><td>${r.host || ''}</td><td title="${escapeAttr(r.url || '')}">${truncate(r.url || r.path || '', 80)}</td><td>${r.t || ''}</td></tr>`).join('')
+    }</tbody></table>
+  </div>
+  <div id="net-req-detail" class="net-req-detail muted">Click a request to view decrypted request/response (mitm).</div>
+</div>`;
   panel.innerHTML = html;
+  panel.querySelectorAll('.net-req-row').forEach((tr) => {
+    tr.addEventListener('click', () => {
+      panel.querySelectorAll('.net-req-row.selected').forEach((x) => x.classList.remove('selected'));
+      tr.classList.add('selected');
+      const idx = Number(tr.getAttribute('data-req-idx'));
+      const r = reqs[idx];
+      const detail = panel.querySelector('#net-req-detail');
+      if (!detail || !r) return;
+      detail.classList.remove('muted');
+      detail.innerHTML = renderHttpFlowHtml(r);
+    });
+  });
+}
+
+function renderDns() {
+  const panel = $('#panel-dns');
+  if (!panel) return;
+  const d = activeDiff();
+  const net = d?.network;
+  if (!net) {
+    panel.innerHTML = '<p class="muted">No network section in this diff.</p>';
+    return;
+  }
+  const dns = net.dns || [];
+  const windowText = net.windowFrom && net.windowTo
+    ? `${net.windowFrom} → ${net.windowTo}`
+    : 'snapshot capture window';
+  let html = `<p class="muted">${windowText} · ${dns.length} name lookups</p>`;
+  if (hideNoiseEnabled()) {
+    html += '<p class="muted">Routine Microsoft / connectivity noise hidden — uncheck Hide routine noise to show all.</p>';
+  }
+  if (!dns.length) {
+    html += '<p class="muted">No DNS / host resolution entries in this window.</p>';
+    panel.innerHTML = html;
+    return;
+  }
+  html += `<div class="dns-table-wrap"><table id="dns-table"><thead><tr><th>Source</th><th>Name</th><th>Resolved</th><th>Type</th><th>Time</th></tr></thead><tbody>${
+    dns.slice(0, 500).map((r) => {
+      const answers = Array.isArray(r.answers) ? r.answers.filter(Boolean).join(', ') : '';
+      return `<tr><td>${r.source || ''}</td><td>${r.qname || r.query || ''}</td><td>${answers || '—'}</td><td>${r.qtype || r.type || ''}</td><td>${r.t || ''}</td></tr>`;
+    }).join('')
+  }</tbody></table></div>`;
+  panel.innerHTML = html;
+}
+
+function escapeAttr(s) {
+  return String(s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+}
+
+function truncate(s, n) {
+  s = String(s || '');
+  return s.length > n ? s.slice(0, n) + '…' : s;
+}
+
+function renderHttpFlowPartHtml(title, p) {
+  if (!p) {
+    return `<div class="http-flow-pane">
+  <div class="http-flow-pane-head">${escapeAttr(title)}</div>
+  <div class="http-flow-pane-scroll"><p class="muted">(none)</p></div>
+</div>`;
+  }
+  const bits = [];
+  if (p.contentType) bits.push(p.contentType);
+  if (p.bodyBytes != null) bits.push(`${p.bodyBytes} bytes`);
+  if (p.bodyTruncated) bits.push('truncated');
+  if (p.encoding && p.encoding !== 'utf-8') bits.push(p.encoding);
+  const hdrs = p.headers && typeof p.headers === 'object'
+    ? Object.entries(p.headers).map(([k, v]) => `${k}: ${v}`).join('\n')
+    : '';
+  const hl = (typeof QuarantineHighlight !== 'undefined' && QuarantineHighlight.highlightBody)
+    ? QuarantineHighlight.highlightBody(p.body != null && p.body !== '' ? p.body : '', p.contentType || '')
+    : { html: escapeAttr(p.body != null && p.body !== '' ? p.body : '(empty body)'), lang: 'plain', pretty: false };
+  if (hl.pretty) bits.push('pretty');
+  if (hl.lang && hl.lang !== 'plain') bits.push(hl.lang);
+  const hdrHtml = hdrs
+    ? ((typeof QuarantineHighlight !== 'undefined' && QuarantineHighlight.highlightHeaders)
+      ? QuarantineHighlight.highlightHeaders(hdrs)
+      : escapeAttr(hdrs))
+    : '';
+  const bodyHtml = (p.body == null || p.body === '')
+    ? escapeAttr('(empty body)')
+    : hl.html;
+  return `<div class="http-flow-pane">
+  <div class="http-flow-pane-head">${escapeAttr(title)}${bits.length ? ` · <span class="muted">${escapeAttr(bits.join(' · '))}</span>` : ''}</div>
+  <div class="http-flow-pane-scroll">
+    ${hdrHtml ? `<pre class="content-block headers hl-code">${hdrHtml}</pre>` : ''}
+    <pre class="content-block body hl-code lang-${escapeAttr(hl.lang || 'plain')}">${bodyHtml}</pre>
+  </div>
+</div>`;
+}
+
+function renderHttpFlowHtml(n) {
+  if (!n.hasBody && !n.request && !n.response) {
+    return `<p><strong>${escapeAttr(n.method || '')}</strong> ${escapeAttr(n.url || '')}</p>
+<p class="muted">No decrypted body in this evidence. Start a new Launch (updates mitm) → browse → Preserve, then Compare.</p>
+<pre class="content-block">${escapeAttr(JSON.stringify(n, null, 2))}</pre>`;
+  }
+  const resolved = Array.isArray(n.resolvedIps) ? n.resolvedIps.filter(Boolean).join(', ') : '';
+  return `<div class="http-flow-meta">
+  <p><strong>${escapeAttr(n.method || '')}</strong> ${escapeAttr(n.url || '')}
+ ${n.status != null ? `· <em>${n.status}</em>` : ''} · ${escapeAttr(n.source || '')}</p>
+  ${resolved ? `<p class="muted">Resolved → ${escapeAttr(resolved)}</p>` : ''}
+</div>
+<div class="http-flow-panes">
+  ${renderHttpFlowPartHtml('Request', n.request)}
+  ${renderHttpFlowPartHtml(n.status != null ? `Response (${n.status})` : 'Response', n.response)}
+</div>`;
 }
 
 async function rerenderDiff() {
@@ -1045,6 +1149,7 @@ async function rerenderDiff() {
   renderSysmon();
   renderUsn();
   renderNetwork();
+  renderDns();
 }
 
 async function loadDiff(jsonStr) {
