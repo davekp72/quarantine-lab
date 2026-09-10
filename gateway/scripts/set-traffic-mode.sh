@@ -62,7 +62,10 @@ ensure_fakenet_ca() {
   local combined=""
   local cert_out="$ETC/fakenet-ca-cert.pem"
   local key_out="$ETC/fakenet-ca-key.pem"
-  local c
+  local cer_out="$ETC/mitmproxy-ca-cert.cer"
+  local www=/var/log/quarantine/fakenet/www
+  local pybin=/opt/quarantine-gateway/venv-fakenet/bin/python
+  local c pkg_www year
   for c in /root/.mitmproxy/mitmproxy-ca.pem \
            /home/quarantine/.mitmproxy/mitmproxy-ca.pem \
            /home/*/.mitmproxy/mitmproxy-ca.pem; do
@@ -75,11 +78,13 @@ ensure_fakenet_ca() {
     echo "ERROR: mitmproxy CA not found under /root/.mitmproxy (run permissive mode once or gateway export-ca)." >&2
     return 1
   fi
-  mkdir -p "$ETC"
-  # mitmproxy-ca.pem is key+cert; split for FakeNet Static_CA.
+  mkdir -p "$ETC" /var/log/quarantine/fakenet/certs "$www"
+  # mitmproxy-ca.pem is key+cert; split for FakeNet Static_CA. Do not modify the source.
   if ! openssl pkey -in "$combined" -out "$key_out" 2>/dev/null; then
-    echo "ERROR: could not extract FakeNet CA private key from $combined" >&2
-    return 1
+    if ! openssl rsa -in "$combined" -out "$key_out" 2>/dev/null; then
+      echo "ERROR: could not extract FakeNet CA private key from $combined" >&2
+      return 1
+    fi
   fi
   if ! openssl x509 -in "$combined" -out "$cert_out" 2>/dev/null; then
     echo "ERROR: could not extract FakeNet CA cert from $combined" >&2
@@ -87,12 +92,33 @@ ensure_fakenet_ca() {
   fi
   chmod 600 "$key_out"
   chmod 644 "$cert_out"
+  openssl x509 -in "$cert_out" -outform DER -out "$cer_out" 2>/dev/null || cp -f "$cert_out" "$cer_out"
+  chmod 644 "$cer_out"
   # Empty CRL file so leaf-cert caching in ssl_utils does not regenerate endlessly.
   : >"$ETC/fakenet-ca.crl"
-  # Point FakeNet temp cert dir at a writable location and seed CRL name it expects.
-  mkdir -p /var/log/quarantine/fakenet/certs
   cp -f "$ETC/fakenet-ca.crl" /var/log/quarantine/fakenet/certs/ca.crl 2>/dev/null || true
-  echo "FakeNet HTTPS will use mitmproxy CA: $cert_out"
+
+  # Seed FakeNet HTTP webroot with package defaults + the same CA (guest HTTP install).
+  if [[ -x "$pybin" ]]; then
+    pkg_www="$("$pybin" -c 'import fakenet, pathlib; print(pathlib.Path(fakenet.__file__).resolve().parent / "defaultFiles")' 2>/dev/null || true)"
+    if [[ -n "$pkg_www" && -d "$pkg_www" ]]; then
+      cp -a "$pkg_www/." "$www/" 2>/dev/null || true
+      cp -f "$cer_out" "$pkg_www/mitmproxy-ca-cert.cer"
+      cp -f "$cert_out" "$pkg_www/mitmproxy-ca-cert.pem"
+    fi
+  fi
+  cp -f "$cer_out" "$www/mitmproxy-ca-cert.cer"
+  cp -f "$cert_out" "$www/mitmproxy-ca-cert.pem"
+  chmod 644 "$www/mitmproxy-ca-cert.cer" "$www/mitmproxy-ca-cert.pem"
+  echo "http://${LAN_IP}/mitmproxy-ca.crl" >"$ETC/fakenet-cdp.url"
+
+  echo "FakeNet HTTPS will use mitmproxy CA: $cert_out (from $combined)"
+  echo "FakeNet CA subject/dates:"
+  openssl x509 -in "$cert_out" -noout -subject -issuer -dates 2>/dev/null || true
+  year="$(date -u +%Y 2>/dev/null || echo 0)"
+  if [[ "$year" -lt 2024 || "$year" -gt 2038 ]]; then
+    echo "WARNING: gateway clock is $(date -u 2>/dev/null). FakeNet leaves will use the CA validity window (Windows guest clock still applies)."
+  fi
 }
 
 # Apply cryptography-based SSL patch so HTTPS UseSSL works on modern pyOpenSSL.
@@ -112,6 +138,44 @@ patch_fakenet_ssl() {
   rm -rf "$(dirname "$ssl_dst")/__pycache__" \
     /opt/quarantine-gateway/venv-fakenet/lib/python*/site-packages/fakenet/configs/temp_certs \
     2>/dev/null || true
+}
+
+# Empty CRL signed by the lab MITM CA, served at the leaf CDP URL.
+publish_fakenet_crl() {
+  local pybin=/opt/quarantine-gateway/venv-fakenet/bin/python
+  local www=/var/log/quarantine/fakenet/www
+  local pkg_www
+  echo "http://${LAN_IP}/mitmproxy-ca.crl" >"$ETC/fakenet-cdp.url"
+  mkdir -p "$www" /var/log/quarantine/fakenet/certs
+  if [[ ! -x "$pybin" ]]; then
+    echo "WARNING: cannot publish FakeNet CRL (venv python missing)" >&2
+    return 0
+  fi
+  if ! "$pybin" - <<PY
+from fakenet.listeners.ssl_utils import publish_mitm_crl
+written = publish_mitm_crl(
+    "/etc/quarantine-gateway/fakenet-ca-cert.pem",
+    "/etc/quarantine-gateway/fakenet-ca-key.pem",
+    [
+        "/var/log/quarantine/fakenet/www/mitmproxy-ca.crl",
+        "/var/log/quarantine/fakenet/www/ca.crl",
+        "/etc/quarantine-gateway/mitmproxy-ca.crl",
+        "/var/log/quarantine/fakenet/certs/ca.crl",
+    ],
+)
+print("FakeNet CRL:", ", ".join(written))
+if not written:
+    raise SystemExit("CRL publish failed")
+PY
+  then
+    echo "WARNING: FakeNet CRL publish failed" >&2
+    return 0
+  fi
+  pkg_www="$("$pybin" -c 'import fakenet, pathlib; print(pathlib.Path(fakenet.__file__).resolve().parent / "defaultFiles")' 2>/dev/null || true)"
+  if [[ -n "$pkg_www" && -d "$pkg_www" && -f "$www/mitmproxy-ca.crl" ]]; then
+    cp -f "$www/mitmproxy-ca.crl" "$pkg_www/mitmproxy-ca.crl" 2>/dev/null || true
+  fi
+  chmod 644 "$www/mitmproxy-ca.crl" "$www/ca.crl" 2>/dev/null || true
 }
 
 # FakeNet uses iptables NFQUEUE. LinuxFlushIptables=No so leftovers can linger.
@@ -175,10 +239,11 @@ mode_fakenet() {
   systemctl stop quarantine-fakenet 2>/dev/null || true
   free_dns_port
   : >"$LOG/fakenet/fakenet.log" 2>/dev/null || true
-  # Drop per-host FakeNet leaves so they are re-signed by the mitm CA
+  # Drop cached FakeNet leaves (old CDP / 1970-dated / CA-as-leaf) so they are re-signed.
   rm -rf /opt/quarantine-gateway/venv-fakenet/lib/python*/site-packages/fakenet/configs/temp_certs \
-    /var/log/quarantine/fakenet/certs/*.crt /var/log/quarantine/fakenet/certs/*.key \
-    2>/dev/null || true
+    /var/log/quarantine/fakenet/certs
+  mkdir -p /var/log/quarantine/fakenet/certs
+  publish_fakenet_crl
   apply_nft "$OPT/nftables-fakenet.conf" || return 1
   systemctl start quarantine-fakenet || return 1
   if ! systemctl is-active --quiet quarantine-fakenet; then
@@ -209,10 +274,16 @@ mode_fakenet() {
     dig +time=2 +tries=1 @"$LAN_IP" fakenet-check.local A >/dev/null 2>&1 || true
   fi
   if command -v openssl >/dev/null 2>&1; then
-    echo | openssl s_client -connect "${LAN_IP}:443" -servername example.test -brief 2>/dev/null | head -5 || true
+    echo "FakeNet TLS leaf for SNI google.com:"
+    echo | openssl s_client -connect "${LAN_IP}:443" -servername google.com 2>/dev/null \
+      | openssl x509 -noout -subject -issuer -dates -ext crlDistributionPoints 2>/dev/null || true
+    echo "FakeNet CRL:"
+    openssl crl -inform DER -in /var/log/quarantine/fakenet/www/mitmproxy-ca.crl -noout -issuer -lastupdate -nextupdate 2>/dev/null || true
   fi
   echo fakenet >"$MODE_FILE"
   echo "traffic-mode=fakenet (sinkhole; DNS/HTTP/HTTPS on ${LAN_IP} with mitm CA; no WAN)"
+  echo "Guest CA (HTTP): http://${LAN_IP}/mitmproxy-ca-cert.cer"
+  echo "Guest CRL (HTTP): http://${LAN_IP}/mitmproxy-ca.crl"
 }
 
 mode_permissive() {

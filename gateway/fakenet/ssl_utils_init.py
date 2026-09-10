@@ -1,30 +1,172 @@
 # Copyright 2026 Google LLC
-# Quarantine lab patch: create_cert uses cryptography.x509 instead of removed
-# OpenSSL.crypto.X509Extension (breaks FakeNet HTTPS on modern pyOpenSSL).
+# Quarantine lab patch:
+# - Avoid removed OpenSSL.crypto.X509Extension (modern pyOpenSSL).
+# - Mint TLS *leaf* certs signed by the lab mitmproxy CA (never present the CA as the site cert).
+# - CDP points at a CRL we serve on FakeNet HTTP (Schannel CRYPT_E_NO_REVOCATION_CHECK).
+# - Validity clamped to the CA window (SEC_E_CERT_EXPIRED).
 
-import time
 import os
-import traceback
-import subprocess
-import logging
-import shutil
-import sys
+import re
 import ssl
-import random
+import sys
+import shutil
+import logging
+import traceback
 import datetime
+import ipaddress
 from pathlib import Path
-from OpenSSL import crypto
+
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.x509.oid import NameOID
+from cryptography.hazmat.primitives.asymmetric import rsa, ed25519
+from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID
 
-from fakenet import listeners
-from fakenet.listeners import ListenerBase
+
+def _utc_now():
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def _as_utc(dt):
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=datetime.timezone.utc)
+    return dt.astimezone(datetime.timezone.utc)
+
+
+def _cert_times(cert):
+    nb = getattr(cert, "not_valid_before_utc", None) or _as_utc(cert.not_valid_before)
+    na = getattr(cert, "not_valid_after_utc", None) or _as_utc(cert.not_valid_after)
+    return nb, na
+
+
+def _load_x509(path):
+    with open(path, "rb") as f:
+        data = f.read()
+    # mitmproxy-ca.pem is key+cert; load_pem_x509_certificate uses the cert block.
+    return x509.load_pem_x509_certificate(data)
+
+
+def _cdp_uris(cert):
+    try:
+        ext = cert.extensions.get_extension_for_class(x509.CRLDistributionPoints)
+    except x509.ExtensionNotFound:
+        return []
+    except Exception:
+        return []
+    uris = []
+    for dp in ext.value:
+        if not dp.full_name:
+            continue
+        for name in dp.full_name:
+            if isinstance(name, x509.UniformResourceIdentifier):
+                uris.append(name.value)
+    return uris
+
+
+def _validity_window(ca_cert_obj=None, leaf_days=825):
+    # Windows Schannel uses the *guest* clock. Gateway RTC is often wrong in
+    # FakeNet (no WAN/NTP). Never trust a 1970/insane now for notAfter.
+    now = _utc_now()
+    clock_ok = datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc) <= now <= datetime.datetime(
+        2038, 1, 1, tzinfo=datetime.timezone.utc
+    )
+    ca_nb = ca_na = None
+    if ca_cert_obj is not None:
+        ca_nb, ca_na = _cert_times(ca_cert_obj)
+
+    if not clock_ok:
+        if ca_nb and ca_na and (ca_na - ca_nb) > datetime.timedelta(days=2):
+            return ca_nb + datetime.timedelta(hours=1), ca_na - datetime.timedelta(hours=1)
+        return (
+            datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc),
+            datetime.datetime(2035, 12, 31, 23, 59, 59, tzinfo=datetime.timezone.utc),
+        )
+
+    nb = now - datetime.timedelta(minutes=5)
+    na = now + datetime.timedelta(days=leaf_days)
+    if ca_nb:
+        nb = max(nb, ca_nb + datetime.timedelta(minutes=1))
+    if ca_na:
+        na = min(na, ca_na - datetime.timedelta(hours=1))
+    if na <= nb:
+        if ca_nb and ca_na and ca_na > ca_nb + datetime.timedelta(hours=2):
+            return ca_nb + datetime.timedelta(hours=1), ca_na - datetime.timedelta(hours=1)
+        nb = now - datetime.timedelta(minutes=5)
+        na = now + datetime.timedelta(days=365)
+    return nb, na
+
+
+def _apply_cert_validity(builder, nb, na):
+    if hasattr(builder, "not_valid_before_utc"):
+        return builder.not_valid_before_utc(nb).not_valid_after_utc(na)
+    return builder.not_valid_before(nb).not_valid_after(na)
+
+
+def _apply_crl_validity(builder, this_update, next_update):
+    if hasattr(builder, "last_update_utc"):
+        return builder.last_update_utc(this_update).next_update_utc(next_update)
+    return builder.last_update(this_update).next_update(next_update)
+
+
+def default_cdp_urls(primary=None):
+    urls = []
+    if primary:
+        urls.append(primary.strip())
+    try:
+        with open("/etc/quarantine-gateway/fakenet-cdp.url", "r") as f:
+            hint = f.read().strip()
+        if hint and hint not in urls:
+            urls.insert(0, hint)
+    except OSError:
+        pass
+    if not urls:
+        urls.append("http://10.66.0.1/mitmproxy-ca.crl")
+    # Single-label name: WinINET <local> proxy bypass; FakeNet DNS sinkholes it.
+    extra = "http://mitmproxycrl/mitmproxy-ca.crl"
+    if extra not in urls:
+        urls.append(extra)
+    return urls
+
+
+def publish_mitm_crl(ca_cert_path, ca_key_path, dests):
+    """Write a DER CRL (empty revoked list) signed by the lab MITM CA."""
+    ca = _load_x509(ca_cert_path)
+    with open(ca_key_path, "rb") as f:
+        key = serialization.load_pem_private_key(f.read(), password=None)
+    this_update, next_update = _validity_window(ca)
+    builder = x509.CertificateRevocationListBuilder().issuer_name(ca.subject)
+    builder = _apply_crl_validity(builder, this_update, next_update)
+    builder = builder.add_extension(
+        x509.AuthorityKeyIdentifier.from_issuer_public_key(key.public_key()),
+        critical=False,
+    )
+    try:
+        builder = builder.add_extension(x509.CRLNumber(1), critical=False)
+    except Exception:
+        pass
+    hash_alg = hashes.SHA256()
+    if isinstance(key, ed25519.Ed25519PrivateKey):
+        hash_alg = None
+    crl = builder.sign(private_key=key, algorithm=hash_alg)
+    der = crl.public_bytes(serialization.Encoding.DER)
+    written = []
+    for dest in dests:
+        if not dest:
+            continue
+        try:
+            os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+            with open(dest, "wb") as f:
+                f.write(der)
+            written.append(dest)
+        except OSError:
+            traceback.print_exc()
+    return written
+
 
 class SSLWrapper(object):
-    NOT_AFTER_DELTA_SECONDS = 300 * 24 * 60 * 60
     CN = "fakenet.flare"
+    LEAF_DAYS = 825
 
     def __init__(self, config):
         self.logger = logging.getLogger(self.__class__.__name__)
@@ -34,276 +176,332 @@ class SSLWrapper(object):
         self.ca_crl = None
         self.ca_cn = self.CN
 
-        cert_dir = self.abs_config_path(self.config.get('cert_dir', None))
+        cert_dir = self.abs_config_path(self.config.get("cert_dir", None))
         if cert_dir is None:
             raise RuntimeError("cert_dir key is not specified in config")
+        os.makedirs(cert_dir, exist_ok=True)
 
-        if not os.path.isdir(cert_dir):
-            os.makedirs(cert_dir)
-
-        if self.config.get('static_ca').lower() == 'yes':
-            self.ca_cert = self.abs_config_path(self.config.get('ca_cert', None))
-            self.ca_key = self.abs_config_path(self.config.get('ca_key', None))
-            self.ca_cn = self._load_cert(self.ca_cert).get_subject().CN
+        static = str(self.config.get("static_ca") or "no").lower() == "yes"
+        if static:
+            self.ca_cert = self.abs_config_path(self.config.get("ca_cert", None))
+            self.ca_key = self.abs_config_path(self.config.get("ca_key", None))
+            if not self.ca_cert or not os.path.isfile(self.ca_cert):
+                raise RuntimeError("static_ca=yes but ca_cert is missing")
+            if not self.ca_key or not os.path.isfile(self.ca_key):
+                raise RuntimeError("static_ca=yes but ca_key is missing")
+            ca = _load_x509(self.ca_cert)
+            try:
+                self.ca_cn = ca.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+            except Exception:
+                self.ca_cn = "mitmproxy"
+            nb, na = _cert_times(ca)
+            now = _utc_now()
+            self.logger.info("Using static MITM CA CN=%s valid %s .. %s", self.ca_cn, nb, na)
+            if 2024 <= now.year <= 2038 and na is not None and now > na:
+                self.logger.error(
+                    "MITM CA is expired (%s). Re-create it (run permissive MITM once) "
+                    "and reinstall the CA in the Windows guest.",
+                    na,
+                )
+            self._publish_crl()
         else:
             self.ca_cert, self.ca_key, self.ca_crl = self.create_cert(self.CN)
-        if (not self.config.get('networkmode', None) == 'multihost' and
-                not self.config.get('static_ca').lower() == 'yes'):
-            self.logger.debug('adding root cert: %s', self.ca_cert)
-            self._add_root_ca(self.ca_cert, self.ca_crl)
+            self._publish_crl()
 
     def wrap_socket(self, s):
         try:
             ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            ctx.options |= ssl.OP_NO_TLSv1
-            ctx.options |= ssl.OP_NO_TLSv1_1
-        except AttributeError as e:
-            self.logger.error('Exception calling ssl.SSLContext: %s', str(e))
-            try:
-                ctx = ssl.SSLContext(ssl.PROTOCOL_TLS)
-                ctx.options |= ssl.OP_NO_TLSv1
-                ctx.options |= ssl.OP_NO_TLSv1_1
-            except AttributeError as e2:
-                self.logger.error('Exception calling ssl.SSLContext: %s', str(e2))
-                return s
+        except AttributeError:
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS)
+        ctx.options |= ssl.OP_NO_TLSv1
+        ctx.options |= ssl.OP_NO_TLSv1_1
         ctx.sni_callback = self.sni_callback
-        # Never present the CA cert as the TLS leaf — Schannel/curl reject CA:TRUE
-        # end-entity certs, which is why clients needed -k even with the CA installed.
-        default_cn = self.config.get('default_cn') or 'fakenet.local'
-        leaf_cert, leaf_key, _ = self.create_cert(default_cn, self.ca_cert, self.ca_key)
-        if not leaf_cert or not leaf_key:
-            self.logger.error('Failed to mint default leaf cert; HTTPS trust will fail')
-            leaf_cert, leaf_key = self.ca_cert, self.ca_key
-        ctx.load_cert_chain(certfile=leaf_cert, keyfile=leaf_key)
+        leaf, key = self._leaf_for(self.config.get("default_cn") or "fakenet.local")
+        ctx.load_cert_chain(certfile=leaf, keyfile=key)
         return ctx.wrap_socket(s, server_side=True)
 
-    def create_cert(self, cn, ca_cert=None, ca_key=None, cert_dir=None):
-        """
-        Create a cert given the common name, a signing CA, CA private key and
-        the directory output.
-
-        return: tuple(None, None, None) on error
-                tuple(cert_file_path, key_file_path, crl_file) on success
-        """
-
-        f_selfsign = ca_cert is None or ca_key is None
-        if not cert_dir:
-            cert_dir = self.abs_config_path(self.config.get('cert_dir'))
-        else:
-            cert_dir = os.path.abspath(cert_dir)
-
-        cert_file = os.path.join(cert_dir, "%s.crt" % (cn))
-        key_file = os.path.join(cert_dir, "%s.key" % (cn))
-        crl_file = os.path.join(cert_dir, "ca.crl")
-        if os.path.exists(cert_file) and os.path.exists(key_file):
-            # CRL is optional (Static_CA / mitmproxy path may not ship one)
-            if not os.path.exists(crl_file):
-                try:
-                    open(crl_file, "ab").close()
-                except OSError:
-                    pass
-            webroot = self.config.get("webroot")
-            if webroot and os.path.exists(webroot):
-                web_crl_path = os.path.join(webroot, "ca.crl")
-                if not os.path.exists(web_crl_path) and os.path.exists(crl_file):
-                    shutil.copyfile(crl_file, web_crl_path)
-            return cert_file, key_file, crl_file
-
-        try:
-            key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-            subject = x509.Name([
-                x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
-                x509.NameAttribute(NameOID.COMMON_NAME, cn),
-            ])
-            now = datetime.datetime.now(datetime.timezone.utc)
-            builder = (
-                x509.CertificateBuilder()
-                .subject_name(subject)
-                .serial_number(random.randint(1, 0x31337))
-                .not_valid_before(now - datetime.timedelta(minutes=1))
-                .not_valid_after(now + datetime.timedelta(seconds=self.NOT_AFTER_DELTA_SECONDS))
-                .public_key(key.public_key())
-            )
-            crl_dp = x509.CRLDistributionPoints([
-                x509.DistributionPoint(
-                    full_name=[x509.UniformResourceIdentifier("http://fakenet.mandiant.com/ca.crl")],
-                    relative_name=None,
-                    reasons=None,
-                    crl_issuer=None,
-                )
-            ])
-
-            if f_selfsign:
-                builder = (
-                    builder.issuer_name(subject)
-                    .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
-                    .add_extension(
-                        x509.KeyUsage(
-                            digital_signature=False,
-                            content_commitment=False,
-                            key_encipherment=False,
-                            data_encipherment=False,
-                            key_agreement=False,
-                            key_cert_sign=True,
-                            crl_sign=True,
-                            encipher_only=False,
-                            decipher_only=False,
-                        ),
-                        critical=True,
-                    )
-                    .add_extension(crl_dp, critical=False)
-                )
-                cert = builder.sign(private_key=key, algorithm=hashes.SHA256())
-
-                crl_builder = (
-                    x509.CertificateRevocationListBuilder()
-                    .issuer_name(cert.subject)
-                    .last_update(now)
-                    .next_update(now + datetime.timedelta(days=30))
-                )
-                crl = crl_builder.sign(private_key=key, algorithm=hashes.SHA256())
-                crl_der = crl.public_bytes(serialization.Encoding.DER)
-                try:
-                    with open(crl_file, "wb") as f:
-                        f.write(crl_der)
-                    webroot = self.config.get("webroot")
-                    if webroot and os.path.exists(webroot):
-                        with open(os.path.join(webroot, "ca.crl"), "wb") as f:
-                            f.write(crl_der)
-                except IOError:
-                    traceback.print_exc()
-                    return None, None, None
-            else:
-                with open(ca_cert, "rb") as f:
-                    ca_cert_obj = x509.load_pem_x509_certificate(f.read())
-                with open(ca_key, "rb") as f:
-                    ca_key_obj = serialization.load_pem_private_key(f.read(), password=None)
-                # DNSName rejects wildcards quirks; fall back to IPAddress if needed
-                try:
-                    san = x509.SubjectAlternativeName([x509.DNSName(cn)])
-                except ValueError:
-                    try:
-                        san = x509.SubjectAlternativeName([x509.IPAddress(__import__("ipaddress").ip_address(cn))])
-                    except Exception:
-                        san = x509.SubjectAlternativeName([x509.DNSName("fakenet.flare")])
-                builder = (
-                    builder.issuer_name(ca_cert_obj.subject)
-                    .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=False)
-                    .add_extension(san, critical=False)
-                    .add_extension(crl_dp, critical=False)
-                )
-                cert = builder.sign(private_key=ca_key_obj, algorithm=hashes.SHA256())
-
-            with open(cert_file, "wb") as cert_file_input:
-                cert_file_input.write(cert.public_bytes(serialization.Encoding.PEM))
-            with open(key_file, "wb") as key_file_output:
-                key_file_output.write(
-                    key.private_bytes(
-                        encoding=serialization.Encoding.PEM,
-                        format=serialization.PrivateFormat.TraditionalOpenSSL,
-                        encryption_algorithm=serialization.NoEncryption(),
-                    )
-                )
-        except Exception:
-            traceback.print_exc()
-            return None, None, None
-        return cert_file, key_file, crl_file
-
     def sni_callback(self, sslsock, servername, sslctx):
-        if servername is None:
-            servername = self.CN
+        name = servername or self.CN
+        if isinstance(name, bytes):
+            name = name.decode("utf-8", "replace")
+        leaf, key = self._leaf_for(name)
         try:
             newctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         except AttributeError:
             newctx = ssl.SSLContext(ssl.PROTOCOL_TLS)
         newctx.options |= ssl.OP_NO_TLSv1
         newctx.options |= ssl.OP_NO_TLSv1_1
-        cert_file, key_file, _ = self.create_cert(servername, self.ca_cert, self.ca_key)
-        if cert_file is None or key_file is None:
-            return
-
         newctx.check_hostname = False
-        newctx.load_cert_chain(certfile=cert_file, keyfile=key_file)
+        newctx.load_cert_chain(certfile=leaf, keyfile=key)
         sslsock.context = newctx
-        return
 
-    def _load_cert(self, certpath):
-        ca_cert = None
-        try:
-            with open(certpath, 'rb') as cert_file_input:
-                data = cert_file_input.read()
-            ca_cert = crypto.load_certificate(crypto.FILETYPE_PEM, data)
-        except crypto.Error as e:
-            self.logger.error("Failed to load certficate: %s", str(e))
-        return ca_cert
+    def _leaf_for(self, cn):
+        cert_file, key_file, _ = self.create_cert(cn, self.ca_cert, self.ca_key)
+        if not cert_file or not key_file:
+            raise RuntimeError("failed to mint FakeNet leaf for %r" % (cn,))
+        return cert_file, key_file
 
-    def _load_private_key(self, keypath):
+    def _safe_name(self, cn):
+        cn = cn.decode("utf-8", "replace") if isinstance(cn, bytes) else str(cn)
+        cn = cn.strip().strip(".").lower() or "fakenet.local"
+        return re.sub(r"[^a-zA-Z0-9._-]+", "_", cn)[:180]
+
+    def _cached_leaf_ok(self, cert_file, key_file):
+        if not (os.path.isfile(cert_file) and os.path.isfile(key_file)):
+            return False
         try:
-            with open(keypath, 'rb') as key_file_input:
-                data = key_file_input.read()
-            privkey = crypto.load_privatekey(crypto.FILETYPE_PEM, data)
+            cert = _load_x509(cert_file)
+        except Exception:
+            return False
+        want = set(self._cdp_urls())
+        have = set(_cdp_uris(cert))
+        if not want.intersection(have):
+            return False
+        # Must be an end-entity cert, not the CA itself.
+        try:
+            bc = cert.extensions.get_extension_for_class(x509.BasicConstraints).value
+            if bc.ca:
+                return False
+        except x509.ExtensionNotFound:
+            pass
+        nb, na = _cert_times(cert)
+        now = _utc_now()
+        clock_ok = 2024 <= now.year <= 2038
+        # Gateway RTC is often 1970 in FakeNet. A leaf dated in the CA's real
+        # window is still valid on the Windows guest.
+        if clock_ok:
+            if nb and now < nb - datetime.timedelta(minutes=5):
+                return False
+            if na and now > na - datetime.timedelta(days=7):
+                return False
+        elif na is None or na.year < 2024:
+            return False
+        return True
+
+    def create_cert(self, cn, ca_cert=None, ca_key=None, cert_dir=None):
+        """
+        Create a leaf (or self-signed CA when ca_* omitted).
+
+        Returns (chain_or_cert_pem, key_file, crl_file).
+        For signed leaves, the first path is leaf+CA fullchain for load_cert_chain.
+        """
+        f_selfsign = ca_cert is None or ca_key is None
+        if not cert_dir:
+            cert_dir = self.abs_config_path(self.config.get("cert_dir"))
+        else:
+            cert_dir = os.path.abspath(cert_dir)
+        os.makedirs(cert_dir, exist_ok=True)
+
+        safe = self._safe_name(cn)
+        cert_file = os.path.join(cert_dir, "%s.crt" % safe)
+        key_file = os.path.join(cert_dir, "%s.key" % safe)
+        chain_file = os.path.join(cert_dir, "%s.chain.pem" % safe)
+        crl_file = os.path.join(cert_dir, "ca.crl")
+
+        if f_selfsign:
+            if self._cached_leaf_ok(cert_file, key_file):
+                return cert_file, key_file, crl_file
+            self._mint_self_signed(cn, cert_file, key_file, crl_file)
+            return cert_file, key_file, crl_file
+
+        if self._cached_leaf_ok(cert_file, key_file) and os.path.isfile(chain_file):
+            return chain_file, key_file, crl_file
+
+        self._mint_leaf(cn, cert_file, key_file, chain_file, ca_cert, ca_key)
+        self._publish_crl()
+        return chain_file, key_file, crl_file
+
+    def _validity_window(self, ca_cert_obj=None):
+        return _validity_window(ca_cert_obj, self.LEAF_DAYS)
+
+    def _cdp_urls(self):
+        primary = (self.config.get("crl_url") or self.config.get("cdp_url") or "").strip()
+        return default_cdp_urls(primary or None)
+
+    def _publish_crl(self):
+        if not self.ca_cert or not self.ca_key:
+            return
+        dests = [
+            os.path.join(self.abs_config_path(self.config.get("cert_dir")), "ca.crl"),
+            "/var/log/quarantine/fakenet/www/mitmproxy-ca.crl",
+            "/etc/quarantine-gateway/mitmproxy-ca.crl",
+        ]
+        wr = self.config.get("webroot")
+        if wr:
+            dests.append(os.path.join(str(wr), "mitmproxy-ca.crl"))
+        written = publish_mitm_crl(self.ca_cert, self.ca_key, dests)
+        if written:
+            self.ca_crl = written[0]
+            self.logger.info("Published MITM CRL to %s", ", ".join(written))
+
+    def _mint_self_signed(self, cn, cert_file, key_file, crl_file):
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        nb, na = self._validity_window(None)
+        subject = x509.Name([
+            x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
+            x509.NameAttribute(NameOID.COMMON_NAME, str(cn)[:64]),
+        ])
+        ski = x509.SubjectKeyIdentifier.from_public_key(key.public_key())
+        builder = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(subject)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+            .add_extension(
+                x509.KeyUsage(
+                    digital_signature=True,
+                    content_commitment=False,
+                    key_encipherment=False,
+                    data_encipherment=False,
+                    key_agreement=False,
+                    key_cert_sign=True,
+                    crl_sign=True,
+                    encipher_only=False,
+                    decipher_only=False,
+                ),
+                critical=True,
+            )
+            .add_extension(ski, critical=False)
+        )
+        builder = _apply_cert_validity(builder, nb, na)
+        cert = builder.sign(private_key=key, algorithm=hashes.SHA256())
+        self._write_key(key_file, key)
+        self._write_cert(cert_file, cert)
+        crl_builder = x509.CertificateRevocationListBuilder().issuer_name(cert.subject)
+        crl_builder = _apply_crl_validity(crl_builder, nb, na)
+        try:
+            crl = crl_builder.sign(private_key=key, algorithm=hashes.SHA256())
+            with open(crl_file, "wb") as f:
+                f.write(crl.public_bytes(serialization.Encoding.DER))
         except Exception:
             traceback.print_exc()
-            privkey = None
-        return privkey
 
-    def _run_process(self, argv):
-        rc = True
-        if sys.platform.startswith('win'):
-            try:
-                self.logger.debug(f"Running cmd: {argv}")
-                subprocess.check_call(argv, shell=True, stdout=None)
-                rc = True
-            except subprocess.CalledProcessError:
-                self.logger.error('Failed to add root CA')
-                rc = False
-        return rc
+    def _mint_leaf(self, cn, cert_file, key_file, chain_file, ca_cert, ca_key):
+        ca_cert_obj = _load_x509(ca_cert)
+        with open(ca_key, "rb") as f:
+            ca_key_obj = serialization.load_pem_private_key(f.read(), password=None)
+        leaf_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        nb, na = self._validity_window(ca_cert_obj)
+        cn_str = cn.decode("utf-8", "replace") if isinstance(cn, bytes) else str(cn)
+        cn_str = cn_str.strip().strip(".") or "fakenet.local"
+        subject = x509.Name([
+            x509.NameAttribute(NameOID.COMMON_NAME, cn_str[:64]),
+        ])
+        san = self._san_for(cn_str)
+        ski = x509.SubjectKeyIdentifier.from_public_key(leaf_key.public_key())
+        aki = x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key_obj.public_key())
+        builder = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(ca_cert_obj.subject)
+            .public_key(leaf_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+            .add_extension(
+                x509.KeyUsage(
+                    digital_signature=True,
+                    content_commitment=False,
+                    key_encipherment=True,
+                    data_encipherment=False,
+                    key_agreement=False,
+                    key_cert_sign=False,
+                    crl_sign=False,
+                    encipher_only=False,
+                    decipher_only=False,
+                ),
+                critical=True,
+            )
+            .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
+            .add_extension(san, critical=False)
+            .add_extension(ski, critical=False)
+            .add_extension(aki, critical=False)
+            .add_extension(
+                x509.CRLDistributionPoints(
+                    [
+                        x509.DistributionPoint(
+                            full_name=[x509.UniformResourceIdentifier(url)],
+                            relative_name=None,
+                            reasons=None,
+                            crl_issuer=None,
+                        )
+                        for url in self._cdp_urls()
+                    ]
+                ),
+                critical=False,
+            )
+        )
+        builder = _apply_cert_validity(builder, nb, na)
+        hash_alg = hashes.SHA256()
+        if isinstance(ca_key_obj, (ed25519.Ed25519PrivateKey,)):
+            hash_alg = None
+        cert = builder.sign(private_key=ca_key_obj, algorithm=hash_alg)
+        self._write_key(key_file, leaf_key)
+        self._write_cert(cert_file, cert)
+        with open(ca_cert, "rb") as f:
+            ca_pem = f.read()
+        # Full chain: leaf first, then the lab MITM CA (same cert the guest should trust).
+        with open(chain_file, "wb") as f:
+            f.write(cert.public_bytes(serialization.Encoding.PEM))
+            if not ca_pem.endswith(b"\n"):
+                f.write(b"\n")
+            f.write(ca_pem)
+        encoded_nb, encoded_na = _cert_times(cert)
+        self.logger.info("Minted FakeNet leaf CN=%s valid %s .. %s", cn_str, encoded_nb, encoded_na)
+        if encoded_na is not None and encoded_na.year < 2024:
+            raise RuntimeError("minted leaf notAfter is %s (refusing to serve an expired cert)" % encoded_na)
 
-    def _add_root_ca(self, ca_cert_file, ca_crl_file):
-        argv = ['certutil', '-addstore', 'Root', ca_cert_file]
-        installed_cert = self._run_process(argv)
-        if not installed_cert:
-            return False
-        argv = ['certutil', '-addstore', 'CA', ca_crl_file]
-        return self._run_process(argv)
-
-    def _remove_root_ca(self, cn):
-        argv = ['certutil', '-delstore', 'Root', cn]
-        removed = self._run_process(argv)
-        if not removed:
-            return False
-        argv = ['certutil', '-delstore', 'CA', cn]
-        return self._run_process(argv)
-
-    def __del__(self):
+    def _san_for(self, cn):
+        names = []
         try:
-            if (not self.config.get('networkmode', None) == 'multihost' and
-                    not self.config.get('static_ca').lower() == 'yes'):
-                self._remove_root_ca(self.ca_cn)
-            shutil.rmtree(self.abs_config_path(self.config.get('cert_dir', None)), ignore_errors=True)
-            if self.config.get("webroot"):
-                crl = os.path.join(self.config.get("webroot"), "ca.crl")
-                if os.path.exists(crl):
-                    os.remove(crl)
+            names.append(x509.IPAddress(ipaddress.ip_address(cn)))
         except Exception:
-            pass
-        return
+            try:
+                names.append(x509.DNSName(cn))
+            except ValueError:
+                names.append(x509.DNSName("fakenet.local"))
+        if not any(isinstance(n, x509.DNSName) and n.value == "fakenet.local" for n in names):
+            try:
+                names.append(x509.DNSName("fakenet.local"))
+            except ValueError:
+                pass
+        return x509.SubjectAlternativeName(names)
+
+    def _write_cert(self, path, cert):
+        with open(path, "wb") as f:
+            f.write(cert.public_bytes(serialization.Encoding.PEM))
+
+    def _write_key(self, path, key):
+        with open(path, "wb") as f:
+            f.write(
+                key.private_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PrivateFormat.TraditionalOpenSSL,
+                    encryption_algorithm=serialization.NoEncryption(),
+                )
+            )
 
     def abs_config_path(self, path):
-        """
-        Attempts to return the absolute path of a path from a configuration
-        setting.
-        """
         if path is None:
             return None
-
+        if os.path.isabs(path):
+            return path
         abspath = os.path.abspath(path)
         if os.path.exists(abspath):
             return abspath
-
-        if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
             abspath = os.path.join(os.getcwd(), path)
         else:
             abspath = os.path.join(os.fspath(Path(__file__).parents[2]), path)
-
         return abspath
+
+    def __del__(self):
+        # Do not delete cert_dir when using the lab MITM CA — FakeNet may still be serving.
+        try:
+            static = str(self.config.get("static_ca") or "no").lower() == "yes"
+            if static:
+                return
+            shutil.rmtree(self.abs_config_path(self.config.get("cert_dir", None)), ignore_errors=True)
+        except Exception:
+            pass

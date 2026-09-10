@@ -1,16 +1,22 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Install the host mitmproxy CA into the guest Trusted Root store.
+  Install the Linux gateway mitmproxy CA into the guest Trusted Root store.
 .DESCRIPTION
-  Run inside the quarantine VM as Administrator. Fixes HTTPS / SSL errors
-  caused by the host proxy intercepting TLS.
+  Run inside the quarantine VM as Administrator.
+
+  FakeNet and permissive MITM both sign TLS with the gateway's mitmproxy CA
+  (/root/.mitmproxy on Quarantine-Gateway). Do not install the host
+  (10.0.2.2) CA unless you are on the legacy host-nat path.
+
+  In FakeNet mode the CA is served over HTTP:
+    http://10.66.0.1/mitmproxy-ca-cert.cer
 #>
 [CmdletBinding()]
 param(
-    [string]$ProxyHost = '10.0.2.2',
+    [string]$ProxyHost = '',
     [int]$ProxyPort = 8080,
-    [int]$PacPort = 8081,
+    [int]$PacPort = 8080,
     [string]$CaPath
 )
 
@@ -23,41 +29,115 @@ function Test-Administrator {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Test-CaFile {
+    param([string]$Path)
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $null }
+    if ((Get-Item -LiteralPath $Path).Length -lt 32) { return $null }
+    try {
+        return New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($Path)
+    } catch {
+        return $null
+    }
+}
+
+function Save-UrlToFile {
+    param(
+        [string]$Url,
+        [string]$Dest
+    )
+    Write-Host "Downloading CA: $Url"
+    & curl.exe --noproxy '*' --http1.1 -fsSL --max-time 15 $Url -o $Dest
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "Download failed (curl exit $LASTEXITCODE): $Url"
+        return $false
+    }
+    return $true
+}
+
 if (-not (Test-Administrator)) {
     throw 'Run this script as Administrator inside the guest VM.'
 }
 
-if (-not $CaPath) {
-    $CaPath = Join-Path $env:TEMP 'mitmproxy-ca-cert.cer'
+$dest = $CaPath
+if (-not $dest) {
+    $dest = Join-Path $env:TEMP 'mitmproxy-ca-cert.cer'
 }
 
-$urls = @(
-    "http://${ProxyHost}:${PacPort}/mitmproxy-ca-cert.cer",
-    "http://${ProxyHost}:${ProxyPort}/mitmproxy-ca-cert.cer"
+$urls = New-Object System.Collections.Generic.List[string]
+# FakeNet HTTP (no MITM listener in sinkhole mode)
+$urls.Add('http://10.66.0.1/mitmproxy-ca-cert.cer')
+# Permissive gateway MITM (explicit + transparent addon)
+$urls.Add('http://10.66.0.1:8080/mitmproxy-ca-cert.cer')
+$urls.Add('http://10.66.0.1:8081/mitmproxy-ca-cert.cer')
+if ($ProxyHost) {
+    $urls.Add("http://${ProxyHost}:${PacPort}/mitmproxy-ca-cert.cer")
+    $urls.Add("http://${ProxyHost}:${ProxyPort}/mitmproxy-ca-cert.cer")
+}
+# Legacy host-nat last — wrong CA for gateway FakeNet/MITM.
+$urls.Add('http://10.0.2.2:8081/mitmproxy-ca-cert.cer')
+$urls.Add('http://10.0.2.2:8080/mitmproxy-ca-cert.cer')
+
+$localCandidates = @(
+    $CaPath,
+    (Join-Path $PSScriptRoot 'mitmproxy-ca-cert.cer'),
+    'C:\Users\Public\Quarantine\mitmproxy-ca-cert.cer'
 )
 
-$downloaded = $false
+$cert = $null
+$source = $null
+
+# Live gateway CA first (FakeNet :80, then permissive MITM). Local export next.
+# 10.0.2.2 is the host proxy CA — wrong issuer for FakeNet HTTPS.
 foreach ($url in $urls) {
-    Write-Host "Downloading CA: $url"
+    $tmp = Join-Path $env:TEMP ('qca-{0}.cer' -f [Guid]::NewGuid().ToString('N'))
     try {
-        & curl.exe --noproxy '*' -fsSL $url -o $CaPath
-        if ((Test-Path -LiteralPath $CaPath) -and ((Get-Item -LiteralPath $CaPath).Length -ge 32)) {
-            $downloaded = $true
-            break
+        if (-not (Save-UrlToFile -Url $url -Dest $tmp)) { continue }
+        $parsed = Test-CaFile -Path $tmp
+        if (-not $parsed) {
+            Write-Warning "Not a certificate: $url"
+            continue
         }
-    } catch {
-        Write-Warning "Download failed: $url"
+        Copy-Item -LiteralPath $tmp -Destination $dest -Force
+        $cert = $parsed
+        $source = $url
+        break
+    } finally {
+        if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
     }
 }
 
-if (-not $downloaded) {
-    throw "Could not download mitmproxy CA. On the host run: .\quarantine-vm.ps1 proxy export-ca"
+if (-not $cert) {
+    foreach ($p in $localCandidates) {
+        if ([string]::IsNullOrWhiteSpace($p)) { continue }
+        $parsed = Test-CaFile -Path $p
+        if ($parsed) {
+            if ($p -ne $dest) {
+                Copy-Item -LiteralPath $p -Destination $dest -Force
+            }
+            $cert = $parsed
+            $source = $p
+            break
+        }
+    }
 }
 
-Import-Certificate -FilePath $CaPath -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
-Import-Certificate -FilePath $CaPath -CertStoreLocation Cert:\CurrentUser\Root | Out-Null
+if (-not $cert) {
+    throw "Could not download the gateway mitmproxy CA. In FakeNet mode use http://10.66.0.1/mitmproxy-ca-cert.cer after switching the gateway to fakenet. In permissive mode use http://10.66.0.1:8080/mitmproxy-ca-cert.cer"
+}
 
-Write-Host 'mitmproxy CA installed in Trusted Root Certification Authorities.'
+Write-Host ("Installing CA: {0}" -f $cert.Subject)
+Write-Host ("  Issuer:     {0}" -f $cert.Issuer)
+Write-Host ("  Thumbprint: {0}" -f $cert.Thumbprint)
+Write-Host ("  Valid:      {0:u} .. {1:u}" -f $cert.NotBefore.ToUniversalTime(), $cert.NotAfter.ToUniversalTime())
+Write-Host ("  Source:     {0}" -f $source)
+if ($cert.NotAfter -lt [datetime]::UtcNow) {
+    Write-Warning 'This CA is already expired. Re-create it (gateway permissive MITM once) and re-run this installer.'
+}
+
+Import-Certificate -FilePath $dest -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+Import-Certificate -FilePath $dest -CertStoreLocation Cert:\CurrentUser\Root | Out-Null
+
+Write-Host 'Gateway mitmproxy CA installed in Trusted Root Certification Authorities.'
 Write-Host 'Restart the browser (or the VM) and HTTPS should work.'
 Write-Host 'Firefox uses its own store — import this file there if you use Firefox.'
-Write-Host "  $CaPath"
+Write-Host "  $dest"

@@ -257,21 +257,39 @@ if ($Mode -eq 'gateway') {
 } else {
     Set-NetFirewallProfile -Profile Domain, Public, Private -DefaultOutboundAction Block -ErrorAction Stop
 }
-# Trust mitm CA (download over HTTP from PAC/proxy port)
-$caUrl = "http://${ProxyHost}:${PacPort}/mitmproxy-ca-cert.cer"
+# Trust mitm CA (HTTP from FakeNet :80 or permissive MITM :8080)
+$caUrls = @(
+    "http://${ProxyHost}/mitmproxy-ca-cert.cer",
+    "http://${ProxyHost}:${PacPort}/mitmproxy-ca-cert.cer",
+    "http://${ProxyHost}:${ProxyPort}/mitmproxy-ca-cert.cer"
+)
 $caPath = Join-Path $env:TEMP 'mitmproxy-ca-cert.cer'
 $caInstalled = $false
-try {
-    & curl.exe --noproxy '*' -fsSL $caUrl -o $caPath
-    if (-not (Test-Path -LiteralPath $caPath) -or ((Get-Item -LiteralPath $caPath).Length -lt 32)) {
-        throw "empty download from $caUrl"
+foreach ($caUrl in $caUrls) {
+    try {
+        & curl.exe --noproxy '*' --http1.1 -fsSL --max-time 15 $caUrl -o $caPath
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $caPath) -or ((Get-Item -LiteralPath $caPath).Length -lt 32)) {
+            continue
+        }
+        $parsed = $null
+        try {
+            $parsed = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($caPath)
+        } catch {
+            continue
+        }
+        if (-not $parsed) { continue }
+        Import-Certificate -FilePath $caPath -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
+        Import-Certificate -FilePath $caPath -CertStoreLocation Cert:\CurrentUser\Root | Out-Null
+        $caInstalled = $true
+        Write-Host "  mitmproxy CA installed (Trusted Root) from $caUrl"
+        Write-Host ("    {0} thumbprint {1}" -f $parsed.Subject, $parsed.Thumbprint)
+        break
+    } catch {
+        continue
     }
-    Import-Certificate -FilePath $caPath -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
-    Import-Certificate -FilePath $caPath -CertStoreLocation Cert:\CurrentUser\Root | Out-Null
-    $caInstalled = $true
-    Write-Host '  mitmproxy CA installed (Trusted Root)'
-} catch {
-    Write-Warning "Could not install mitmproxy CA from $caUrl. After the gateway/proxy is up, run Install-QuarantineProxyCA.ps1"
+}
+if (-not $caInstalled) {
+    Write-Warning "Could not install mitmproxy CA from FakeNet/MITM HTTP. After the gateway is up, run Install-QuarantineProxyCA.ps1"
 }
 
 Write-Host @"

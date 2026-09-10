@@ -178,15 +178,47 @@ fi
 
 # Smoke-test cert generation (catches X509Extension regressions early)
 "$pybin" - <<'PY'
-import os, tempfile
+import os, tempfile, datetime
+from cryptography import x509
 from fakenet.listeners.ssl_utils import SSLWrapper
+
 td = tempfile.mkdtemp(prefix="fakenet-ssl-")
 cfg = {"cert_dir": td, "static_ca": "No", "networkmode": "multihost", "webroot": None}
 w = SSLWrapper(cfg)
 assert os.path.isfile(w.ca_cert) and os.path.isfile(w.ca_key), "CA not created"
 leaf_c, leaf_k, _ = w.create_cert("example.test", w.ca_cert, w.ca_key, td)
 assert leaf_c and os.path.isfile(leaf_c), "leaf cert failed"
-print("ssl-smoke-ok", w.ca_cert, leaf_c)
+with open(leaf_c, "rb") as f:
+    leaf = x509.load_pem_x509_certificate(f.read())
+na = getattr(leaf, "not_valid_after_utc", None) or leaf.not_valid_after
+assert na.year >= 2024, "leaf notAfter is %s" % na
+try:
+    bc = leaf.extensions.get_extension_for_class(x509.BasicConstraints).value
+    assert not bc.ca, "leaf must not be a CA cert"
+except x509.ExtensionNotFound:
+    pass
+try:
+    cdp = leaf.extensions.get_extension_for_class(x509.CRLDistributionPoints)
+    assert cdp is not None
+except x509.ExtensionNotFound:
+    raise SystemExit("leaf must have CDP (Schannel CRYPT_E_NO_REVOCATION_CHECK)")
+# Static CA path: reuse the just-minted CA as FakeNet Static_CA
+td2 = tempfile.mkdtemp(prefix="fakenet-static-")
+cfg2 = {
+    "cert_dir": td2,
+    "static_ca": "Yes",
+    "ca_cert": w.ca_cert,
+    "ca_key": w.ca_key,
+    "networkmode": "multihost",
+    "webroot": None,
+}
+w2 = SSLWrapper(cfg2)
+chain, key, _ = w2.create_cert("google.com", w2.ca_cert, w2.ca_key, td2)
+assert os.path.isfile(chain) and os.path.isfile(key)
+with open(chain, "rb") as f:
+    signed = x509.load_pem_x509_certificate(f.read())
+assert signed.issuer == x509.load_pem_x509_certificate(open(w.ca_cert, "rb").read()).subject
+print("ssl-smoke-ok", w.ca_cert, leaf_c, chain)
 PY
 
 src="$OPT/fakenet/quarantine.ini"
