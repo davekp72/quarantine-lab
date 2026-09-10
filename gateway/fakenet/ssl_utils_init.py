@@ -64,37 +64,39 @@ def _cdp_uris(cert):
     return uris
 
 
+# Chrome/Edge reject publicly-trusted certs longer than 398 days. Cap FakeNet
+# leaves the same way so a locally-trusted mitm CA still looks like a browser cert.
+CHROME_MAX_LEAF_DAYS = 397
+
+
 def _validity_window(ca_cert_obj=None, leaf_days=825):
-    # Windows Schannel uses the *guest* clock. Gateway RTC is often wrong in
-    # FakeNet (no WAN/NTP). Never trust a 1970/insane now for notAfter.
-    now = _utc_now()
-    clock_ok = datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc) <= now <= datetime.datetime(
-        2038, 1, 1, tzinfo=datetime.timezone.utc
-    )
+    """Leaf/CRL dates that survive a lagging Windows guest clock.
+
+    Never use gateway 'now' for notBefore. FakeNet has no NTP; the gateway has
+    been minutes ahead of the guest, which makes now-5min still in the future
+    and Chrome shows NET::ERR_CERT_DATE_INVALID (Schannel may already be fine).
+    """
     ca_nb = ca_na = None
     if ca_cert_obj is not None:
         ca_nb, ca_na = _cert_times(ca_cert_obj)
 
-    if not clock_ok:
-        if ca_nb and ca_na and (ca_na - ca_nb) > datetime.timedelta(days=2):
-            return ca_nb + datetime.timedelta(hours=1), ca_na - datetime.timedelta(hours=1)
-        return (
-            datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc),
-            datetime.datetime(2035, 12, 31, 23, 59, 59, tzinfo=datetime.timezone.utc),
-        )
+    max_life = datetime.timedelta(days=min(int(leaf_days), CHROME_MAX_LEAF_DAYS))
 
-    nb = now - datetime.timedelta(minutes=5)
-    na = now + datetime.timedelta(days=leaf_days)
-    if ca_nb:
-        nb = max(nb, ca_nb + datetime.timedelta(minutes=1))
-    if ca_na:
-        na = min(na, ca_na - datetime.timedelta(hours=1))
-    if na <= nb:
-        if ca_nb and ca_na and ca_na > ca_nb + datetime.timedelta(hours=2):
-            return ca_nb + datetime.timedelta(hours=1), ca_na - datetime.timedelta(hours=1)
-        nb = now - datetime.timedelta(minutes=5)
-        na = now + datetime.timedelta(days=365)
-    return nb, na
+    if ca_nb and ca_na and (ca_na - ca_nb) > datetime.timedelta(days=2):
+        nb = ca_nb + datetime.timedelta(hours=1)
+        na = min(ca_na - datetime.timedelta(hours=1), nb + max_life)
+        if na > nb + datetime.timedelta(days=2):
+            return nb, na
+
+    now = _utc_now()
+    clock_ok = datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc) <= now <= datetime.datetime(
+        2038, 1, 1, tzinfo=datetime.timezone.utc
+    )
+    if clock_ok:
+        nb = now - datetime.timedelta(days=7)
+        return nb, nb + max_life
+    nb = datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc)
+    return nb, nb + max_life
 
 
 def _apply_cert_validity(builder, nb, na):
@@ -208,7 +210,7 @@ class SSLWrapper(object):
             self.ca_cert, self.ca_key, self.ca_crl = self.create_cert(self.CN)
             self._publish_crl()
 
-    def wrap_socket(self, s):
+    def _tls_server_context(self, leaf, key):
         try:
             ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         except AttributeError:
@@ -216,9 +218,30 @@ class SSLWrapper(object):
         ctx.options |= ssl.OP_NO_TLSv1
         ctx.options |= ssl.OP_NO_TLSv1_1
         ctx.sni_callback = self.sni_callback
-        leaf, key = self._leaf_for(self.config.get("default_cn") or "fakenet.local")
+        try:
+            ctx.set_alpn_protocols(["http/1.1"])
+        except Exception:
+            pass
         ctx.load_cert_chain(certfile=leaf, keyfile=key)
+        return ctx
+
+    def wrap_socket(self, s):
+        leaf, key = self._leaf_for(self.config.get("default_cn") or "fakenet.local")
+        ctx = self._tls_server_context(leaf, key)
         return ctx.wrap_socket(s, server_side=True)
+
+    def wrap_accepted_socket(self, sock, servername=None):
+        """TLS-wrap an already-accepted client socket (HTTP CONNECT tunnel)."""
+        name = servername or self.config.get("default_cn") or "fakenet.local"
+        if isinstance(name, bytes):
+            name = name.decode("utf-8", "replace")
+        name = str(name).split("/")[0]
+        if ":" in name:
+            name = name.rsplit(":", 1)[0]
+        name = name.strip() or "fakenet.local"
+        leaf, key = self._leaf_for(name)
+        ctx = self._tls_server_context(leaf, key)
+        return ctx.wrap_socket(sock, server_side=True, do_handshake_on_connect=True)
 
     def sni_callback(self, sslsock, servername, sslctx):
         name = servername or self.CN
@@ -232,6 +255,10 @@ class SSLWrapper(object):
         newctx.options |= ssl.OP_NO_TLSv1
         newctx.options |= ssl.OP_NO_TLSv1_1
         newctx.check_hostname = False
+        try:
+            newctx.set_alpn_protocols(["http/1.1"])
+        except Exception:
+            pass
         newctx.load_cert_chain(certfile=leaf, keyfile=key)
         sslsock.context = newctx
 
@@ -267,10 +294,15 @@ class SSLWrapper(object):
         nb, na = _cert_times(cert)
         now = _utc_now()
         clock_ok = 2024 <= now.year <= 2038
-        # Gateway RTC is often 1970 in FakeNet. A leaf dated in the CA's real
-        # window is still valid on the Windows guest.
+        if nb and na:
+            if (na - nb) > datetime.timedelta(days=398):
+                return False
+        # Remint leaves whose notBefore is ~gateway-now (Chrome DATE_INVALID
+        # on a guest whose clock lags the gateway).
+        if clock_ok and nb and (now - nb) < datetime.timedelta(hours=12):
+            return False
         if clock_ok:
-            if nb and now < nb - datetime.timedelta(minutes=5):
+            if nb and now < nb:
                 return False
             if na and now > na - datetime.timedelta(days=7):
                 return False

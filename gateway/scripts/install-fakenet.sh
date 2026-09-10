@@ -174,6 +174,19 @@ if [[ -f "$patch_src" ]]; then
   echo "Patched FakeNet SSL utils -> $ssl_dst"
 fi
 
+http_patch="$OPT/fakenet/patch_httplistener.py"
+http_src="$OPT/fakenet/HTTPListener.py"
+http_dst="$("$pybin" -c 'import fakenet.listeners.HTTPListener as h, pathlib; print(pathlib.Path(h.__file__).resolve())')"
+if [[ -f "$http_src" && -n "$http_dst" ]]; then
+  if [[ -f "$http_patch" ]]; then
+    "$pybin" "$http_patch" "$http_dst" "$http_src"
+  else
+    install -m 0644 "$http_src" "$http_dst"
+  fi
+  rm -rf "$(dirname "$http_dst")/__pycache__" 2>/dev/null || true
+  echo "Installed FakeNet HTTPListener CONNECT -> $http_dst"
+fi
+
 "$pybin" -c 'import fakenet, netfilterqueue, netifaces; from fakenet.listeners.ssl_utils import SSLWrapper; print("ok", fakenet.__file__)'
 
 # Smoke-test cert generation (catches X509Extension regressions early)

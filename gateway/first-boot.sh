@@ -184,12 +184,14 @@ install -m 0644 "$OPT/systemd/quarantine-mitm-explicit.service" /etc/systemd/sys
 install -m 0644 "$OPT/systemd/quarantine-mitm-transparent.service" /etc/systemd/system/
 install -m 0644 "$OPT/systemd/quarantine-capture.service" /etc/systemd/system/
 install -m 0644 "$OPT/systemd/quarantine-fakenet.service" /etc/systemd/system/
+install -m 0644 "$OPT/systemd/quarantine-fakenet-proxy.service" /etc/systemd/system/
 install -m 0644 "$OPT/systemd/quarantine-traffic-mode.service" /etc/systemd/system/
 install -m 0755 "$OPT/scripts/start-capture.sh" /usr/local/sbin/quarantine-capture-start
 install -m 0755 "$OPT/scripts/stop-capture.sh" /usr/local/sbin/quarantine-capture-stop
 install -m 0755 "$OPT/scripts/status.sh" /usr/local/sbin/quarantine-gateway-status
 install -m 0755 "$OPT/scripts/set-traffic-mode.sh" /usr/local/sbin/quarantine-set-traffic-mode
 install -m 0755 "$OPT/scripts/install-fakenet.sh" /usr/local/sbin/quarantine-install-fakenet
+install -m 0755 "$OPT/scripts/fakenet-explicit-proxy.py" /usr/local/sbin/quarantine-fakenet-explicit-proxy
 install -m 0755 "$OPT/scripts/repair-wan-dns.sh" /usr/local/sbin/quarantine-repair-wan-dns
 install -m 0755 "$OPT/scripts/sync-hint.txt" /etc/quarantine-gateway/sync-hint.txt 2>/dev/null || true
 

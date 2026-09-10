@@ -1,0 +1,15 @@
+[Unit]
+Description=Quarantine FakeNet explicit HTTP/CONNECT proxy (:8080)
+After=quarantine-fakenet.service
+Requires=quarantine-fakenet.service
+Conflicts=quarantine-mitm-explicit.service quarantine-mitm-transparent.service
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/quarantine-gateway/fakenet-proxy.env
+ExecStart=/usr/bin/python3 /usr/local/sbin/quarantine-fakenet-explicit-proxy
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -111,6 +111,17 @@ ensure_fakenet_ca() {
   cp -f "$cert_out" "$www/mitmproxy-ca-cert.pem"
   chmod 644 "$www/mitmproxy-ca-cert.cer" "$www/mitmproxy-ca-cert.pem"
   echo "http://${LAN_IP}/mitmproxy-ca.crl" >"$ETC/fakenet-cdp.url"
+  cat >"$www/quarantine.pac" <<EOF
+function FindProxyForURL(url, host) {
+    return "PROXY ${LAN_IP}:8080";
+}
+EOF
+  chmod 644 "$www/quarantine.pac"
+  cat >"$ETC/fakenet-proxy.env" <<EOF
+QUARANTINE_LAN_IP=${LAN_IP}
+QUARANTINE_FAKENET_WWW=/var/log/quarantine/fakenet/www
+QUARANTINE_FAKENET_PROXY_PORTS=8080,8081
+EOF
 
   echo "FakeNet HTTPS will use mitmproxy CA: $cert_out (from $combined)"
   echo "FakeNet CA subject/dates:"
@@ -122,21 +133,47 @@ ensure_fakenet_ca() {
 }
 
 # Apply cryptography-based SSL patch so HTTPS UseSSL works on modern pyOpenSSL.
+# Replace FakeNet HTTPListener with the CONNECT-capable copy (browser PAC HTTPS).
 patch_fakenet_ssl() {
   local patch_src="$OPT/fakenet/ssl_utils_init.py"
+  local http_patch="$OPT/fakenet/patch_httplistener.py"
+  local http_src="$OPT/fakenet/HTTPListener.py"
   local pybin=/opt/quarantine-gateway/venv-fakenet/bin/python
-  local ssl_dst
-  if [[ ! -f "$patch_src" || ! -x "$pybin" ]]; then
-    return 0
+  local ssl_dst http_dst
+  if [[ ! -x "$pybin" ]]; then
+    echo "ERROR: FakeNet venv python missing: $pybin" >&2
+    return 1
   fi
-  ssl_dst="$("$pybin" -c 'import fakenet.listeners.ssl_utils as s, pathlib; print(pathlib.Path(s.__file__).resolve())' 2>/dev/null || true)"
-  if [[ -z "$ssl_dst" || ! -f "$ssl_dst" ]]; then
-    echo "WARNING: could not locate FakeNet ssl_utils to patch" >&2
-    return 0
+  if [[ -f "$patch_src" ]]; then
+    ssl_dst="$("$pybin" -c 'import fakenet.listeners.ssl_utils as s, pathlib; print(pathlib.Path(s.__file__).resolve())' 2>/dev/null || true)"
+    if [[ -n "$ssl_dst" && -f "$ssl_dst" ]]; then
+      install -m 0644 "$patch_src" "$ssl_dst"
+      rm -rf "$(dirname "$ssl_dst")/__pycache__" 2>/dev/null || true
+    else
+      echo "ERROR: could not locate FakeNet ssl_utils to patch" >&2
+      return 1
+    fi
   fi
-  install -m 0644 "$patch_src" "$ssl_dst"
-  rm -rf "$(dirname "$ssl_dst")/__pycache__" \
-    /opt/quarantine-gateway/venv-fakenet/lib/python*/site-packages/fakenet/configs/temp_certs \
+  if [[ ! -f "$http_src" ]]; then
+    echo "ERROR: missing CONNECT HTTPListener: $http_src" >&2
+    return 1
+  fi
+  http_dst="$("$pybin" -c 'import fakenet.listeners.HTTPListener as h, pathlib; print(pathlib.Path(h.__file__).resolve())' 2>/dev/null || true)"
+  if [[ -z "$http_dst" || ! -f "$http_dst" ]]; then
+    echo "ERROR: could not locate FakeNet HTTPListener to replace" >&2
+    return 1
+  fi
+  if [[ -f "$http_patch" ]]; then
+    "$pybin" "$http_patch" "$http_dst" "$http_src" || return 1
+  else
+    install -m 0644 "$http_src" "$http_dst" || return 1
+  fi
+  rm -rf "$(dirname "$http_dst")/__pycache__" 2>/dev/null || true
+  if ! grep -q 'QUARANTINE_CONNECT_PATCH_V3' "$http_dst"; then
+    echo "ERROR: HTTPListener CONNECT copy did not install" >&2
+    return 1
+  fi
+  rm -rf /opt/quarantine-gateway/venv-fakenet/lib/python*/site-packages/fakenet/configs/temp_certs \
     2>/dev/null || true
 }
 
@@ -180,14 +217,22 @@ PY
 
 # FakeNet uses iptables NFQUEUE. LinuxFlushIptables=No so leftovers can linger.
 cleanup_nfqueue() {
-  if ! command -v iptables >/dev/null 2>&1; then
-    return 0
-  fi
-  iptables -t mangle -F 2>/dev/null || true
-  iptables -t raw -F 2>/dev/null || true
-  while iptables -t mangle -D PREROUTING -j NFQUEUE 2>/dev/null; do :; done
-  while iptables -t filter -D INPUT -j NFQUEUE 2>/dev/null; do :; done
-  while iptables -t filter -D FORWARD -j NFQUEUE 2>/dev/null; do :; done
+  # FakeNet and old experiments may leave iptables-legacy NAT OUTPUT redirects.
+  # Those bounce gateway-originated HTTP (mitmproxy → origin:80) to local :80,
+  # which is closed in permissive mode → errno 111 → 502 Bad Gateway.
+  local ipt
+  for ipt in iptables iptables-nft iptables-legacy ip6tables ip6tables-nft ip6tables-legacy; do
+    command -v "$ipt" >/dev/null 2>&1 || continue
+    $ipt -t mangle -F 2>/dev/null || true
+    $ipt -t raw -F 2>/dev/null || true
+    $ipt -t nat -F OUTPUT 2>/dev/null || true
+    $ipt -t nat -F PREROUTING 2>/dev/null || true
+    $ipt -t nat -F 2>/dev/null || true
+    while $ipt -t mangle -D PREROUTING -j NFQUEUE 2>/dev/null; do :; done
+    while $ipt -t filter -D INPUT -j NFQUEUE 2>/dev/null; do :; done
+    while $ipt -t filter -D FORWARD -j NFQUEUE 2>/dev/null; do :; done
+  done
+  conntrack -F 2>/dev/null || true
 }
 
 require_fakenet() {
@@ -231,10 +276,10 @@ mode_fakenet() {
   require_fakenet || return 1
   ensure_fakenet_ca || return 1
   render_fakenet_ini || return 1
-  patch_fakenet_ssl
+  patch_fakenet_ssl || return 1
   # Disable MITM/dnsmasq so they cannot start after FakeNet on reboot
   # (systemd Conflicts would otherwise stop FakeNet).
-  systemctl disable --now quarantine-mitm-explicit quarantine-mitm-transparent dnsmasq 2>/dev/null || true
+  systemctl disable --now quarantine-mitm-explicit quarantine-mitm-transparent dnsmasq quarantine-fakenet-proxy 2>/dev/null || true
   systemctl reset-failed quarantine-fakenet 2>/dev/null || true
   systemctl stop quarantine-fakenet 2>/dev/null || true
   free_dns_port
@@ -265,10 +310,28 @@ mode_fakenet() {
     journalctl -u quarantine-fakenet -n 40 --no-pager >&2 || true
     return 1
   fi
-  # Confirm TLS listener came up (UseSSL on :443)
+  # Confirm TLS listener came up (UseSSL on :443) and CONNECT proxy (:8080)
   if ! ss -tlnp 2>/dev/null | grep -E ':443\b' | grep -qiE 'python|fakenet'; then
     echo "WARNING: FakeNet TCP/443 is not listening (HTTPS may be down)" >&2
     tail -n 30 "$LOG/fakenet/fakenet.log" >&2 || true
+  fi
+  if ! ss -tlnp 2>/dev/null | grep -qE ':8080\b'; then
+    echo "WARNING: FakeNet TCP/8080 is not listening (browsers using PAC/CONNECT will fail)" >&2
+    tail -n 30 "$LOG/fakenet/fakenet.log" >&2 || true
+  fi
+  local p
+  for p in 1 2 3 4 5 6 7 8 9 10; do
+    if ss -tlnp 2>/dev/null | grep -qE ':8080\b'; then
+      break
+    fi
+    sleep 0.5
+  done
+  if ! /opt/quarantine-gateway/venv-fakenet/bin/python \
+      "$OPT/fakenet/test_connect_proxy.py" "$LAN_IP" 8080; then
+    echo "ERROR: browser HTTPS path failed (CONNECT+TLS via :8080). HTTP-only browsers would still work." >&2
+    echo "--- fakenet.log ---" >&2
+    tail -n 80 "$LOG/fakenet/fakenet.log" >&2 || true
+    return 1
   fi
   if command -v dig >/dev/null 2>&1; then
     dig +time=2 +tries=1 @"$LAN_IP" fakenet-check.local A >/dev/null 2>&1 || true
@@ -284,16 +347,53 @@ mode_fakenet() {
   echo "traffic-mode=fakenet (sinkhole; DNS/HTTP/HTTPS on ${LAN_IP} with mitm CA; no WAN)"
   echo "Guest CA (HTTP): http://${LAN_IP}/mitmproxy-ca-cert.cer"
   echo "Guest CRL (HTTP): http://${LAN_IP}/mitmproxy-ca.crl"
+  echo "Guest browser PAC/CONNECT: FakeNet HTTPListener on ${LAN_IP}:8080"
 }
 
 mode_permissive() {
-  systemctl disable --now quarantine-fakenet 2>/dev/null || true
+  systemctl disable --now quarantine-fakenet-proxy quarantine-fakenet 2>/dev/null || true
   cleanup_nfqueue
-  apply_nft "$OPT/nftables.conf"
+  apply_nft "$OPT/nftables.conf" || return 1
   systemctl enable --now dnsmasq 2>/dev/null || true
-  systemctl enable --now quarantine-mitm-explicit quarantine-mitm-transparent 2>/dev/null || true
+  systemctl enable --now quarantine-mitm-explicit quarantine-mitm-transparent || return 1
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    if ss -tlnp 2>/dev/null | grep -qE ':8080\b' \
+      && ss -tlnp 2>/dev/null | grep -qE ':8082\b'; then
+      break
+    fi
+    sleep 0.5
+  done
+  if ! ss -tlnp 2>/dev/null | grep -qE ':8080\b'; then
+    echo "ERROR: explicit mitmproxy :8080 is not listening" >&2
+    journalctl -u quarantine-mitm-explicit -n 40 --no-pager >&2 || true
+    return 1
+  fi
+  if ! ss -tlnp 2>/dev/null | grep -qE ':8082\b'; then
+    echo "ERROR: transparent mitmproxy :8082 is not listening (curl --noproxy would miss MITM)" >&2
+    journalctl -u quarantine-mitm-transparent -n 40 --no-pager >&2 || true
+    return 1
+  fi
+  if ! nft list chain ip nat prerouting 2>/dev/null | grep -qE 'redirect to :?8082'; then
+    echo "ERROR: nftables is not redirecting guest :80/:443 to mitm :8082" >&2
+    nft list chain ip nat prerouting >&2 || true
+    return 1
+  fi
+  # mitmproxy outbound HTTP must work (PowerShell curl / IWR uses the explicit proxy).
+  local http_code
+  http_code="$(curl -4 --noproxy '*' -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 12 http://example.com/ 2>/dev/null || true)"
+  echo "gateway-upstream http://example.com/ -> ${http_code:-fail}"
+  if [[ "$http_code" != "200" && "$http_code" != "301" && "$http_code" != "302" ]]; then
+    echo "ERROR: gateway cannot fetch HTTP from WAN (mitmproxy will 502 for guest HTTP)." >&2
+    echo "Check VBox NAT / host firewall for outbound TCP 80." >&2
+    return 1
+  fi
+  http_code="$(curl -4 --noproxy '*' -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 12 http://neverssl.com/online/ 2>/dev/null || true)"
+  echo "gateway-upstream http://neverssl.com/online/ -> ${http_code:-fail}"
   echo permissive >"$MODE_FILE"
   echo "traffic-mode=permissive (internet + MITM + PCAP)"
+  echo "Guest browser PAC/CONNECT: mitmproxy ${LAN_IP}:8080"
+  echo "Guest curl/direct :80/:443: redirected to mitmproxy ${LAN_IP}:8082"
 }
 
 case "$MODE" in
@@ -302,6 +402,7 @@ case "$MODE" in
     echo "fakenet=$(systemctl is-active quarantine-fakenet 2>/dev/null || true)"
     echo "dnsmasq=$(systemctl is-active dnsmasq 2>/dev/null || true)"
     echo "mitm=$(systemctl is-active quarantine-mitm-transparent 2>/dev/null || true)"
+    echo "fakenet-proxy=$(systemctl is-active quarantine-fakenet-proxy 2>/dev/null || true)"
     if dns_listener_up; then
       echo "dns-listener=up"
     else

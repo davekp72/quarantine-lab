@@ -28,6 +28,7 @@ func (m *Manager) SetTrafficMode(mode string) (string, error) {
 		if err := m.EnsureFakeNetInstalled(); err != nil {
 			return "", err
 		}
+		_ = m.SyncGuestClock()
 	}
 	out, err := m.linuxRunWithTimeout(3*time.Minute, "sudo", "/usr/local/sbin/quarantine-set-traffic-mode", norm)
 	msg := strings.TrimSpace(out)
@@ -43,7 +44,107 @@ func (m *Manager) SetTrafficMode(mode string) (string, error) {
 	if msg == "" {
 		msg = "traffic-mode=" + norm
 	}
+	if norm == "fakenet" {
+		if gerr := m.testFakeNetGuestBrowser(); gerr != nil {
+			return msg, fmt.Errorf("Windows guest HTTPS (Chrome path): %w", gerr)
+		}
+		msg += "\nWindows guest CONNECT+TLS: ok"
+	}
+	if norm == "permissive" {
+		if gerr := m.testPermissiveGuestHttps(); gerr != nil {
+			return msg, fmt.Errorf("Windows guest HTTPS (curl transparent MITM): %w", gerr)
+		}
+		msg += "\nWindows guest curl --noproxy MITM: ok"
+	}
 	return msg, nil
+}
+
+// testFakeNetGuestBrowser runs CONNECT+TLS inside the Windows VM (same path as Edge/Chrome).
+func (m *Manager) testFakeNetGuestBrowser() error {
+	win := strings.TrimSpace(m.Cfg.VMName)
+	if win == "" {
+		return fmt.Errorf("config vmName is empty")
+	}
+	state, err := m.VBox.VMState(win)
+	if err != nil {
+		return fmt.Errorf("Windows VM %q: %w", win, err)
+	}
+	if !strings.EqualFold(state, "running") {
+		return fmt.Errorf("Windows VM %q is %s (start it to verify browser HTTPS)", win, state)
+	}
+	script := filepath.Join(m.ProjectRoot, "network", "guest", "Test-FakeNetBrowserHttps.ps1")
+	script, err = filepath.Abs(script)
+	if err != nil {
+		return fmt.Errorf("guest HTTPS test path: %w", err)
+	}
+	if _, err := os.Stat(script); err != nil {
+		return fmt.Errorf("missing %s: %w", script, err)
+	}
+	user := m.Cfg.Guest.Username
+	pass := m.Cfg.Guest.Password
+	dest := `C:\Users\Public\Quarantine\Test-FakeNetBrowserHttps.ps1`
+	if err := m.VBox.GuestControlCopyTo(win, user, pass, script, dest, 45*time.Second); err != nil {
+		return fmt.Errorf("upload guest HTTPS test: %w", err)
+	}
+	out, err := m.VBox.GuestControlRun(
+		win, user, pass,
+		`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`,
+		[]string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", dest},
+		90*time.Second,
+	)
+	msg := strings.TrimSpace(out)
+	if err != nil {
+		return fmt.Errorf("%w (%s)", err, msg)
+	}
+	if !strings.Contains(msg, "result=browser-https-ok") {
+		return fmt.Errorf("guest HTTPS test did not pass:\n%s", msg)
+	}
+	return nil
+}
+
+func (m *Manager) testPermissiveGuestHttps() error {
+	win := strings.TrimSpace(m.Cfg.VMName)
+	if win == "" {
+		return fmt.Errorf("config vmName is empty")
+	}
+	state, err := m.VBox.VMState(win)
+	if err != nil {
+		return fmt.Errorf("Windows VM %q: %w", win, err)
+	}
+	if !strings.EqualFold(state, "running") {
+		return fmt.Errorf("Windows VM %q is %s (start it to verify curl HTTPS)", win, state)
+	}
+	script := filepath.Join(m.ProjectRoot, "network", "guest", "Test-PermissiveHttps.ps1")
+	script, err = filepath.Abs(script)
+	if err != nil {
+		return fmt.Errorf("guest HTTPS test path: %w", err)
+	}
+	if _, err := os.Stat(script); err != nil {
+		return fmt.Errorf("missing %s: %w", script, err)
+	}
+	user := m.Cfg.Guest.Username
+	pass := m.Cfg.Guest.Password
+	dest := `C:\Users\Public\Quarantine\Test-PermissiveHttps.ps1`
+	if err := m.VBox.GuestControlCopyTo(win, user, pass, script, dest, 45*time.Second); err != nil {
+		return fmt.Errorf("upload guest HTTPS test: %w", err)
+	}
+	out, err := m.VBox.GuestControlRun(
+		win, user, pass,
+		`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`,
+		[]string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", dest},
+		90*time.Second,
+	)
+	msg := strings.TrimSpace(out)
+	if err != nil {
+		return fmt.Errorf("%w (%s)", err, msg)
+	}
+	if !strings.Contains(msg, "result=permissive-transparent-ok") {
+		return fmt.Errorf("guest curl transparent MITM test did not pass:\n%s", msg)
+	}
+	if !strings.Contains(strings.ToLower(msg), "mitmproxy") {
+		return fmt.Errorf("direct :443 was not MITM'd (issuer missing mitmproxy):\n%s", msg)
+	}
+	return nil
 }
 
 // EnsureFakeNetInstalled installs FakeNet-NG into the gateway venv when missing.
@@ -109,9 +210,16 @@ func (m *Manager) EnsureTrafficModeScripts() error {
 		{filepath.Join(root, "nftables-fakenet.conf"), "/tmp/quarantine-nftables-fakenet.conf"},
 		{filepath.Join(root, "fakenet", "quarantine.ini"), "/tmp/quarantine-fakenet.ini"},
 		{filepath.Join(root, "fakenet", "ssl_utils_init.py"), "/tmp/quarantine-fakenet-ssl_utils.py"},
+		{filepath.Join(root, "fakenet", "patch_httplistener.py"), "/tmp/quarantine-fakenet-patch_httplistener.py"},
+		{filepath.Join(root, "fakenet", "HTTPListener.py"), "/tmp/quarantine-fakenet-HTTPListener.py"},
+		{filepath.Join(root, "fakenet", "test_connect_proxy.py"), "/tmp/quarantine-fakenet-test_connect_proxy.py"},
 		{filepath.Join(root, "systemd", "quarantine-fakenet.service"), "/tmp/quarantine-fakenet.service"},
+		{filepath.Join(root, "systemd", "quarantine-fakenet-proxy.service"), "/tmp/quarantine-fakenet-proxy.service"},
+		{filepath.Join(root, "systemd", "quarantine-mitm-explicit.service"), "/tmp/quarantine-mitm-explicit.service"},
+		{filepath.Join(root, "systemd", "quarantine-mitm-transparent.service"), "/tmp/quarantine-mitm-transparent.service"},
 		{filepath.Join(root, "systemd", "quarantine-traffic-mode.service"), "/tmp/quarantine-traffic-mode.service"},
 		{filepath.Join(root, "scripts", "status.sh"), "/tmp/quarantine-gateway-status.sh"},
+		{filepath.Join(root, "scripts", "fakenet-explicit-proxy.py"), "/tmp/quarantine-fakenet-explicit-proxy.py"},
 	}
 	for _, pair := range pairs {
 		if _, err := os.Stat(pair[0]); err != nil {
@@ -131,9 +239,16 @@ install -m 0644 /tmp/quarantine-nftables.conf /opt/quarantine-gateway/nftables.c
 install -m 0644 /tmp/quarantine-nftables-fakenet.conf /opt/quarantine-gateway/nftables-fakenet.conf
 install -m 0644 /tmp/quarantine-fakenet.ini /opt/quarantine-gateway/fakenet/quarantine.ini
 install -m 0644 /tmp/quarantine-fakenet-ssl_utils.py /opt/quarantine-gateway/fakenet/ssl_utils_init.py
+install -m 0644 /tmp/quarantine-fakenet-patch_httplistener.py /opt/quarantine-gateway/fakenet/patch_httplistener.py
+install -m 0644 /tmp/quarantine-fakenet-HTTPListener.py /opt/quarantine-gateway/fakenet/HTTPListener.py
+install -m 0644 /tmp/quarantine-fakenet-test_connect_proxy.py /opt/quarantine-gateway/fakenet/test_connect_proxy.py
 cp /tmp/quarantine-install-fakenet.sh /opt/quarantine-gateway/scripts/install-fakenet.sh
 cp /tmp/quarantine-repair-wan-dns.sh /opt/quarantine-gateway/scripts/repair-wan-dns.sh
 install -m 0644 /tmp/quarantine-fakenet.service /etc/systemd/system/quarantine-fakenet.service
+install -m 0644 /tmp/quarantine-fakenet-proxy.service /etc/systemd/system/quarantine-fakenet-proxy.service
+install -m 0644 /tmp/quarantine-mitm-explicit.service /etc/systemd/system/quarantine-mitm-explicit.service
+install -m 0644 /tmp/quarantine-mitm-transparent.service /etc/systemd/system/quarantine-mitm-transparent.service
+install -m 0755 /tmp/quarantine-fakenet-explicit-proxy.py /usr/local/sbin/quarantine-fakenet-explicit-proxy
 install -m 0644 /tmp/quarantine-traffic-mode.service /etc/systemd/system/quarantine-traffic-mode.service
 systemctl daemon-reload
 systemctl enable quarantine-traffic-mode >/dev/null 2>&1 || true
