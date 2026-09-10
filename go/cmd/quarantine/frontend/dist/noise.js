@@ -19,12 +19,15 @@ const WER_NOISE_PATTERNS = [
 ];
 
 const EPHEMERAL_TEMP_PATTERNS = [
-  /\\SystemTemp\\__PSScriptPolicyTest_[^\\]+\.ps1$/i,
+  /\\(?:SystemTemp|Temp)\\__?PSScriptPolicyTest_[^\\]+\.ps1$/i,
 ];
 
 const NOISE_PATTERNS = [
   /\\Microsoft\\EdgeUpdate\\/i,
   /\\Microsoft\\OneDrive\\ListSync/i,
+  /\\AppData\\Local\\Microsoft\\OneDrive\\/i,
+  /\\\$Extend\\/i,
+  /\\Windows\\ServiceState\\/i,
   /\\Microsoft\\Windows\\AppRepository\\/i,
   /\\Microsoft\\InstallService\\/i,
   /\\Users\\Public\\Quarantine\\/i,
@@ -113,10 +116,22 @@ export function isFileNoise(fileOrPath) {
   const path = f.path || fileOrPath?.fileName || '';
   if (!path) return false;
   if (isEphemeralTempPath(path)) return true;
+  if (isCompilerTempNoise(path)) return true;
+  if (/\\\$Extend\\/i.test(normalizePath(path))) return true;
+  if (/\\AppData\\Local\\Microsoft\\OneDrive\\/i.test(normalizePath(path))) return true;
+  if (/\\Windows\\ServiceState\\/i.test(normalizePath(path))) return true;
   if (isHighSignalFilePath(path)) return false;
   if (isWerNoisePath(path)) return true;
   if (isEbWebViewNoisePath(path, f)) return true;
   return isPathNoise(path);
+}
+
+function isCompilerTempNoise(path) {
+  const norm = normalizePath(path);
+  if (/\.0\.cs$/i.test(norm) || /\.cmdline$/i.test(norm)) return true;
+  if (/\\Windows\\SystemTemp\\[a-z0-9]{8}(?:\\[a-z0-9]{8}\.(?:dll|err|out))?$/i.test(norm)) return true;
+  if (/^[a-z0-9]{8}\.(?:dll|err|out|0\.cs|cmdline)$/i.test(norm)) return true;
+  return /psscriptpolicytest/i.test(norm);
 }
 
 function extractNetworkHost(text) {
@@ -170,6 +185,7 @@ export function isUsnLeafPath(path, file) {
   const p = normalizePath(path || normalizeFile(file).path);
   if (!p) return false;
   if (/\\_usn_leaf\\/i.test(p)) return true;
+  if (!p.includes('\\') && !(p.length >= 2 && p[1] === ':')) return true;
   if (!/^[A-Za-z]:\\[^\\]+$/.test(p)) return false;
   const f = normalizeFile(file);
   const hash = f.hash ?? f.h;

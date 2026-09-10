@@ -2,7 +2,7 @@ package types
 
 import "encoding/json"
 
-const Version = "1.0.13"
+const Version = "1.0.14"
 
 // CaptureRequest is POST /v1/capture body.
 type CaptureRequest struct {

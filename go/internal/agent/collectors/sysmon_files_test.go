@@ -29,12 +29,23 @@ func TestMergeFileChangeKind(t *testing.T) {
 	m := map[string]string{}
 	mergeFileChangeKind(m, `C:\Windows\System32\drivers\etc\hosts`, "added")
 	mergeFileChangeKind(m, `C:\Windows\System32\drivers\etc\hosts`, "modified")
-	if m[`C:\Windows\System32\drivers\etc\hosts`] != "modified" {
-		t.Fatalf("expected modified, got %q", m[`C:\Windows\System32\drivers\etc\hosts`])
+	if m[`C:\Windows\System32\drivers\etc\hosts`] != "added" {
+		t.Fatalf("create then write should stay added, got %q", m[`C:\Windows\System32\drivers\etc\hosts`])
+	}
+	n := map[string]string{}
+	mergeFileChangeKind(n, `C:\Windows\System32\drivers\etc\hosts`, "modified")
+	mergeFileChangeKind(n, `C:\Windows\System32\drivers\etc\hosts`, "added")
+	if n[`C:\Windows\System32\drivers\etc\hosts`] != "modified" {
+		t.Fatalf("USN modify then Sysmon FileCreate should stay modified, got %q", n[`C:\Windows\System32\drivers\etc\hosts`])
 	}
 	mergeFileChangeKind(m, `C:\temp\gone.txt`, "added")
 	mergeFileChangeKind(m, `C:\temp\gone.txt`, "removed")
 	if m[`C:\temp\gone.txt`] != "removed" {
 		t.Fatalf("expected removed, got %q", m[`C:\temp\gone.txt`])
+	}
+	mergeFileChangeKind(m, `C:\Windows\System32\dodge.txt`, "removed")
+	mergeFileChangeKind(m, `C:\Windows\System32\dodge.txt`, "added")
+	if m[`C:\Windows\System32\dodge.txt`] != "added" {
+		t.Fatalf("later create should win, got %q", m[`C:\Windows\System32\dodge.txt`])
 	}
 }

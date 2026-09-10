@@ -25,14 +25,14 @@ func SysmonFileChangeKind(eid int, typ string) (kind string, ok bool) {
 	}
 }
 
-// MergeFileChangeKind merges a path/kind into a path→kind map (removed > modified > added).
+// MergeFileChangeKind merges a later classification onto an earlier one for the same path.
 func MergeFileChangeKind(pathKinds map[string]string, path, kind string) {
 	mergeFileChangeKind(pathKinds, path, kind)
 }
 
 func mergeFileChangeKind(pathKinds map[string]string, path, kind string) {
 	path = normalizePath(path)
-	if path == "" {
+	if path == "" || kind == "" {
 		return
 	}
 	existing, has := pathKinds[path]
@@ -40,19 +40,44 @@ func mergeFileChangeKind(pathKinds map[string]string, path, kind string) {
 		pathKinds[path] = kind
 		return
 	}
-	if kind == "removed" {
-		pathKinds[path] = "removed"
-		return
+	pathKinds[path] = netUSNKind(existing, kind)
+}
+
+// netUSNKind applies a later journal/sysmon classification. A later create wins over
+// delete (ReplaceFile / recreate). Modified does not demote a session create.
+func netUSNKind(prev, incoming string) string {
+	if incoming == "" {
+		return prev
 	}
-	if kind == "modified" {
-		if existing != "removed" {
-			pathKinds[path] = "modified"
+	switch incoming {
+	case "removed":
+		return "removed"
+	case "added":
+		if prev == "modified" {
+			return "modified"
 		}
-		return
+		return "added"
+	case "modified":
+		if prev == "added" {
+			return "added"
+		}
+		return "modified"
+	default:
+		if prev != "" {
+			return prev
+		}
+		return incoming
 	}
-	// added
-	if existing == "modified" || existing == "removed" {
-		return
+}
+
+// reconcileKindWithDisk corrects USN replace/recreate labeled as removed when the
+// file is still on disk at capture time.
+func reconcileKindWithDisk(kind string, exists bool) string {
+	if exists && kind == "removed" {
+		return "added"
 	}
-	pathKinds[path] = "added"
+	if !exists && kind == "added" {
+		return "removed"
+	}
+	return kind
 }

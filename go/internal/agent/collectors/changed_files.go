@@ -136,12 +136,14 @@ func ChangedFiles(usnRaw json.RawMessage, sysmonRaw json.RawMessage, hashMaxMB, 
 	var files []map[string]any
 	hashed := 0
 	for _, item := range items {
+		info, err := os.Stat(item.path)
+		exists := err == nil && info != nil && !info.IsDir()
+		kind := reconcileKindWithDisk(item.kind, exists)
 		entry := map[string]any{
 			"p":      item.path,
-			"change": item.kind,
+			"change": kind,
 			"src":    item.src,
 		}
-		info, err := os.Stat(item.path)
 		if err != nil || info.IsDir() {
 			files = append(files, entry)
 			continue

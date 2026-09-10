@@ -376,6 +376,17 @@ func fileDetail(f evidence.FileEntry) FileDetail {
 	}
 }
 
+func capturedFilePresent(f evidence.FileEntry) bool {
+	if f.H != "" || f.S > 0 {
+		return true
+	}
+	switch strings.ToLower(f.C) {
+	case "text", "base64":
+		return true
+	}
+	return false
+}
+
 func filesFromCapturedChanges(files []evidence.FileEntry) (added []FileDetail, removed []FileDetail, modified []FileModified) {
 	for _, f := range files {
 		p := f.PathValue()
@@ -386,7 +397,13 @@ func filesFromCapturedChanges(files []evidence.FileEntry) (added []FileDetail, r
 			continue
 		}
 		d := fileDetail(f)
-		switch strings.ToLower(f.Change) {
+		change := strings.ToLower(f.Change)
+		if change == "removed" && capturedFilePresent(f) {
+			// USN ReplaceFile/recreate was labeled deleted even though the guest still had the file.
+			change = "added"
+			d.Change = "added"
+		}
+		switch change {
 		case "removed":
 			removed = append(removed, d)
 		case "modified":
@@ -781,15 +798,20 @@ func resolveUSNPath(ev map[string]any) string {
 }
 
 func usnKind(ev map[string]any) string {
+	var hasDelete, hasCreate bool
 	for _, r := range usnReasonStrings(ev) {
-		if usnReasonMatches(r, "file_delete", "delete") {
-			return "removed"
+		if usnReasonMatches(r, "file_create", "rename_new_name") {
+			hasCreate = true
+		}
+		if usnReasonMatches(r, "file_delete", "rename_old_name") {
+			hasDelete = true
 		}
 	}
-	for _, r := range usnReasonStrings(ev) {
-		if usnReasonMatches(r, "file_create", "rename_new_name", "create") {
-			return "added"
-		}
+	if hasCreate {
+		return "added"
+	}
+	if hasDelete {
+		return "removed"
 	}
 	return "modified"
 }

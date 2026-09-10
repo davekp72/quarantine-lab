@@ -69,6 +69,31 @@ func TestCompareEventsBaselineUsesChangeField(t *testing.T) {
 	}
 }
 
+func TestCompareEventsRelabelsPresentRemovedAndDropsDeletedNoise(t *testing.T) {
+	left := &evidence.Manifest{Snapshot: "CleanSession", ScanMode: "events", Files: nil}
+	right := &evidence.Manifest{
+		Snapshot: "Evidence-test",
+		ScanMode: "events",
+		Files: []evidence.FileEntry{
+			{P: `C:\Windows\System32\dodge.txt`, Change: "removed", H: "abc", S: 28, C: "text", Src: "usn+sysmon"},
+			{P: `C:\$Extend\$Deleted\00020000000408F673F5ACE4`, Change: "removed"},
+			{P: `C:\Windows\SystemTemp\__PSScriptPolicyTest_x.ps1`, Change: "removed"},
+			{P: `C:\Windows\ServiceState\WinHttpAutoProxySvc\Data\1.cache`, Change: "removed"},
+			{P: `C:\Windows\SystemTemp\50ylbunx\50ylbunx.dll`, Change: "removed"},
+		},
+	}
+	res, err := Compare("l.json", "r.json", left, right)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Files.Added) != 1 || !strings.Contains(res.Files.Added[0].Path, "dodge.txt") {
+		t.Fatalf("added=%+v", res.Files.Added)
+	}
+	if len(res.Files.Removed) != 0 {
+		t.Fatalf("deleted noise still present: %+v", res.Files.Removed)
+	}
+}
+
 func TestGoldenDiffIfPresent(t *testing.T) {
 	root := filepath.Join("..", "..", "..")
 	diffPath := filepath.Join(root, "..", "D:", "Vbox", "LabVM", "logs", "manifests", "diff-CleanSession-vs-Evidence-hostfile.diff.json")

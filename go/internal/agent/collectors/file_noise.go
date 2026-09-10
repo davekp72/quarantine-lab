@@ -28,7 +28,8 @@ var noiseNameContains = []string{
 	"report.wer", ".wer.tmp", ".db-journal", ".db-wal", ".db-shm",
 	".dxcache", "dxcache-shm", "dxcache-wal",
 	"hklm-hklm_", "hklm-registry-", "startupprofiledata-",
-	"__psscriptpolicytest_", "prep_activatable class_",
+	"__psscriptpolicytest_", "_psscriptpolicytest_",
+	"prep_activatable class_",
 }
 
 var noisePathParts = []string{
@@ -48,8 +49,10 @@ var noisePathParts = []string{
 	`\appdata\roaming\microsoft\windows\recent\`,
 	`\windows\prefetch\`,
 	`\windows\temp\`,
+	`\windows\systemtemp\`,
 	`\windows\logs\`,
 	`\windows\softwaredistribution\`,
+	`\windows\servicestate\`,
 	`\windows\servicestates\`,
 	`\windows\serviceprofiles\`,
 	`\windows\system32\config\systemprofile\appdata\`,
@@ -92,7 +95,8 @@ var captureSelfParts = []string{
 }
 
 // ClassifyFileNoise returns "" for analyst-relevant paths, or a noise class to hide
-// from the main file list. Signal extensions and System32/etc always keep.
+// from the main file list. Signal extensions and System32/etc always keep, except
+// when a more specific OS/capture pattern matches first.
 func ClassifyFileNoise(path, fileName string) string {
 	p := strings.ToLower(strings.ReplaceAll(filepath.Clean(path), "/", `\`))
 	n := strings.ToLower(strings.TrimSpace(fileName))
@@ -100,11 +104,23 @@ func ClassifyFileNoise(path, fileName string) string {
 		n = strings.ToLower(filepath.Base(p))
 	}
 
-	if isAlwaysSignal(p, n) {
-		return ""
-	}
 	if isCaptureSelf(p, n) {
 		return "capture"
+	}
+	if isNTFSMetadataPath(p, n) {
+		return "ntfs"
+	}
+	if isPowerShellPolicyProbe(n) {
+		return "temp"
+	}
+	if isOneDriveClientPath(p) {
+		return "onedrive_client"
+	}
+	if isSystemTempCompilerArtifact(p, n) {
+		return "temp"
+	}
+	if isAlwaysSignal(p, n) {
+		return ""
 	}
 	if noiseNames[n] {
 		return "os_telemetry"
@@ -132,7 +148,8 @@ func ClassifyFileNoise(path, fileName string) string {
 	}
 	for _, part := range noisePathParts {
 		if strings.Contains(p, part) {
-			if strings.Contains(p, `\windows\temp\`) || strings.Contains(p, `\appdata\local\temp\`) {
+			if strings.Contains(p, `\windows\temp\`) || strings.Contains(p, `\windows\systemtemp\`) ||
+				strings.Contains(p, `\appdata\local\temp\`) {
 				return "temp"
 			}
 			if strings.Contains(p, `\wer\`) || strings.Contains(p, `reportqueue`) {
@@ -142,6 +159,86 @@ func ClassifyFileNoise(path, fileName string) string {
 		}
 	}
 	return ""
+}
+
+func isNTFSMetadataPath(p, n string) bool {
+	if strings.Contains(p, `\$extend\`) || strings.HasPrefix(p, `c:\$extend`) {
+		return true
+	}
+	if strings.HasPrefix(n, "$") && (strings.EqualFold(n, "$mft") || strings.EqualFold(n, "$logfile") ||
+		strings.EqualFold(n, "$usnjrnl") || strings.HasPrefix(n, "$deleted") || n == "$extend") {
+		return true
+	}
+	return false
+}
+
+func isPowerShellPolicyProbe(n string) bool {
+	return strings.Contains(n, "psscriptpolicytest")
+}
+
+func isOneDriveClientPath(p string) bool {
+	return strings.Contains(p, `\appdata\local\microsoft\onedrive\`) ||
+		strings.Contains(p, `\program files\microsoft onedrive\`) ||
+		strings.Contains(p, `\program files (x86)\microsoft onedrive\`)
+}
+
+// csc / Add-Type writes C:\Windows\SystemTemp\<token>\<token>.dll plus .0.cs/.cmdline/.err/.out.
+func isSystemTempCompilerArtifact(p, n string) bool {
+	inSysTemp := strings.Contains(p, `\windows\systemtemp\`)
+	unresolved := p == "" || isUnresolvedFileName(p)
+	if strings.HasSuffix(n, ".0.cs") || strings.HasSuffix(n, ".cmdline") {
+		return unresolved || inSysTemp || strings.Contains(p, `\temp\`)
+	}
+	token := cscTokenFromName(n)
+	if token == "" {
+		return false
+	}
+	if unresolved {
+		return true
+	}
+	return isCscSystemTempLayout(p, token)
+}
+
+func isCscSystemTempLayout(p, token string) bool {
+	marker := `\systemtemp\` + token
+	idx := strings.Index(p, marker)
+	if idx < 0 {
+		return false
+	}
+	rest := p[idx+len(marker):]
+	if rest == "" || rest == `\` {
+		return true
+	}
+	if !strings.HasPrefix(rest, `\`) {
+		return false
+	}
+	rest = rest[1:]
+	return rest == token || strings.HasPrefix(rest, token+`.`)
+}
+
+func cscTokenFromName(n string) string {
+	n = strings.ToLower(strings.TrimSpace(n))
+	if looksLikeCscToken(n) {
+		return n
+	}
+	base := strings.TrimSuffix(n, filepath.Ext(n))
+	if looksLikeCscToken(base) {
+		return base
+	}
+	return ""
+}
+
+func looksLikeCscToken(s string) bool {
+	// csc / Add-Type temp names are 8-char [a-z0-9], e.g. 50ylbunx.
+	if len(s) != 8 {
+		return false
+	}
+	for _, c := range s {
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') {
+			return false
+		}
+	}
+	return true
 }
 
 func isCaptureSelf(p, n string) bool {

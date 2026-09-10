@@ -55,32 +55,25 @@ func FinalizeUSNEvents(volume string, events []map[string]any, startUsn uint64, 
 			ev["path"] = path
 		}
 
+		if path == "" {
+			noise["unresolved"]++
+			continue
+		}
+
 		class := ClassifyFileNoise(path, fileName)
 		if class != "" {
 			noise[class]++
 			continue
 		}
 
-		key := path
-		if key == "" {
-			key = strings.ToLower(fileRef)
-			if key == "" {
-				key = strings.ToLower(fileName)
-			}
-			if key == "" {
-				continue
-			}
-			key = "unresolved:" + key
-		} else {
-			key = strings.ToLower(path)
-		}
-
+		key := strings.ToLower(path)
 		kind := usnChangeKind(reasons)
 		if existing, ok := merged[key]; ok {
-			existing["change"] = mergeKind(stringField(existing, "change"), kind)
+			existing["change"] = netUSNKind(stringField(existing, "change"), kind)
 			existing["reason"] = mergeReasonLists(reasonStringsFromEvent(existing), reasons)
 			if usn >= usnFromEvent(existing) {
 				existing["usn"] = ev["usn"]
+				existing["reasonCode"] = ev["reasonCode"]
 			}
 			if path != "" {
 				existing["path"] = path
@@ -127,32 +120,24 @@ func FinalizeUSNEvents(volume string, events []map[string]any, startUsn uint64, 
 }
 
 func usnChangeKind(reasons []string) string {
-	for _, r := range reasons {
-		n := strings.ToLower(strings.ReplaceAll(r, " ", "_"))
-		if strings.Contains(n, "file_delete") || n == "delete" {
-			return "removed"
-		}
-	}
+	hasDelete, hasCreate := false, false
 	for _, r := range reasons {
 		n := strings.ToLower(strings.ReplaceAll(r, " ", "_"))
 		if strings.Contains(n, "file_create") || strings.Contains(n, "rename_new_name") {
-			return "added"
+			hasCreate = true
 		}
-		if strings.Contains(n, "rename_old_name") {
-			return "removed"
+		if strings.Contains(n, "file_delete") || n == "delete" || strings.Contains(n, "rename_old_name") {
+			hasDelete = true
 		}
 	}
-	return "modified"
-}
-
-func mergeKind(existing, incoming string) string {
-	if existing == "removed" || incoming == "removed" {
+	// ReplaceFile / recreate sets both create and delete on the same name; the file remains.
+	if hasCreate {
+		return "added"
+	}
+	if hasDelete {
 		return "removed"
 	}
-	if existing == "modified" || incoming == "modified" {
-		return "modified"
-	}
-	return incoming
+	return "modified"
 }
 
 func mergeReasonLists(a, b []string) []string {

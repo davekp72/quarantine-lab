@@ -24,8 +24,23 @@ func resolveUsnPathFallback(name string) string {
 	return ""
 }
 
+func isUnresolvedFileName(p string) bool {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return true
+	}
+	p = strings.ReplaceAll(p, "/", `\`)
+	if strings.Contains(p, `\`) {
+		return false
+	}
+	return len(p) < 2 || p[1] != ':'
+}
+
 func isLeafOnlyPath(p string) bool {
 	p = normalizePath(p)
+	if isUnresolvedFileName(p) {
+		return true
+	}
 	if len(p) < 4 || p[1] != ':' {
 		return false
 	}
