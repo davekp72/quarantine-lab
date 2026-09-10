@@ -6,9 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/quarantine-lab/quarantine/internal/app"
 	"github.com/quarantine-lab/quarantine/internal/config"
+	"github.com/quarantine-lab/quarantine/internal/gateway"
 	"github.com/spf13/cobra"
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -65,6 +69,7 @@ func main() {
 	root.AddCommand(clipboardCmd(&cfgPath))
 	root.AddCommand(guestCmd(&cfgPath))
 	root.AddCommand(agentCmd(&cfgPath))
+	root.AddCommand(stealthCmd(&cfgPath))
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -523,7 +528,69 @@ func gatewayCmd(cfgPath *string) *cobra.Command {
 			return err
 		},
 	})
+	cleanPcaps := &cobra.Command{
+		Use:   "clean-pcaps",
+		Short: "Delete old PCAPs on the gateway (keeps active capture)",
+		Long: `Remove leftover PCAPs under /var/log/quarantine/pcap on the Linux gateway.
+
+By default deletes every non-active .pcap/.pcapng. Use --older-than to keep recent
+files (examples: 24h, 7d). The active capture path is never removed.
+
+  quarantine gateway clean-pcaps
+  quarantine gateway clean-pcaps --older-than 7d
+  quarantine gateway clean-pcaps --include-proxy
+  quarantine gateway clean-pcaps --dry-run`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			a, err := app.New(*cfgPath)
+			if err != nil {
+				return err
+			}
+			older, _ := cmd.Flags().GetString("older-than")
+			includeProxy, _ := cmd.Flags().GetBool("include-proxy")
+			dryRun, _ := cmd.Flags().GetBool("dry-run")
+			age, err := parseAgeDuration(older)
+			if err != nil {
+				return err
+			}
+			msg, err := a.Gateway.CleanPcaps(gateway.CleanPcapsOpts{
+				OlderThan:    age,
+				IncludeProxy: includeProxy,
+				DryRun:       dryRun,
+			})
+			if msg != "" {
+				fmt.Println(msg)
+			}
+			return err
+		},
+	}
+	cleanPcaps.Flags().String("older-than", "", "Only delete files older than this age (e.g. 24h, 7d); empty = all non-active")
+	cleanPcaps.Flags().Bool("include-proxy", false, "Also truncate gateway proxy/mitm log files")
+	cleanPcaps.Flags().Bool("dry-run", false, "List matching files without deleting")
+	cmd.AddCommand(cleanPcaps)
 	return cmd
+}
+
+// parseAgeDuration accepts Go durations plus a trailing "d" for days (e.g. 7d).
+func parseAgeDuration(s string) (time.Duration, error) {
+	s = strings.TrimSpace(strings.ToLower(s))
+	if s == "" || s == "0" {
+		return 0, nil
+	}
+	if strings.HasSuffix(s, "d") {
+		n, err := strconv.Atoi(strings.TrimSuffix(s, "d"))
+		if err != nil || n < 0 {
+			return 0, fmt.Errorf("invalid --older-than %q (want Nd, e.g. 7d)", s)
+		}
+		return time.Duration(n) * 24 * time.Hour, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("invalid --older-than %q: %w", s, err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("--older-than must be >= 0")
+	}
+	return d, nil
 }
 
 func inboxCmd(cfgPath *string) *cobra.Command {
@@ -596,6 +663,24 @@ func clipboardCmd(cfgPath *string) *cobra.Command {
 		})
 	}
 	return cmd
+}
+
+func stealthCmd(cfgPath *string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "stealth",
+		Short: "Soften VirtualBox guest fingerprints (DMI/MAC/CPU); keep Guest Additions",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			a, err := app.New(*cfgPath)
+			if err != nil {
+				return err
+			}
+			msg, err := a.VM.ApplyStealth()
+			if msg != "" {
+				fmt.Println(msg)
+			}
+			return err
+		},
+	}
 }
 
 func guestCmd(cfgPath *string) *cobra.Command {

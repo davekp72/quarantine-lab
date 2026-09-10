@@ -3,6 +3,7 @@ module github.com/quarantine-lab/quarantine
 go 1.25.0
 
 require (
+	github.com/andybalholm/brotli v1.1.0
 	github.com/spf13/cobra v1.9.1
 	github.com/wailsapp/wails/v2 v2.15.0
 	golang.org/x/sys v0.46.0

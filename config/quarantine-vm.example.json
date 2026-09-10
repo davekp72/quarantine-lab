@@ -46,14 +46,26 @@
       "diskSizeGb": 16
     }
   },
-  "isolation": {
-    "disableClipboard": false,
-    "clipboardMode": "hosttoguest",
-    "disableDragDrop": true,
-    "disableUsb": true,
-    "disableAudio": true,
-    "disableSharedFolders": true
-  },
+    "isolation": {
+        "disableClipboard": false,
+        "clipboardMode": "hosttoguest",
+        "disableDragDrop": true,
+        "disableUsb": true,
+        "disableAudio": true,
+        "disableSharedFolders": true,
+        "stealth": {
+            "enabled": true,
+            "cpuProfile": "Intel Core i7-6700K",
+            "macOui": "F8B156",
+            "macAddress": "auto",
+            "paravirtProvider": "",
+            "dmi": {
+                "DmiSystemVendor": "Dell Inc.",
+                "DmiSystemProduct": "OptiPlex 7090",
+                "DmiBIOSVendor": "Dell Inc."
+            }
+        }
+    },
   "inbox": {
     "hostPath": "D:\\Vbox\\LabVM\\quarantine-inbox",
     "shareName": "quarantine-in",
@@ -97,7 +109,8 @@
     "registryEngine": "hive",
     "registryDiskFlatten": false,
     "hashMaxMb": 50,
-    "contentMaxKb": 51200
+    "contentMaxKb": 51200,
+    "sessionBaselineSnapshot": "CleanSession"
   },
   "agent": {
     "enabled": true,

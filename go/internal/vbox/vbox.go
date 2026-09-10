@@ -496,6 +496,12 @@ func (c *Client) ModifyVM(vmName, key, value string) error {
 	return err
 }
 
+// SetExtraData sets a VirtualBox machine extradata key (e.g. DMI spoofing).
+func (c *Client) SetExtraData(vmName, key, value string) error {
+	_, err := c.RunWithTimeout(time.Minute, "setextradata", vmName, key, value)
+	return err
+}
+
 // SharedFolderAdd adds a transient shared folder.
 func (c *Client) SharedFolderAdd(vmName, name, hostPath string, readOnly bool) error {
 	args := []string{"sharedfolder", "add", vmName, "--name=" + name, "--hostpath=" + hostPath, "--automount", "--transient"}

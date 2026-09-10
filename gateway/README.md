@@ -7,13 +7,17 @@
 #
 # Services
 #   dnsmasq          DNS (+ optional DHCP)
-#   nftables         forward + MASQUERADE + REDIRECT :80/:443 → mitm :8082
+#   nftables         forward + MASQUERADE; :80/:443 → mitm :8082
+#                    Other ports (SSH/SMTP/…) and ICMP pass through for PCAP
 #                    SSH (:22) accepted on WAN only (host NAT PF); blocked from LAN guest
 #                    LAN→WAN drops RFC1918/link-local/CGNAT before general accept
 #   mitmdump :8080   explicit proxy (PAC fallback) — block_private resolves DNS
 #   mitmdump :8082   transparent MITM
-#   tcpdump          LAN PCAP under /var/log/quarantine/pcap
+#   tcpdump          LAN PCAP under /var/log/quarantine/pcap (all protocols)
 #
+# Guest Windows (Configure-QuarantineGuestNetwork.ps1 -Mode gateway):
+#   Outbound allow (normal internet). Only special block: SSH to the gateway itself.
+#   Private/host-LAN isolation is enforced on this appliance, not by guest port pinning.#
 # Host NAT port-forwards (gateway VM) bind 127.0.0.1 only (SSH :2222, agent :9443).
 #
 # Re-apply nftables after template edits (from host):
@@ -27,6 +31,9 @@
 #   .\quarantine-vm.ps1 gateway provision   # copy scripts + run first-boot via guestcontrol
 #   .\quarantine-vm.ps1 network gateway
 #   .\quarantine-vm.ps1 gateway status
+#   .\quarantine-vm.ps1 gateway clean-pcaps              # drop leftover PCAPs (keeps active)
+#   .\quarantine-vm.ps1 gateway clean-pcaps --older-than 7d
+#   .\quarantine-vm.ps1 gateway clean-pcaps --include-proxy
 #
 # Manual first boot (if not using cloud-init)
 #   1. Install Ubuntu Server in Quarantine-Gateway VM (2 NICs: NAT + intnet)

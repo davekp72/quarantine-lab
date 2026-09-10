@@ -584,7 +584,10 @@ function Set-QuarantineVMIsolation {
         [string]$VmName,
 
         [Parameter()]
-        $Isolation = $script:Config.isolation
+        $Isolation = $script:Config.isolation,
+
+        [Parameter()]
+        [string]$ConfigPath = (Join-Path $PSScriptRoot 'config\quarantine-vm.json')
     )
 
     $args = @('modifyvm', $VmName)
@@ -629,6 +632,190 @@ function Set-QuarantineVMIsolation {
     if ($Isolation.disableSharedFolders) {
         Remove-QuarantineVMInboxShare -VmName $VmName
     }
+
+    Set-QuarantineVMStealth -VmName $VmName -Isolation $Isolation -ConfigPath $ConfigPath | Out-Null
+}
+
+function Set-QuarantineVMStealth {
+    <#
+    .SYNOPSIS
+      Soften common VirtualBox guest fingerprints (DMI/ACPI/MAC/CPU profile).
+      Keeps Guest Additions and VBoxSVGA — required for guestcontrol, clipboard, resize.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$VmName,
+
+        [Parameter()]
+        $Isolation = $script:Config.isolation,
+
+        [Parameter()]
+        [string]$ConfigPath
+    )
+
+    $stealth = $null
+    if ($Isolation -and $Isolation.PSObject.Properties['stealth']) {
+        $stealth = $Isolation.stealth
+    }
+    if (-not $stealth) {
+        # Defaults even without a stealth block — lab still benefits.
+        $stealth = [pscustomobject]@{ enabled = $true }
+    }
+    if ($null -ne $stealth.enabled -and -not [bool]$stealth.enabled) {
+        Write-Host 'Stealth: disabled in config (isolation.stealth.enabled=false)'
+        return
+    }
+
+    $ctx = Get-QuarantineVMModifyContext -VmName $VmName
+    if ($ctx -eq 'live') {
+        Write-Warning 'Stealth skipped while VM is running (power off, then .\quarantine-vm.ps1 stealth).'
+        return
+    }
+    if ($ctx -eq 'saved') {
+        Write-Warning 'Stealth skipped: VM has saved state. Power off (or discard saved state), then re-run stealth.'
+        return
+    }
+
+    $cpuProfile = 'Intel Core i7-6700K'
+    if ($stealth.cpuProfile) { $cpuProfile = [string]$stealth.cpuProfile }
+    if ($cpuProfile -and $cpuProfile -notin @('host', 'none', '')) {
+        Invoke-VBoxManage -Arguments @('modifyvm', $VmName, '--cpu-profile', $cpuProfile) -AllowFailure | Out-Null
+    }
+
+    if ($stealth.paravirtProvider) {
+        Invoke-VBoxManage -Arguments @('modifyvm', $VmName, '--paravirtprovider', [string]$stealth.paravirtProvider) -AllowFailure | Out-Null
+    }
+
+    $macRaw = if ($stealth.macAddress) { [string]$stealth.macAddress } else { 'auto' }
+    $generatedMac = $false
+    if (-not $macRaw -or $macRaw -eq 'auto') {
+        $curMac = ''
+        try {
+            $info = Invoke-VBoxManage -Arguments @('showvminfo', $VmName, '--machinereadable') -AllowFailure
+            $infoText = ($info | Out-String)
+            if ($infoText -match 'macaddress1="?([0-9A-Fa-f]{12})"?' ) {
+                $curMac = $Matches[1].ToUpperInvariant()
+            }
+        } catch { }
+        if ($curMac.Length -eq 12 -and -not $curMac.StartsWith('080027')) {
+            $macRaw = $curMac
+        } else {
+            $oui = if ($stealth.macOui) {
+                ([string]$stealth.macOui) -replace '[:\-]', ''
+            } else {
+                'F8B156' # Dell Inc.
+            }
+            $oui = $oui.ToUpperInvariant()
+            if ($oui.Length -ne 6) { throw "isolation.stealth.macOui must be 6 hex digits (got '$oui')" }
+            $macRaw = ($oui + ('{0:X6}' -f (Get-Random -Maximum 0xFFFFFF))).ToUpperInvariant()
+            $generatedMac = $true
+        }
+    }
+    $mac = ($macRaw -replace '[:\-]', '').ToUpperInvariant()
+    if ($mac.Length -ne 12 -or $mac -notmatch '^[0-9A-F]{12}$') {
+        throw "isolation.stealth.macAddress must be 12 hex digits (got '$macRaw')"
+    }
+    Invoke-VBoxManage -Arguments @('modifyvm', $VmName, '--macaddress1', $mac) | Out-Null
+
+    if ($generatedMac -and $ConfigPath -and (Test-Path -LiteralPath $ConfigPath)) {
+        try {
+            $raw = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
+            if (-not $raw.isolation) {
+                $raw | Add-Member -NotePropertyName isolation -NotePropertyValue ([pscustomobject]@{}) -Force
+            }
+            if (-not $raw.isolation.stealth) {
+                $raw.isolation | Add-Member -NotePropertyName stealth -NotePropertyValue ([pscustomobject]@{}) -Force
+            }
+            $raw.isolation.stealth | Add-Member -NotePropertyName macAddress -NotePropertyValue $mac -Force
+            $raw.isolation.stealth | Add-Member -NotePropertyName enabled -NotePropertyValue $true -Force
+            $json = $raw | ConvertTo-Json -Depth 20
+            Set-Content -LiteralPath $ConfigPath -Value $json -Encoding UTF8
+            if ($script:Config -and $script:Config.isolation) {
+                if (-not $script:Config.isolation.stealth) {
+                    $script:Config.isolation | Add-Member -NotePropertyName stealth -NotePropertyValue ([pscustomobject]@{}) -Force
+                }
+                $script:Config.isolation.stealth | Add-Member -NotePropertyName macAddress -NotePropertyValue $mac -Force
+            }
+        } catch {
+            Write-Warning "Could not persist generated MAC to config: $($_.Exception.Message)"
+        }
+    }
+
+    $dmiDefaults = [ordered]@{
+        DmiSystemVendor    = 'Dell Inc.'
+        DmiSystemProduct   = 'OptiPlex 7090'
+        DmiSystemVersion   = '1.0.0'
+        DmiSystemSerial    = 'JQ-LAB-7K90A1'
+        DmiSystemFamily    = 'OptiPlex'
+        DmiSystemSKU       = '0A54'
+        DmiBoardVendor     = 'Dell Inc.'
+        DmiBoardProduct    = '0A54'
+        DmiBoardVersion    = 'A00'
+        DmiBoardSerial     = '/BN0A54-LAB001/'
+        DmiBoardAssetTag   = ' '
+        DmiChassisVendor   = 'Dell Inc.'
+        DmiChassisType     = '3'
+        DmiChassisVersion  = 'N/A'
+        DmiChassisSerial   = 'CN-LAB-7090-001'
+        DmiChassisAssetTag = ' '
+        DmiBIOSVendor      = 'Dell Inc.'
+        DmiBIOSVersion     = '1.18.0'
+        DmiBIOSReleaseDate = '12/15/2023'
+    }
+    if ($stealth.dmi) {
+        foreach ($p in $stealth.dmi.PSObject.Properties) {
+            if ($null -ne $p.Value -and [string]$p.Value -ne '') {
+                $dmiDefaults[$p.Name] = [string]$p.Value
+            }
+        }
+    }
+
+    # EFI guests: any VBoxInternal/Devices/pcbios/0/Config/* replaces the CFGM
+    # tree and drops BootDevice0 → start fails with VERR_CFGM_VALUE_NOT_FOUND.
+    # Keep MAC/CPU/ACPI only; clear leftover pcbios Config keys if present.
+    $firmware = 'bios'
+    try {
+        $infoFw = Invoke-VBoxManage -Arguments @('showvminfo', $VmName, '--machinereadable') -AllowFailure
+        $infoFwText = ($infoFw | Out-String)
+        if ($infoFwText -match 'firmware="?([^"\r\n]+)"?') {
+            $firmware = $Matches[1].ToLowerInvariant()
+        }
+    } catch { }
+
+    $dmiNote = 'acpi only (EFI — pcbios DMI skipped)'
+    if ($firmware -eq 'efi') {
+        try {
+            $extra = Invoke-VBoxManage -Arguments @('getextradata', $VmName, 'enumerate') -AllowFailure
+            foreach ($line in @($extra)) {
+                if ($line -match 'Key: (VBoxInternal/Devices/pcbios/0/Config/[^,]+),') {
+                    Invoke-VBoxManage -Arguments @('setextradata', $VmName, $Matches[1]) -AllowFailure | Out-Null
+                }
+            }
+        } catch { }
+    } else {
+        # Legacy BIOS: setting any pcbios Config key requires BootDevice* too.
+        Invoke-VBoxManage -Arguments @('setextradata', $VmName, 'VBoxInternal/Devices/pcbios/0/Config/BootDevice0', 'IDE') -AllowFailure | Out-Null
+        Invoke-VBoxManage -Arguments @('setextradata', $VmName, 'VBoxInternal/Devices/pcbios/0/Config/BootDevice1', 'DVD') -AllowFailure | Out-Null
+        Invoke-VBoxManage -Arguments @('setextradata', $VmName, 'VBoxInternal/Devices/pcbios/0/Config/BootDevice2', 'NONE') -AllowFailure | Out-Null
+        Invoke-VBoxManage -Arguments @('setextradata', $VmName, 'VBoxInternal/Devices/pcbios/0/Config/BootDevice3', 'NONE') -AllowFailure | Out-Null
+        foreach ($key in $dmiDefaults.Keys) {
+            $path = "VBoxInternal/Devices/pcbios/0/Config/$key"
+            Invoke-VBoxManage -Arguments @('setextradata', $VmName, $path, [string]$dmiDefaults[$key]) -AllowFailure | Out-Null
+        }
+        Invoke-VBoxManage -Arguments @('setextradata', $VmName, 'VBoxInternal/Devices/pcbios/0/Config/DmiOEMVBoxVer', ' ') -AllowFailure | Out-Null
+        Invoke-VBoxManage -Arguments @('setextradata', $VmName, 'VBoxInternal/Devices/pcbios/0/Config/DmiOEMVBoxRev', ' ') -AllowFailure | Out-Null
+        $dmiNote = 'pcbios DMI + acpi'
+    }
+    Invoke-VBoxManage -Arguments @('setextradata', $VmName, 'VBoxInternal/Devices/acpi/0/Config/AcpiOemId', 'DELL  ') -AllowFailure | Out-Null
+    Invoke-VBoxManage -Arguments @('setextradata', $VmName, 'VBoxInternal/Devices/acpi/0/Config/AcpiCreatorId', 'DELL') -AllowFailure | Out-Null
+    Invoke-VBoxManage -Arguments @('setextradata', $VmName, 'VBoxInternal/Devices/acpi/0/Config/AcpiCreatorRev', '0x00000001') -AllowFailure | Out-Null
+
+    $macPretty = '{0}:{1}:{2}:{3}:{4}:{5}' -f @(
+        $mac.Substring(0, 2), $mac.Substring(2, 2), $mac.Substring(4, 2),
+        $mac.Substring(6, 2), $mac.Substring(8, 2), $mac.Substring(10, 2)
+    )
+    Write-Host "Stealth applied: cpu-profile=$cpuProfile; mac=$macPretty; $dmiNote (Guest Additions / VBoxSVGA kept)"
 }
 
 function Get-QuarantineVMInboxSettings {
@@ -2276,8 +2463,8 @@ function New-QuarantineVMBaseline {
     Clear-QuarantineVMSnapshots -ConfigPath $ConfigPath
     Save-QuarantineVMSnapshot -ConfigPath $ConfigPath -Name $Name -Description $Description -Offline
     Write-Host 'Baseline is disk-only (flatten requires power-off). For reset-to-desktop: start, log in, then:'
-    Write-Host '  .\quarantine-vm.ps1 snapshot -SnapshotName Session'
-    Write-Host '  (set cleanSnapshotName to Session in config\quarantine-vm.json)'
+    Write-Host '  .\quarantine-vm.ps1 snapshot'
+    Write-Host '  (creates live CleanSession — then use reset -Clean to resume it)'
 }
 
 function Save-QuarantineVMSnapshot {
@@ -2290,7 +2477,7 @@ function Save-QuarantineVMSnapshot {
         [string]$Name,
 
         [Parameter()]
-        [string]$Description = 'Known-good baseline for quarantine reset.',
+        [string]$Description,
 
         [Parameter()]
         [switch]$Force,
@@ -2301,19 +2488,8 @@ function Save-QuarantineVMSnapshot {
 
     $script:Config = Get-QuarantineVMConfig -ConfigPath $ConfigPath
     $vmName = $script:Config.vmName
-    $snapshotName = if (-not [string]::IsNullOrWhiteSpace($Name)) {
-        $Name
-    } elseif ($script:Config.cleanSnapshotName) {
-        $script:Config.cleanSnapshotName
-    } else {
-        'Clean'
-    }
-
-    $description = if (-not [string]::IsNullOrWhiteSpace($Description)) {
-        $Description
-    } else {
-        'Known-good baseline for quarantine reset.'
-    }
+    $snapshotName = if (-not [string]::IsNullOrWhiteSpace($Name)) { $Name } else { $null }
+    $description = $Description
 
     $state = Get-QuarantineVMState -VmName $vmName
     if ($state -eq 'starting') {
@@ -2340,6 +2516,28 @@ function Save-QuarantineVMSnapshot {
     }
 
     $includesRam = (-not $Offline) -and ($state -in $liveStates)
+
+    $sessionName = if ($script:Config.manifest -and $script:Config.manifest.sessionBaselineSnapshot) {
+        [string]$script:Config.manifest.sessionBaselineSnapshot
+    } else {
+        'CleanSession'
+    }
+    $diskName = if ($script:Config.cleanSnapshotName) {
+        [string]$script:Config.cleanSnapshotName
+    } else {
+        'Clean'
+    }
+    # Live → CleanSession (daily desktop). Disk-only → Clean (golden image).
+    if ([string]::IsNullOrWhiteSpace($snapshotName)) {
+        $snapshotName = if ($includesRam) { $sessionName } else { $diskName }
+    }
+    if ([string]::IsNullOrWhiteSpace($description)) {
+        $description = if ($includesRam) {
+            'Live clean desktop (resume with reset -Clean).'
+        } else {
+            'Disk-only clean baseline.'
+        }
+    }
 
     $existing = @(Get-QuarantineVMSnapshotList -ConfigPath $ConfigPath | Where-Object {
         $_.Name -eq $snapshotName
@@ -2687,10 +2885,18 @@ Or after setup:
     }
 
     if ($Clean) {
-        $cleanName = if ($script:Config.cleanSnapshotName) { $script:Config.cleanSnapshotName } else { 'Clean' }
-        $matches = @($snapshots | Where-Object { $_.Name -eq $cleanName })
+        $sessionName = if ($script:Config.manifest -and $script:Config.manifest.sessionBaselineSnapshot) {
+            [string]$script:Config.manifest.sessionBaselineSnapshot
+        } else {
+            'CleanSession'
+        }
+        $diskName = if ($script:Config.cleanSnapshotName) { [string]$script:Config.cleanSnapshotName } else { 'Clean' }
+        $matches = @($snapshots | Where-Object { $_.Name -eq $sessionName })
         if ($matches.Count -eq 0) {
-            throw "No snapshot named '$cleanName'."
+            $matches = @($snapshots | Where-Object { $_.Name -eq $diskName })
+        }
+        if ($matches.Count -eq 0) {
+            throw "No clean snapshot found (tried '$sessionName' then '$diskName'). Take CleanSession while logged in, or run baseline."
         }
         if ($matches.Count -eq 1) {
             return $matches[0]
@@ -2702,7 +2908,7 @@ Or after setup:
         } else {
             $matches | Sort-Object TakenAt | Select-Object -Last 1
         }
-        Write-Warning "Multiple snapshots named '$cleanName'. Restoring $($pick.UUID) taken $(Format-QuarantineVMSnapshotWhen $pick)."
+        Write-Warning "Multiple snapshots named '$($pick.Name)'. Restoring $($pick.UUID) taken $(Format-QuarantineVMSnapshotWhen $pick)."
         return $pick
     }
 
@@ -3359,6 +3565,7 @@ Export-ModuleMember -Function @(
     'Mount-QuarantineVMGuestAdditions',
     'Set-QuarantineVMNetworkMode',
     'Set-QuarantineVMClipboard',
+    'Set-QuarantineVMStealth',
     'Push-QuarantineVMInbox',
     'Open-QuarantineVMInbox',
     'Close-QuarantineVMInbox',

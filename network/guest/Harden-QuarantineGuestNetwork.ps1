@@ -186,6 +186,10 @@ if ($upAdapters.Count -eq 0) {
             New-NetIPAddress -InterfaceIndex $lan.ifIndex -IPAddress $GuestIP -PrefixLength ([int]$PrefixLength) -DefaultGateway $GatewayIP -ErrorAction Stop | Out-Null
         }
     }
+    if (-not (Get-NetRoute -InterfaceIndex $lan.ifIndex -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+            Where-Object { $_.NextHop -eq $GatewayIP })) {
+        throw "Failed to set default gateway $GatewayIP on $($lan.Name)"
+    }
     Set-NetIPInterface -InterfaceIndex $lan.ifIndex -InterfaceMetric 10 -ErrorAction SilentlyContinue
     Set-DnsClientServerAddress -InterfaceIndex $lan.ifIndex -ServerAddresses $DnsServer
     Write-Host "  LAN: $GuestIP/$PrefixLength gw $GatewayIP on $($lan.Name)"
@@ -226,9 +230,14 @@ $wh = & netsh.exe @winhttpArgs 2>&1
 Write-Host "  WinHTTP: $($wh -join ' ')"
 & netsh.exe winhttp show proxy | ForEach-Object { Write-Host "    $_" }
 
-# --- Narrow outbound: drop Gateway Any (was allowing SSH to 10.66.0.1:22) ---
+# --- Outbound policy ---
+# Gateway mode: normal routed internet (ping/SMTP/SSH/etc. + PCAP). Private nets
+# are blocked on the Linux gateway. Only keep an explicit block for gateway SSH.
+# host-nat: keep default-deny with proxy/DNS allows.
 $groupName = 'Quarantine Lab Outbound'
 Get-NetFirewallRule -DisplayName 'Quarantine Allow Gateway Any' -ErrorAction SilentlyContinue |
+    Remove-NetFirewallRule -ErrorAction SilentlyContinue
+Get-NetFirewallRule -Name 'Quarantine-Allow-Gateway-Any' -ErrorAction SilentlyContinue |
     Remove-NetFirewallRule -ErrorAction SilentlyContinue
 
 # Ensure essentials exist (idempotent recreate)
@@ -245,27 +254,37 @@ foreach ($r in $essentials) {
 }
 
 if ($Mode -eq 'gateway') {
-    foreach ($r in @(
-        @{ Name = 'Quarantine-Allow-HTTP'; Display = 'Quarantine Allow HTTP'; Proto = 'TCP'; Port = 80 },
-        @{ Name = 'Quarantine-Allow-HTTPS'; Display = 'Quarantine Allow HTTPS'; Proto = 'TCP'; Port = 443 }
+    foreach ($name in @(
+        'Quarantine-Allow-HTTP', 'Quarantine-Allow-HTTPS', 'Quarantine-Allow-Internet',
+        'Quarantine-Allow-Internet-TCP', 'Quarantine-Allow-Internet-UDP', 'Quarantine-Allow-ICMP'
     )) {
-        Get-NetFirewallRule -Name $r.Name -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
-        New-NetFirewallRule -Name $r.Name -DisplayName $r.Display -Group $groupName `
-            -Direction Outbound -Action Allow -Protocol $r.Proto -RemotePort $r.Port | Out-Null
+        Get-NetFirewallRule -Name $name -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
     }
+    New-NetFirewallRule -Name 'Quarantine-Allow-Internet-TCP' -DisplayName 'Quarantine Allow Internet TCP' -Group $groupName `
+        -Direction Outbound -Action Allow -Protocol TCP -Profile Any | Out-Null
+    New-NetFirewallRule -Name 'Quarantine-Allow-Internet-UDP' -DisplayName 'Quarantine Allow Internet UDP' -Group $groupName `
+        -Direction Outbound -Action Allow -Protocol UDP -Profile Any | Out-Null
+    New-NetFirewallRule -Name 'Quarantine-Allow-ICMP' -DisplayName 'Quarantine Allow ICMP' -Group $groupName `
+        -Direction Outbound -Action Allow -Protocol ICMPv4 -IcmpType 8 -Profile Any | Out-Null
+    Get-NetFirewallRule -DisplayGroup 'Core Networking' -Direction Outbound -ErrorAction SilentlyContinue |
+        Where-Object { $_.DisplayName -match 'Echo Request' } |
+        Enable-NetFirewallRule -ErrorAction SilentlyContinue
     Get-NetFirewallRule -Name 'Quarantine-Allow-Agent-In' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
     New-NetFirewallRule -Name 'Quarantine-Allow-Agent-In' -DisplayName 'Quarantine Allow Agent In' -Group $groupName `
-        -Direction Inbound -Action Allow -Protocol TCP -LocalPort 9443 -RemoteAddress $GatewayIP | Out-Null
+        -Direction Inbound -Action Allow -Protocol TCP -LocalPort 9443 -RemoteAddress $GatewayIP -Profile Any | Out-Null
+    Set-NetFirewallProfile -Profile Domain, Public, Private -DefaultOutboundAction Allow -ErrorAction Stop
+    Write-Host '  Firewall: outbound allow (normal internet); private nets blocked on gateway'
+} else {
+    Set-NetFirewallProfile -Profile Domain, Public, Private -DefaultOutboundAction Block -ErrorAction Stop
+    Write-Host '  Firewall: essentials restored (default-deny)'
 }
 
 # Explicitly block guest -> gateway SSH (defense in depth; nftables also drops LAN:22)
 Get-NetFirewallRule -Name 'Quarantine-Block-Gateway-SSH' -ErrorAction SilentlyContinue |
     Remove-NetFirewallRule -ErrorAction SilentlyContinue
 New-NetFirewallRule -Name 'Quarantine-Block-Gateway-SSH' -DisplayName 'Quarantine Block Gateway SSH' -Group $groupName `
-    -Direction Outbound -Action Block -Protocol TCP -RemoteAddress $GatewayIP -RemotePort 22 | Out-Null
-
-Set-NetFirewallProfile -Profile Domain, Public, Private -DefaultOutboundAction Block -ErrorAction SilentlyContinue
-Write-Host '  Firewall: Gateway Any removed; gateway SSH blocked; essentials restored'
+    -Direction Outbound -Action Block -Protocol TCP -RemoteAddress $GatewayIP -RemotePort 22 -Profile Any | Out-Null
+Write-Host '  Firewall: gateway SSH blocked'
 
 # --- Verify ---
 Write-Host ''

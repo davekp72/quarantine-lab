@@ -1,5 +1,6 @@
 import { EventsOn } from './wailsjs/runtime/runtime.js';
 import { filterDiff, isEphemeralTempPath, isUsnLeafPath } from './noise.js';
+import { resolveHttpFlow } from './http_body.js';
 
 let diffData = null;
 let toSnapshot = '';
@@ -1041,7 +1042,20 @@ function renderNetwork() {
       const detail = panel.querySelector('#net-req-detail');
       if (!detail || !r) return;
       detail.classList.remove('muted');
-      detail.innerHTML = renderHttpFlowHtml(r);
+      detail.innerHTML = '<p class="muted">Loading body…</p>';
+      (async () => {
+        const api = await backend();
+        const decoded = await resolveHttpFlow(r, api || {});
+        if (!detail.isConnected) return;
+        let html = renderHttpFlowHtml(decoded);
+        if (decoded.loadError) {
+          html += `<p class="muted">Flow file load: ${escapeAttr(decoded.loadError)}</p>`;
+        }
+        detail.innerHTML = html;
+      })().catch((e) => {
+        if (!detail.isConnected) return;
+        detail.innerHTML = renderHttpFlowHtml(r) + `<p class="muted">Decode: ${escapeAttr(String(e))}</p>`;
+      });
     });
   });
 }
@@ -1097,13 +1111,18 @@ function renderHttpFlowPartHtml(title, p) {
   if (p.contentType) bits.push(p.contentType);
   if (p.bodyBytes != null) bits.push(`${p.bodyBytes} bytes`);
   if (p.bodyTruncated) bits.push('truncated');
-  if (p.encoding && p.encoding !== 'utf-8') bits.push(p.encoding);
+  if (p.decompressed) bits.push(`decompressed:${p.decompressed}`);
+  else if (p.encoding && p.encoding !== 'utf-8') bits.push(p.encoding);
+  if (p.decodeError) bits.push(`decode-error`);
   const hdrs = p.headers && typeof p.headers === 'object'
     ? Object.entries(p.headers).map(([k, v]) => `${k}: ${v}`).join('\n')
     : '';
+  const bodyText = p.decodeError
+    ? `(decompress failed: ${p.decodeError})\n\n${p.body != null ? p.body : ''}`
+    : (p.body != null && p.body !== '' ? p.body : '');
   const hl = (typeof QuarantineHighlight !== 'undefined' && QuarantineHighlight.highlightBody)
-    ? QuarantineHighlight.highlightBody(p.body != null && p.body !== '' ? p.body : '', p.contentType || '')
-    : { html: escapeAttr(p.body != null && p.body !== '' ? p.body : '(empty body)'), lang: 'plain', pretty: false };
+    ? QuarantineHighlight.highlightBody(bodyText, p.contentType || '')
+    : { html: escapeAttr(bodyText || '(empty body)'), lang: 'plain', pretty: false };
   if (hl.pretty) bits.push('pretty');
   if (hl.lang && hl.lang !== 'plain') bits.push(hl.lang);
   const hdrHtml = hdrs
@@ -1111,7 +1130,7 @@ function renderHttpFlowPartHtml(title, p) {
       ? QuarantineHighlight.highlightHeaders(hdrs)
       : escapeAttr(hdrs))
     : '';
-  const bodyHtml = (p.body == null || p.body === '')
+  const bodyHtml = (p.body == null || p.body === '') && !p.decodeError
     ? escapeAttr('(empty body)')
     : hl.html;
   return `<div class="http-flow-pane">

@@ -55,6 +55,12 @@ export function StartCaptureWails() {
 export function StopCaptureWails() {
   return window.go.app.App.StopCaptureWails();
 }
+export function DecodeHTTPBodyWails(encoding, contentEncoding, body) {
+  return window.go.app.App.DecodeHTTPBodyWails(encoding, contentEncoding, body);
+}
+export function LoadHTTPFlowWails(flowFile, flowLine) {
+  return window.go.app.App.LoadHTTPFlowWails(flowFile, flowLine);
+}
 export function GatewayStatusWails() {
   return window.go.app.App.GatewayStatusWails();
 }

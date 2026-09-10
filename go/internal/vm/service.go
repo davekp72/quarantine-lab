@@ -61,7 +61,17 @@ func (s *Service) ListSnapshots(ctx context.Context) ([]vbox.SnapshotInfo, error
 // SaveSnapshot takes a snapshot, optionally replacing existing same name.
 func (s *Service) SaveSnapshot(ctx context.Context, name, description string, offline, force bool) error {
 	if strings.TrimSpace(name) == "" {
-		name = s.Cfg.CleanSnapshot
+		if offline {
+			name = s.Cfg.CleanSnapshot
+			if name == "" {
+				name = "Clean"
+			}
+		} else {
+			name = s.Cfg.Manifest.SessionBaselineSnapshot
+			if name == "" {
+				name = "CleanSession"
+			}
+		}
 	}
 	if description == "" {
 		description = "Quarantine snapshot"
@@ -109,10 +119,11 @@ func (s *Service) Preserve(ctx context.Context, label string) (string, error) {
 }
 
 // Reset restores a snapshot by name or clean snapshot.
+// -Clean prefers live CleanSession (sessionBaselineSnapshot) when present, else disk Clean.
 func (s *Service) Reset(ctx context.Context, snapshotName string, clean bool) error {
 	name := snapshotName
 	if clean || name == "" {
-		name = s.Cfg.CleanSnapshot
+		name = s.preferredCleanSnapshot()
 	}
 	uuid, err := s.VBox.SnapshotUUID(s.Cfg.VMName, name)
 	if err != nil {
@@ -124,6 +135,20 @@ func (s *Service) Reset(ctx context.Context, snapshotName string, clean bool) er
 		time.Sleep(3 * time.Second)
 	}
 	return s.VBox.RestoreSnapshot(s.Cfg.VMName, uuid)
+}
+
+func (s *Service) preferredCleanSnapshot() string {
+	session := strings.TrimSpace(s.Cfg.Manifest.SessionBaselineSnapshot)
+	if session == "" {
+		session = "CleanSession"
+	}
+	if _, err := s.VBox.SnapshotUUID(s.Cfg.VMName, session); err == nil {
+		return session
+	}
+	if s.Cfg.CleanSnapshot != "" {
+		return s.Cfg.CleanSnapshot
+	}
+	return "Clean"
 }
 
 // Launch restores a snapshot and starts the VM (live snapshots resume logged-in session).
@@ -217,6 +242,17 @@ func (s *Service) DeleteSnapshot(ctx context.Context, name string, force bool) e
 
 // Start starts the VM GUI.
 func (s *Service) Start(ctx context.Context) error {
+	// Soften VBox fingerprints while powered off (no-op if running / stealth disabled).
+	if state, err := s.VBox.VMState(s.Cfg.VMName); err == nil {
+		switch strings.ToLower(state) {
+		case "poweroff", "aborted":
+			if msg, err := s.ApplyStealth(); err != nil {
+				fmt.Printf("stealth: %v\n", err)
+			} else if msg != "" {
+				fmt.Println(msg)
+			}
+		}
+	}
 	if err := s.VBox.StartVM(s.Cfg.VMName); err != nil {
 		return err
 	}

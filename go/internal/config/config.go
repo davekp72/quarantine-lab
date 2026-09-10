@@ -133,12 +133,24 @@ type CaptureConfig struct {
 }
 
 type IsolationConfig struct {
-	DisableClipboard     bool   `json:"disableClipboard"`
-	ClipboardMode        string `json:"clipboardMode"`
-	DisableDragDrop      bool   `json:"disableDragDrop"`
-	DisableUSB           bool   `json:"disableUsb"`
-	DisableAudio         bool   `json:"disableAudio"`
-	DisableSharedFolders bool   `json:"disableSharedFolders"`
+	DisableClipboard     bool         `json:"disableClipboard"`
+	ClipboardMode        string       `json:"clipboardMode"`
+	DisableDragDrop      bool         `json:"disableDragDrop"`
+	DisableUSB           bool         `json:"disableUsb"`
+	DisableAudio         bool         `json:"disableAudio"`
+	DisableSharedFolders bool         `json:"disableSharedFolders"`
+	Stealth              StealthConfig `json:"stealth"`
+}
+
+// StealthConfig blunts common VirtualBox guest fingerprints without removing Guest Additions.
+// Graphics (VBoxSVGA) and VBox* drivers remain by design — required for guestcontrol/clipboard/resize.
+type StealthConfig struct {
+	Enabled         *bool             `json:"enabled"` // nil/absent = on when stealth object present with defaults from Apply
+	CPUProfile      string            `json:"cpuProfile"`
+	ParavirtProvider string           `json:"paravirtProvider"` // empty = leave VirtualBox default (Hyper-V for Win11)
+	MacAddress      string            `json:"macAddress"`       // 12 hex or AA:BB:...; "auto" = generate Dell-OUI once
+	MacOUI          string            `json:"macOui"`           // used when macAddress is empty/auto (default F8B156)
+	DMI             map[string]string `json:"dmi"`
 }
 
 type InboxConfig struct {

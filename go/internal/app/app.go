@@ -17,6 +17,7 @@ import (
 	"github.com/quarantine-lab/quarantine/internal/disk"
 	"github.com/quarantine-lab/quarantine/internal/evidence"
 	"github.com/quarantine-lab/quarantine/internal/gateway"
+	"github.com/quarantine-lab/quarantine/internal/httpbody"
 	"github.com/quarantine-lab/quarantine/internal/inbox"
 	"github.com/quarantine-lab/quarantine/internal/network"
 	"github.com/quarantine-lab/quarantine/internal/proxy"
@@ -807,7 +808,10 @@ func (a *App) TakeSnapshotWails(name, description string, force bool) error {
 		ctx = context.Background()
 	}
 	if strings.TrimSpace(name) == "" {
-		return fmt.Errorf("snapshot name required")
+		name = a.Cfg.Manifest.SessionBaselineSnapshot
+		if name == "" {
+			name = "CleanSession"
+		}
 	}
 	a.logInfo(fmt.Sprintf("Take snapshot %q (force=%v) — capturing baseline then freezing VM", name, force))
 	if capErr := a.captureLiveManifest(name, false); capErr != nil {
@@ -1087,5 +1091,58 @@ func (a *App) GatewayStatusWails() (map[string]any, error) {
 	}
 	out["vmState"] = state
 	out["status"] = fmt.Sprintf("%s state=%s lan=%s", g.VMName, state, g.LANGateway)
+	return out, nil
+}
+
+// DecodeHTTPBodyWails decompresses an in-memory body (legacy / fallback).
+// Prefer LoadHTTPFlowWails — diff previews are often corrupted by the PS JSON pipe.
+func (a *App) DecodeHTTPBodyWails(encoding, contentEncoding, body string) (map[string]any, error) {
+	res := httpbody.Decode(encoding, contentEncoding, body)
+	out := map[string]any{
+		"body":     res.Body,
+		"encoding": res.Encoding,
+	}
+	if res.Decompressed != "" {
+		out["decompressed"] = res.Decompressed
+	}
+	if res.Truncated {
+		out["truncated"] = true
+	}
+	if res.Error != "" {
+		out["error"] = res.Error
+	}
+	return out, nil
+}
+
+// LoadHTTPFlowWails loads a flows.jsonl line and returns display-ready request/response
+// (Content-Encoding decompressed). Uses the on-disk capture, not the diff preview.
+func (a *App) LoadHTTPFlowWails(flowFile string, flowLine int) (map[string]any, error) {
+	roots := []string{
+		a.Cfg.ManifestLogDir(),
+		a.Cfg.Network.Proxy.LogDir,
+		filepath.Join(a.Cfg.DataDir(), "logs"),
+	}
+	if !httpbody.AllowedFlowPath(flowFile, roots...) {
+		return nil, fmt.Errorf("flow file not under lab log dirs")
+	}
+	rec, err := httpbody.ReadFlowLine(flowFile, flowLine)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]any{
+		"t":           rec.T,
+		"method":      rec.Method,
+		"url":         rec.URL,
+		"host":        rec.Host,
+		"path":        rec.Path,
+		"status":      rec.Status,
+		"source":      "mitm",
+		"hasBody":     true,
+		"flowFile":    flowFile,
+		"flowLine":    flowLine,
+		"resolvedIps": rec.ResolvedIPs,
+		"request":     httpbody.DecodePart(rec.Request),
+		"response":    httpbody.DecodePart(rec.Response),
+	}
 	return out, nil
 }

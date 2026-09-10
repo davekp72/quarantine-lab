@@ -30,7 +30,7 @@ param(
 
     [Parameter(Position = 0)]
 
-    [ValidateSet('create', 'install', 'start', 'stop', 'snapshot', 'snapshots', 'delete-snapshot', 'baseline', 'preserve', 'reset', 'status', 'mount-iso', 'guest-additions', 'relocate', 'consolidate', 'network', 'proxy', 'capture', 'clipboard', 'inbox', 'guest', 'payload', 'sysmon', 'manifest', 'ui', 'agent', 'setup', 'gateway', 'help')]
+    [ValidateSet('create', 'install', 'start', 'stop', 'snapshot', 'snapshots', 'delete-snapshot', 'baseline', 'preserve', 'reset', 'status', 'mount-iso', 'guest-additions', 'relocate', 'consolidate', 'network', 'proxy', 'capture', 'clipboard', 'inbox', 'guest', 'payload', 'sysmon', 'manifest', 'ui', 'agent', 'setup', 'gateway', 'stealth', 'help')]
 
     [string]$Action = 'help',
 
@@ -343,6 +343,7 @@ function Test-QuarantinePreferGo {
         'consolidate'      = $true
         'payload'          = $true
         'help'             = $true
+        'stealth'          = $true
     }
     if ($psOnly.ContainsKey($ActionName)) { return $false }
     if ($ActionName -eq 'capture' -and $Sub -eq 'status') { return $false }
@@ -482,6 +483,13 @@ switch ($Action) {
     'guest-additions' {
 
         Mount-QuarantineVMGuestAdditions -ConfigPath $ConfigPath
+
+    }
+
+    'stealth' {
+
+        $cfg = Initialize-QuarantineVMContext -ConfigPath $ConfigPath
+        Set-QuarantineVMStealth -VmName $cfg.vmName -Isolation $cfg.isolation -ConfigPath $ConfigPath
 
     }
 
@@ -1042,6 +1050,8 @@ Guest Additions (host-to-guest paste):
 
   guest-additions   Mount VirtualBox Guest Additions ISO in the VM
 
+  stealth           Soften VBox fingerprints (DMI/MAC/CPU); keeps Guest Additions
+
 
 
 Network (internet-only quarantine vs offline):
@@ -1058,7 +1068,7 @@ Network (internet-only quarantine vs offline):
 
 Gateway appliance:
 
-  gateway create|start|stop|status|provision|export-ca|sync-logs
+  gateway create|start|stop|status|provision|export-ca|sync-logs|clean-pcaps
 
 
 

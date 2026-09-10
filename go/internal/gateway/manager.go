@@ -712,6 +712,118 @@ func (m *Manager) SyncLogs() (string, error) {
 	return res.Message, err
 }
 
+// CleanPcapsOpts controls gateway PCAP (and optional proxy log) cleanup.
+type CleanPcapsOpts struct {
+	// OlderThan deletes only files older than this age. Zero means delete all
+	// non-active PCAPs under /var/log/quarantine/pcap.
+	OlderThan time.Duration
+	// IncludeProxy truncates rotating proxy/mitm logs (not CA certs).
+	IncludeProxy bool
+	// DryRun lists matching files without deleting.
+	DryRun bool
+}
+
+// CleanPcaps removes old PCAPs on the gateway VM. The active capture file
+// (if quarantine-capture is running) is never deleted.
+func (m *Manager) CleanPcaps(opts CleanPcapsOpts) (string, error) {
+	if err := m.Start(); err != nil {
+		return "", err
+	}
+
+	cutoffEpoch := int64(0)
+	if opts.OlderThan > 0 {
+		cutoffEpoch = time.Now().Add(-opts.OlderThan).Unix()
+	}
+	dry := "0"
+	if opts.DryRun {
+		dry = "1"
+	}
+	proxy := "0"
+	if opts.IncludeProxy {
+		proxy = "1"
+	}
+
+	script := fmt.Sprintf(`set -euo pipefail
+PCAP_DIR=/var/log/quarantine/pcap
+PROXY_DIR=/var/log/quarantine/proxy
+ACTIVE=""
+if [ -f /var/run/quarantine-capture.path ]; then
+  ACTIVE=$(cat /var/run/quarantine-capture.path 2>/dev/null || true)
+fi
+CUTOFF=%d
+DRY=%s
+PROXY=%s
+deleted=0
+kept=0
+bytes=0
+echo "active=${ACTIVE:-<none>}"
+mkdir -p "$PCAP_DIR"
+shopt -s nullglob
+for f in "$PCAP_DIR"/*.pcap "$PCAP_DIR"/*.pcapng; do
+  [ -f "$f" ] || continue
+  if [ -n "$ACTIVE" ] && [ "$f" = "$ACTIVE" ]; then
+    echo "keep active $f"
+    kept=$((kept+1))
+    continue
+  fi
+  mtime=$(stat -c %%Y "$f" 2>/dev/null || echo 0)
+  if [ "$CUTOFF" -gt 0 ] && [ "$mtime" -ge "$CUTOFF" ]; then
+    echo "keep recent $f"
+    kept=$((kept+1))
+    continue
+  fi
+  sz=$(stat -c %%s "$f" 2>/dev/null || echo 0)
+  if [ "$DRY" = 1 ]; then
+    echo "would-delete $f ($sz bytes)"
+  else
+    rm -f -- "$f"
+    echo "deleted $f ($sz bytes)"
+  fi
+  deleted=$((deleted+1))
+  bytes=$((bytes+sz))
+done
+# Staged sync leftovers in /tmp
+for f in /tmp/gateway-lan-*.pcap /tmp/qproxy-bundle.tar; do
+  [ -e "$f" ] || continue
+  sz=$(stat -c %%s "$f" 2>/dev/null || echo 0)
+  if [ "$DRY" = 1 ]; then
+    echo "would-delete $f ($sz bytes)"
+  else
+    rm -f -- "$f"
+    echo "deleted $f ($sz bytes)"
+  fi
+  deleted=$((deleted+1))
+  bytes=$((bytes+sz))
+done
+if [ "$PROXY" = 1 ]; then
+  for f in access.log errors.log access-transparent.log flows.jsonl flows-transparent.jsonl flows.mitm flows-transparent.mitm; do
+    p="$PROXY_DIR/$f"
+    [ -f "$p" ] || continue
+    sz=$(stat -c %%s "$p" 2>/dev/null || echo 0)
+    if [ "$DRY" = 1 ]; then
+      echo "would-truncate $p ($sz bytes)"
+    else
+      truncate -s 0 -- "$p" 2>/dev/null || : >"$p"
+      echo "truncated $p (was $sz bytes)"
+    fi
+    deleted=$((deleted+1))
+    bytes=$((bytes+sz))
+  done
+fi
+echo "summary deleted=$deleted kept=$kept bytes=$bytes dry=$DRY"
+`, cutoffEpoch, dry, proxy)
+
+	out, err := m.linuxRunWithTimeout(2*time.Minute, "sudo", "bash", "-c", script)
+	msg := strings.TrimSpace(out)
+	if err != nil {
+		return msg, fmt.Errorf("clean gateway pcaps: %w (%s)", err, msg)
+	}
+	if msg == "" {
+		msg = "Gateway PCAP cleanup complete."
+	}
+	return msg, nil
+}
+
 // ExportCA copies the mitm CA to network/proxy for guest install.
 func (m *Manager) ExportCA() (string, error) {
 	if err := m.Start(); err != nil {

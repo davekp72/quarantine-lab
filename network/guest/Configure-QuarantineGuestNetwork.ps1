@@ -37,6 +37,21 @@ function Test-Administrator {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Get-RegStringProp {
+    param(
+        [string]$Path,
+        [string]$Name
+    )
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $null }
+    $obj = Get-ItemProperty -LiteralPath $Path -ErrorAction SilentlyContinue
+    if (-not $obj) { return $null }
+    $prop = $obj.PSObject.Properties[$Name]
+    if (-not $prop) { return $null }
+    $val = $prop.Value
+    if ([string]::IsNullOrWhiteSpace([string]$val)) { return $null }
+    return [string]$val
+}
+
 if (-not (Test-Administrator)) {
     throw 'Run this script as Administrator inside the guest VM.'
 }
@@ -95,9 +110,9 @@ if (Test-Path -LiteralPath $configPayload) {
 foreach ($hive in @(Get-ChildItem 'Registry::HKEY_USERS' -ErrorAction SilentlyContinue)) {
     $sid = $hive.PSChildName
     if ($sid -notmatch '^S-1-5-21-' -or $sid -match '_Classes$') { continue }
-    $profilePath = (Get-ItemProperty -LiteralPath "Registry::$($hive.Name)\Volatile Environment" -ErrorAction SilentlyContinue).USERPROFILE
+    $profilePath = Get-RegStringProp -Path "Registry::$($hive.Name)\Volatile Environment" -Name 'USERPROFILE'
     if (-not $profilePath) {
-        $profilePath = (Get-ItemProperty -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid" -ErrorAction SilentlyContinue).ProfileImagePath
+        $profilePath = Get-RegStringProp -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid" -Name 'ProfileImagePath'
     }
     if (-not $profilePath) { continue }
     $leaf = Split-Path -Leaf $profilePath
@@ -127,8 +142,26 @@ if ($upAdapters.Count -eq 0) {
         ForEach-Object {
             Remove-NetIPAddress -InterfaceIndex $lan.ifIndex -IPAddress $_.IPAddress -Confirm:$false -ErrorAction SilentlyContinue
         }
+    # Always re-assert default route. New-NetIPAddress -DefaultGateway is a no-op when the
+    # address already exists — which left the guest with 10.66.0.15 and no 0.0.0.0/0
+    # ("PING: transmit failed. General failure" to anything off-link).
     Remove-NetRoute -InterfaceIndex $lan.ifIndex -DestinationPrefix '0.0.0.0/0' -Confirm:$false -ErrorAction SilentlyContinue
-    New-NetIPAddress -InterfaceIndex $lan.ifIndex -IPAddress $GuestIP -PrefixLength ([int]$PrefixLength) -DefaultGateway $GatewayIP -ErrorAction SilentlyContinue | Out-Null
+    $haveIp = Get-NetIPAddress -InterfaceIndex $lan.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Where-Object { $_.IPAddress -eq $GuestIP }
+    if (-not $haveIp) {
+        New-NetIPAddress -InterfaceIndex $lan.ifIndex -IPAddress $GuestIP -PrefixLength ([int]$PrefixLength) -DefaultGateway $GatewayIP -ErrorAction Stop | Out-Null
+    } else {
+        New-NetRoute -InterfaceIndex $lan.ifIndex -DestinationPrefix '0.0.0.0/0' -NextHop $GatewayIP -RouteMetric 10 -ErrorAction SilentlyContinue | Out-Null
+        if (-not (Get-NetRoute -InterfaceIndex $lan.ifIndex -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+                Where-Object { $_.NextHop -eq $GatewayIP })) {
+            Remove-NetIPAddress -InterfaceIndex $lan.ifIndex -IPAddress $GuestIP -Confirm:$false -ErrorAction SilentlyContinue
+            New-NetIPAddress -InterfaceIndex $lan.ifIndex -IPAddress $GuestIP -PrefixLength ([int]$PrefixLength) -DefaultGateway $GatewayIP -ErrorAction Stop | Out-Null
+        }
+    }
+    if (-not (Get-NetRoute -InterfaceIndex $lan.ifIndex -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+            Where-Object { $_.NextHop -eq $GatewayIP })) {
+        throw "Failed to set default gateway $GatewayIP on $($lan.Name)"
+    }
     Set-NetIPInterface -InterfaceIndex $lan.ifIndex -InterfaceMetric 10 -ErrorAction SilentlyContinue
     Set-DnsClientServerAddress -InterfaceIndex $lan.ifIndex -ServerAddresses $DnsServer
     Write-Host "  LAN (intnet): static $GuestIP/$PrefixLength gw $GatewayIP metric 10 on $($lan.Name)"
@@ -146,6 +179,10 @@ if ($upAdapters.Count -eq 0) {
 }
 
 # Strict outbound firewall
+# Gateway mode: look like a normal routed network to the guest. Public ICMP/TCP/UDP
+# (ping, SMTP, SSH, etc.) are allowed and show up in LAN PCAP. Private/host-LAN
+# destinations are blocked on the Linux gateway (nftables + mitm), not here.
+# host-nat mode: keep default-deny and only allow proxy/DNS (legacy).
 $groupName = 'Quarantine Lab Outbound'
 $ruleNames = @(
     'Quarantine Allow Proxy',
@@ -157,10 +194,25 @@ $ruleNames = @(
     'Quarantine Allow Agent In',
     'Quarantine Allow HTTP',
     'Quarantine Allow HTTPS',
+    'Quarantine Allow Internet',
+    'Quarantine Allow Internet TCP',
+    'Quarantine Allow Internet UDP',
+    'Quarantine Allow ICMP',
     'Quarantine Block Gateway SSH'
 )
 foreach ($ruleName in $ruleNames) {
     Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue |
+        Remove-NetFirewallRule -ErrorAction SilentlyContinue
+}
+# Also remove by -Name for rules that may only exist under Name=
+foreach ($ruleName in @(
+    'Quarantine-Allow-Proxy', 'Quarantine-Allow-PAC', 'Quarantine-Allow-DNS',
+    'Quarantine-Allow-DNS-TCP', 'Quarantine-Allow-DHCP', 'Quarantine-Allow-Gateway-Any',
+    'Quarantine-Allow-Agent-In', 'Quarantine-Allow-HTTP', 'Quarantine-Allow-HTTPS',
+    'Quarantine-Allow-Internet', 'Quarantine-Allow-Internet-TCP', 'Quarantine-Allow-Internet-UDP',
+    'Quarantine-Allow-ICMP', 'Quarantine-Block-Gateway-SSH'
+)) {
+    Get-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue |
         Remove-NetFirewallRule -ErrorAction SilentlyContinue
 }
 
@@ -177,20 +229,34 @@ New-NetFirewallRule -DisplayName 'Quarantine Allow DHCP' -Name 'Quarantine-Allow
     -Direction Outbound -Action Allow -Protocol UDP -RemotePort 67,68 | Out-Null
 
 if ($Mode -eq 'gateway') {
-    # Transparent MITM: allow HTTP/HTTPS to internet via gateway (nftables REDIRECT on gateway).
-    New-NetFirewallRule -DisplayName 'Quarantine Allow HTTP' -Name 'Quarantine-Allow-HTTP' -Group $groupName `
-        -Direction Outbound -Action Allow -Protocol TCP -RemotePort 80 | Out-Null
-    New-NetFirewallRule -DisplayName 'Quarantine Allow HTTPS' -Name 'Quarantine-Allow-HTTPS' -Group $groupName `
-        -Direction Outbound -Action Allow -Protocol TCP -RemotePort 443 | Out-Null
-    # Do not allow unrestricted access to the gateway IP (that exposed sshd).
+    # Normal internet from the guest's point of view (routed via gateway).
+    # HTTP/HTTPS still hit transparent MITM on the gateway; other ports are passthrough + PCAP.
+    # Avoid -Protocol Any (unreliable on some builds); allow TCP/UDP/ICMP explicitly.
+    New-NetFirewallRule -DisplayName 'Quarantine Allow Internet TCP' -Name 'Quarantine-Allow-Internet-TCP' -Group $groupName `
+        -Direction Outbound -Action Allow -Protocol TCP -Profile Any | Out-Null
+    New-NetFirewallRule -DisplayName 'Quarantine Allow Internet UDP' -Name 'Quarantine-Allow-Internet-UDP' -Group $groupName `
+        -Direction Outbound -Action Allow -Protocol UDP -Profile Any | Out-Null
+    # Echo Request (ping). -IcmpType 8 = echo-request.
+    New-NetFirewallRule -DisplayName 'Quarantine Allow ICMP' -Name 'Quarantine-Allow-ICMP' -Group $groupName `
+        -Direction Outbound -Action Allow -Protocol ICMPv4 -IcmpType 8 -Profile Any | Out-Null
+    # Do not allow SSH onto the gateway appliance itself (escape foothold).
     New-NetFirewallRule -DisplayName 'Quarantine Block Gateway SSH' -Name 'Quarantine-Block-Gateway-SSH' -Group $groupName `
-        -Direction Outbound -Action Block -Protocol TCP -RemoteAddress $GatewayIP -RemotePort 22 | Out-Null
+        -Direction Outbound -Action Block -Protocol TCP -RemoteAddress $GatewayIP -RemotePort 22 -Profile Any | Out-Null
     New-NetFirewallRule -DisplayName 'Quarantine Allow Agent In' -Name 'Quarantine-Allow-Agent-In' -Group $groupName `
-        -Direction Inbound -Action Allow -Protocol TCP -LocalPort 9443 -RemoteAddress $GatewayIP | Out-Null
+        -Direction Inbound -Action Allow -Protocol TCP -LocalPort 9443 -RemoteAddress $GatewayIP -Profile Any | Out-Null
+
+    # Ensure built-in Core Networking echo rules are on (helps some Win builds).
+    Get-NetFirewallRule -DisplayGroup 'Core Networking' -Direction Outbound -ErrorAction SilentlyContinue |
+        Where-Object { $_.DisplayName -match 'Echo Request' } |
+        Enable-NetFirewallRule -ErrorAction SilentlyContinue
+
+    Set-NetFirewallProfile -Profile Domain, Public, Private -DefaultOutboundAction Allow -ErrorAction Stop
+    $profiles = Get-NetFirewallProfile -Profile Domain, Public, Private |
+        Select-Object -ExpandProperty DefaultOutboundAction
+    Write-Host "  Firewall: outbound default Allow (profiles: $($profiles -join ', ')); ICMP/TCP/UDP allowed; gateway SSH blocked"
+} else {
+    Set-NetFirewallProfile -Profile Domain, Public, Private -DefaultOutboundAction Block -ErrorAction Stop
 }
-
-Set-NetFirewallProfile -Profile Domain, Public, Private -DefaultOutboundAction Block -ErrorAction SilentlyContinue
-
 # Trust mitm CA (download over HTTP from PAC/proxy port)
 $caUrl = "http://${ProxyHost}:${PacPort}/mitmproxy-ca-cert.cer"
 $caPath = Join-Path $env:TEMP 'mitmproxy-ca-cert.cer'
@@ -217,9 +283,11 @@ Next steps:
   2. Shut down this VM
   3. On the host: .\quarantine-vm.ps1 baseline
 
-Test from guest:
-  - Internet HTTP(S) should work (transparent MITM in gateway mode, or PAC in host-nat)
-  - ping 192.168.x.x should fail (blocked on gateway/host policy)
+Test from guest (gateway mode):
+  - ping 1.1.1.1 / SSH or SMTP to public hosts should work (PCAP on gateway)
+  - HTTP(S) works via transparent MITM
+  - ping/SSH to 192.168.x.x or other private nets should fail (gateway policy)
+  - SSH to the gateway itself ($GatewayIP:22) should fail
 "@
 if ($Mode -eq 'gateway') {
     Restart-Service -Name QuarantineLabAgent -ErrorAction SilentlyContinue
