@@ -69,12 +69,39 @@ if ! ip -4 addr show dev "$LAN_IF" | grep -q " ${LAN_IP}/"; then
 fi
 
 rm -f /etc/resolv.conf
-printf 'nameserver 10.0.2.3\nnameserver 1.1.1.1\nnameserver 8.8.8.8\n' >/etc/resolv.conf
+# Prefer public DNS — VBox NAT DNS (10.0.2.3) is often enough for ping but flaky for apt
+printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\nnameserver 10.0.2.3\n' >/etc/resolv.conf
 systemctl restart systemd-resolved 2>/dev/null || true
 if [[ -L /etc/resolv.conf ]] || grep -q '127.0.0.53' /etc/resolv.conf 2>/dev/null; then
   rm -f /etc/resolv.conf
-  printf 'nameserver 10.0.2.3\nnameserver 1.1.1.1\nnameserver 8.8.8.8\n' >/etc/resolv.conf
+  printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\nnameserver 10.0.2.3\n' >/etc/resolv.conf
 fi
+
+# apt over IPv6 through VirtualBox NAT commonly fails with "Temporary failure resolving"
+mkdir -p /etc/apt/apt.conf.d
+cat >/etc/apt/apt.conf.d/99quarantine-force-ipv4 <<'EOF'
+Acquire::ForceIPv4 "true";
+EOF
+
+# Pin mirror A records — apt DNS through VBox NAT is unreliable
+pin_host() {
+  local host="$1" ip="$2"
+  if grep -qE "[[:space:]]${host}([[:space:]]|$)" /etc/hosts 2>/dev/null; then
+    sed -i -E "s/^[0-9a-fA-F:.]+[[:space:]]+${host}([[:space:]].*)?$/${ip} ${host}/" /etc/hosts || true
+  else
+    echo "$ip $host" >>/etc/hosts
+  fi
+}
+# Resolve via IPv4 if possible; otherwise use known Canonical mirror addresses
+for pair in \
+  "archive.ubuntu.com:185.125.190.82" \
+  "gb.archive.ubuntu.com:185.125.190.82" \
+  "security.ubuntu.com:185.125.190.81"; do
+  host="${pair%%:*}"
+  fallback="${pair##*:}"
+  ip=$(getent ahostsv4 "$host" 2>/dev/null | awk '{print $1; exit}')
+  pin_host "$host" "${ip:-$fallback}"
+done
 
 echo "=== addresses ==="
 ip -4 addr

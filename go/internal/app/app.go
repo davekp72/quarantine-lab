@@ -60,6 +60,7 @@ func New(configPath string) (*App, error) {
 	root := config.ProjectRoot(configPath)
 	dr, _ := disk.NewReader(cfg, vms.VBox)
 	gw := gateway.New(cfg, vms.VBox, root)
+	gw.CfgPath = configPath
 	capMgr := capture.New(cfg, vms.VBox)
 	capMgr.Gateway = gw
 	netSvc := network.New(cfg, vms.VBox)
@@ -1075,13 +1076,14 @@ func (a *App) GatewayStatusWails() (map[string]any, error) {
 	mode := a.Cfg.Network.Mode
 	g := a.Cfg.Network.Gateway.WithDefaults(a.Cfg.Network.IntnetName)
 	out := map[string]any{
-		"enabled":    a.Cfg.IsGatewayMode() || g.Enabled,
-		"mode":       mode,
-		"vmName":     g.VMName,
-		"lanGateway": g.LANGateway,
-		"guestIp":    g.GuestIP,
-		"intnetName": g.IntnetName,
-		"status":     "unavailable",
+		"enabled":     a.Cfg.IsGatewayMode() || g.Enabled,
+		"mode":        mode,
+		"trafficMode": a.configuredTrafficMode(),
+		"vmName":      g.VMName,
+		"lanGateway":  g.LANGateway,
+		"guestIp":     g.GuestIP,
+		"intnetName":  g.IntnetName,
+		"status":      "unavailable",
 	}
 	state, err := a.VM.VBox.VMState(g.VMName)
 	if err != nil {
@@ -1092,6 +1094,45 @@ func (a *App) GatewayStatusWails() (map[string]any, error) {
 	out["vmState"] = state
 	out["status"] = fmt.Sprintf("%s state=%s lan=%s", g.VMName, state, g.LANGateway)
 	return out, nil
+}
+
+func (a *App) configuredTrafficMode() string {
+	if a != nil && a.ConfigPath != "" {
+		if cfg, err := config.Load(a.ConfigPath); err == nil {
+			return cfg.Network.Gateway.WithDefaults(cfg.Network.IntnetName).TrafficMode
+		}
+	}
+	if a == nil || a.Cfg == nil {
+		return "permissive"
+	}
+	return a.Cfg.Network.Gateway.WithDefaults(a.Cfg.Network.IntnetName).TrafficMode
+}
+
+// GatewayTrafficModeWails returns the last persisted traffic mode (no guestcontrol).
+func (a *App) GatewayTrafficModeWails() (map[string]any, error) {
+	mode := a.configuredTrafficMode()
+	return map[string]any{
+		"mode":    mode,
+		"message": "traffic-mode=" + mode,
+	}, nil
+}
+
+// SetGatewayTrafficModeWails applies permissive or fakenet on the Linux gateway.
+func (a *App) SetGatewayTrafficModeWails(mode string) (map[string]any, error) {
+	a.logInfo("Gateway traffic mode → " + mode)
+	msg, err := a.Gateway.SetTrafficMode(mode)
+	if err != nil {
+		a.logError(err.Error())
+		return nil, err
+	}
+	if msg != "" {
+		a.logInfo(msg)
+	}
+	applied := a.Cfg.Network.Gateway.TrafficMode
+	return map[string]any{
+		"mode":    applied,
+		"message": msg,
+	}, nil
 }
 
 // DecodeHTTPBodyWails decompresses an in-memory body (legacy / fallback).

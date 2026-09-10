@@ -567,6 +567,33 @@ files (examples: 24h, 7d). The active capture path is never removed.
 	cleanPcaps.Flags().Bool("include-proxy", false, "Also truncate gateway proxy/mitm log files")
 	cleanPcaps.Flags().Bool("dry-run", false, "List matching files without deleting")
 	cmd.AddCommand(cleanPcaps)
+
+	modeCmd := &cobra.Command{
+		Use:   "mode [permissive|fakenet]",
+		Short: "Show or set gateway traffic mode (permissive MITM vs FakeNet sinkhole)",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			a, err := app.New(*cfgPath)
+			if err != nil {
+				return err
+			}
+			if len(args) == 0 {
+				mode, msg, err := a.Gateway.TrafficMode()
+				if msg != "" {
+					fmt.Println(msg)
+				} else {
+					fmt.Println("traffic-mode=" + mode)
+				}
+				return err
+			}
+			msg, err := a.Gateway.SetTrafficMode(args[0])
+			if msg != "" {
+				fmt.Println(msg)
+			}
+			return err
+		},
+	}
+	cmd.AddCommand(modeCmd)
 	return cmd
 }
 

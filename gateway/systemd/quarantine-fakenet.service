@@ -1,0 +1,20 @@
+[Unit]
+Description=Quarantine FakeNet-NG (LAN sinkhole)
+After=network-online.target nftables.service
+Wants=network-online.target
+Conflicts=quarantine-mitm-explicit.service quarantine-mitm-transparent.service dnsmasq.service
+
+[Service]
+Type=simple
+WorkingDirectory=/var/log/quarantine/fakenet
+ExecStartPre=/bin/mkdir -p /var/log/quarantine/fakenet
+ExecStart=/opt/quarantine-gateway/venv-fakenet/bin/python -m fakenet.fakenet \
+  -c /etc/quarantine-gateway/fakenet.ini \
+  -n -p \
+  -l /var/log/quarantine/fakenet/fakenet.log
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=90
+
+[Install]
+WantedBy=multi-user.target

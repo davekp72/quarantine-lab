@@ -1068,7 +1068,9 @@ Network (internet-only quarantine vs offline):
 
 Gateway appliance:
 
-  gateway create|start|stop|status|provision|export-ca|sync-logs|clean-pcaps
+  gateway create|start|stop|status|provision|export-ca|sync-logs|clean-pcaps|mode
+
+  gateway mode [permissive|fakenet]   Show or set MITM vs FakeNet sinkhole
 
 
 

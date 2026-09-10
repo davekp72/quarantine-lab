@@ -64,3 +64,15 @@ export function LoadHTTPFlowWails(flowFile, flowLine) {
 export function GatewayStatusWails() {
   return window.go.app.App.GatewayStatusWails();
 }
+export function GatewayTrafficModeWails() {
+  return window.go.app.App.GatewayTrafficModeWails();
+}
+export function SetGatewayTrafficModeWails(mode) {
+  return window.go.app.App.SetGatewayTrafficModeWails(mode);
+}
+export function CheckHostPublicIPWails() {
+  return window.go.app.App.CheckHostPublicIPWails();
+}
+export function ShouldWarnPublicIPBeforeLaunchWails() {
+  return window.go.app.App.ShouldWarnPublicIPBeforeLaunchWails();
+}

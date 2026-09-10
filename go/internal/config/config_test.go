@@ -34,6 +34,20 @@ func TestSafeSnapshotFileName(t *testing.T) {
 	}
 }
 
+func TestNormalizeTrafficMode(t *testing.T) {
+	got, err := NormalizeTrafficMode("")
+	if err != nil || got != "permissive" {
+		t.Fatalf("empty: got %q %v", got, err)
+	}
+	got, err = NormalizeTrafficMode("FakeNet")
+	if err != nil || got != "fakenet" {
+		t.Fatalf("fakenet: got %q %v", got, err)
+	}
+	if _, err := NormalizeTrafficMode("nope"); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
 func TestResolveSnapshotName(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{

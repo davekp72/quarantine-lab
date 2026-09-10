@@ -25,6 +25,7 @@ type Manager struct {
 	Cfg         *config.Config
 	VBox        *vbox.Client
 	ProjectRoot string
+	CfgPath     string
 }
 
 func New(cfg *config.Config, vb *vbox.Client, projectRoot string) *Manager {
@@ -173,7 +174,7 @@ func (m *Manager) Status() string {
 		return fmt.Sprintf("missing (%v)", err)
 	}
 	g := m.gw()
-	line := fmt.Sprintf("%s state=%s lan=%s intnet=%s", name, state, g.LANGateway, g.IntnetName)
+	line := fmt.Sprintf("%s state=%s lan=%s intnet=%s traffic-mode=%s", name, state, g.LANGateway, g.IntnetName, g.TrafficMode)
 	if strings.EqualFold(state, "running") {
 		if out, err := m.linuxRun("sudo", "/usr/local/sbin/quarantine-gateway-status"); err == nil {
 			line += "\n" + strings.TrimSpace(out)
@@ -379,8 +380,10 @@ func shellSingleQuote(s string) string {
 }
 
 // AttachLabGuest sets the lab Windows VM for gateway mode:
-//   NIC1 = intnet (quarantine LAN / sample traffic via Linux gateway)
-//   NIC2+ = none (no lab NAT bypass)
+//
+//	NIC1 = intnet (quarantine LAN / sample traffic via Linux gateway)
+//	NIC2+ = none (no lab NAT bypass)
+//
 // Agent reachability is host → gateway NAT PF → DNAT to guest:9443.
 func (m *Manager) AttachLabGuest() error {
 	g := m.gw()

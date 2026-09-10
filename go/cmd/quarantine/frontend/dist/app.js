@@ -128,6 +128,7 @@ async function refreshGatewayStatus() {
   const api = await backend();
   const statusEl = $('#gateway-status');
   const detailEl = $('#gateway-detail');
+  const trafficEl = $('#gateway-traffic');
   if (!statusEl) return;
   if (!api?.GatewayStatusWails) {
     statusEl.textContent = 'Unavailable';
@@ -138,6 +139,7 @@ async function refreshGatewayStatus() {
     const st = await api.GatewayStatusWails();
     const vmState = (st.vmState || '').toLowerCase();
     const mode = (st.mode || '').toLowerCase();
+    const traffic = (st.trafficMode || 'permissive').toLowerCase();
     const active = mode === 'gateway' && vmState === 'running';
     statusEl.className = 'capture-status ' + (active ? 'running' : vmState === 'running' ? 'stopped' : 'disabled');
     statusEl.textContent = active ? 'Active' : (vmState === 'running' ? 'Running (idle)' : (vmState || 'Off'));
@@ -150,10 +152,54 @@ async function refreshGatewayStatus() {
       if (first && !first.includes(st.vmName || '')) parts.push(first);
     }
     if (detailEl) detailEl.textContent = parts.join(' · ');
+    if (trafficEl) {
+      trafficEl.textContent = traffic === 'fakenet'
+        ? 'Traffic: FakeNet sinkhole (no real internet)'
+        : 'Traffic: Permissive (internet + MITM)';
+    }
+    const permBtn = $('#btn-gw-permissive');
+    const fakeBtn = $('#btn-gw-fakenet');
+    if (permBtn) permBtn.classList.toggle('btn-primary', traffic !== 'fakenet');
+    if (fakeBtn) fakeBtn.classList.toggle('btn-primary', traffic === 'fakenet');
+    const canSwitch = vmState === 'running';
+    if (permBtn) permBtn.disabled = !canSwitch;
+    if (fakeBtn) fakeBtn.disabled = !canSwitch;
   } catch (e) {
     statusEl.textContent = 'Error';
     statusEl.className = 'capture-status disabled';
     if (detailEl) detailEl.textContent = String(e);
+  }
+}
+
+async function setGatewayTrafficMode(mode) {
+  const api = await backend();
+  if (!api?.SetGatewayTrafficModeWails) {
+    alert('Gateway traffic-mode API unavailable');
+    return;
+  }
+  if (mode === 'fakenet') {
+    const ok = confirm(
+      'Switch gateway to FakeNet sinkhole?\n\n' +
+      'The lab guest will lose real internet. FakeNet-NG answers DNS/HTTP/SMTP locally.\n' +
+      'Private-net isolation stays. LAN PCAP still records.\n\n' +
+      'OK = sinkhole   Cancel = stay permissive'
+    );
+    if (!ok) return;
+  }
+  const btn = mode === 'fakenet' ? $('#btn-gw-fakenet') : $('#btn-gw-permissive');
+  const label = mode === 'fakenet' ? 'FakeNet' : 'Permissive';
+  setBusy(btn, true, 'Switching…');
+  try {
+    const st = await api.SetGatewayTrafficModeWails(mode);
+    if (st?.message) {
+      const detailEl = $('#gateway-detail');
+      if (detailEl) detailEl.textContent = String(st.message).split('\n')[0];
+    }
+    await refreshGatewayStatus();
+  } catch (e) {
+    alert(String(e));
+  } finally {
+    setBusy(btn, false, label);
   }
 }
 
@@ -341,6 +387,49 @@ async function takeSnapshot() {
   }
 }
 
+async function confirmVPNBeforeLaunch(api, snapshotName) {
+  let warn = true;
+  try {
+    if (typeof api.ShouldWarnPublicIPBeforeLaunchWails === 'function') {
+      warn = await api.ShouldWarnPublicIPBeforeLaunchWails();
+    }
+  } catch (_) { /* default on */ }
+  if (!warn) return true;
+
+  let info = null;
+  try {
+    if (typeof api.CheckHostPublicIPWails === 'function') {
+      info = await api.CheckHostPublicIPWails();
+    }
+  } catch (e) {
+    info = { lookedUp: false, error: String(e), warning: 'Public IP lookup failed. Verify your VPN is on before launching.' };
+  }
+
+  const lines = [
+    'VPN / public IP check',
+    '',
+    `About to launch: ${snapshotName}`,
+    '',
+  ];
+  if (info && info.lookedUp) {
+    lines.push(`Your host public IP address is: ${info.ip || '?'}`);
+    const isp = info.isp || info.org || '';
+    if (isp) lines.push(`ISP / org: ${isp}`);
+    const loc = [info.city, info.region, info.country].filter(Boolean).join(', ');
+    if (loc) lines.push(`Location: ${loc}`);
+    if (info.source) lines.push(`(lookup: ${info.source})`);
+  } else {
+    lines.push('Could not look up your public IP.');
+    if (info && info.error) lines.push(`Error: ${info.error}`);
+  }
+  lines.push('');
+  lines.push(info?.warning || 'Confirm this is your VPN egress (not your home ISP) before malware work.');
+  lines.push('');
+  lines.push('OK = launch anyway   Cancel = abort');
+
+  return confirm(lines.join('\n'));
+}
+
 async function launchSnapshot() {
   const api = await backend();
   const name = selectedSnapshot();
@@ -350,9 +439,16 @@ async function launchSnapshot() {
     return;
   }
   const btn = $('#btn-launch-snap');
-  setBusy(btn, true, 'Launching…');
-  msg.textContent = `Restoring and starting ${name}…`;
+  setBusy(btn, true, 'Checking IP…');
+  msg.textContent = 'Checking host public IP (VPN)…';
   try {
+    const ok = await confirmVPNBeforeLaunch(api, name);
+    if (!ok) {
+      msg.textContent = 'Launch cancelled — turn on VPN if needed, then try again';
+      return;
+    }
+    setBusy(btn, true, 'Launching…');
+    msg.textContent = `Restoring and starting ${name}…`;
     const result = await api.LaunchSnapshotWails(name, false);
     msg.textContent = result || `Launched: ${name}`;
     await refreshStatus();
@@ -1238,6 +1334,8 @@ $('#btn-install-agent').addEventListener('click', async () => {
 $('#btn-capture-start')?.addEventListener('click', () => startCapture());
 $('#btn-capture-stop')?.addEventListener('click', () => stopCapture());
 $('#btn-capture-refresh')?.addEventListener('click', () => refreshCaptureStatus().catch(alert));
+$('#btn-gw-permissive')?.addEventListener('click', () => setGatewayTrafficMode('permissive').catch(alert));
+$('#btn-gw-fakenet')?.addEventListener('click', () => setGatewayTrafficMode('fakenet').catch(alert));
 $('#btn-load-file').addEventListener('click', async () => {
   const path = prompt('Diff JSON path');
   if (!path) return;

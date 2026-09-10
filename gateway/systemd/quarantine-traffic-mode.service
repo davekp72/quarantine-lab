@@ -1,0 +1,12 @@
+[Unit]
+Description=Restore Quarantine gateway traffic mode (permissive or FakeNet)
+After=network-online.target nftables.service dnsmasq.service quarantine-mitm-explicit.service quarantine-mitm-transparent.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/quarantine-set-traffic-mode boot
+
+[Install]
+WantedBy=multi-user.target

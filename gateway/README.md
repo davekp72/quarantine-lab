@@ -6,13 +6,14 @@
 #   Lab guest: intnet, 10.66.0.15/24, gateway/DNS 10.66.0.1
 #
 # Services
-#   dnsmasq          DNS (+ optional DHCP)
-#   nftables         forward + MASQUERADE; :80/:443 → mitm :8082
-#                    Other ports (SSH/SMTP/…) and ICMP pass through for PCAP
+#   dnsmasq          DNS (+ optional DHCP) — permissive mode
+#   nftables         forward + MASQUERADE; :80/:443 → mitm :8082 (permissive)
+#                    FakeNet mode: no LAN→WAN; listeners on :53/:80/:443/:25
 #                    SSH (:22) accepted on WAN only (host NAT PF); blocked from LAN guest
 #                    LAN→WAN drops RFC1918/link-local/CGNAT before general accept
 #   mitmdump :8080   explicit proxy (PAC fallback) — block_private resolves DNS
-#   mitmdump :8082   transparent MITM
+#   mitmdump :8082   transparent MITM (stopped in FakeNet mode)
+#   FakeNet-NG       optional LAN sinkhole (switch with gateway mode)
 #   tcpdump          LAN PCAP under /var/log/quarantine/pcap (all protocols)
 #
 # Guest Windows (Configure-QuarantineGuestNetwork.ps1 -Mode gateway):
@@ -34,6 +35,9 @@
 #   .\quarantine-vm.ps1 gateway clean-pcaps              # drop leftover PCAPs (keeps active)
 #   .\quarantine-vm.ps1 gateway clean-pcaps --older-than 7d
 #   .\quarantine-vm.ps1 gateway clean-pcaps --include-proxy
+#   .\quarantine-vm.ps1 gateway mode               # show permissive | fakenet
+#   .\quarantine-vm.ps1 gateway mode fakenet       # sinkhole (no WAN)
+#   .\quarantine-vm.ps1 gateway mode permissive    # internet + MITM
 #
 # Manual first boot (if not using cloud-init)
 #   1. Install Ubuntu Server in Quarantine-Gateway VM (2 NICs: NAT + intnet)
@@ -51,3 +55,11 @@
 # Guest lab VM
 #   Run Configure-QuarantineGuestNetwork.ps1 -Mode Gateway
 #   (static 10.66.0.15, GW/DNS 10.66.0.1, PAC http://10.66.0.1:8080/quarantine.pac, install CA)
+#
+# Traffic modes (switch anytime; guest IP/DNS unchanged)
+#   permissive — default: WAN NAT, dnsmasq, mitm :80/:443, other ports forwarded
+#   fakenet    — FakeNet-NG MultiHost sinkhole; no LAN→WAN; DNS/HTTP/SMTP faked
+#   FakeNet-NG uses iptables NFQUEUE on the LAN iface. Config sets LinuxFlushIptables=No
+#   so nftables (WAN SSH, agent DNAT) is not wiped. Re-provision once to install the venv:
+#     .\quarantine-vm.ps1 gateway provision
+#

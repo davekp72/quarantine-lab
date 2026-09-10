@@ -168,6 +168,8 @@ Useful host helpers:
 .\quarantine-vm.ps1 capture stop
 ```
 
+The desktop UI (`.\quarantine-vm.ps1 ui`) shows your **host public IP and ISP** before Launch so you can confirm the VPN is on. Disable with `"ui": { "warnPublicIpBeforeLaunch": false }` in config.
+
 Clipboard paste (host → guest only by default):
 
 ```powershell
@@ -244,9 +246,27 @@ List everything:
 | Mode | Use when |
 |------|----------|
 | `network offline` | Default isolation — no internet |
-| `network gateway` | Controlled internet + MITM HTTP(S) + PCAP (recommended) |
+| `network gateway` | Lab guest on intnet via Linux gateway |
 | `network quarantine` | Legacy host mitmproxy (no gateway VM) |
 | `network nat` | Temporary raw internet (Windows setup only) |
+
+### Gateway traffic: permissive vs FakeNet
+
+Both keep LAN PCAP and block private/host LAN. The lab guest IP/DNS does not change.
+
+| Mode | What the guest sees |
+|------|---------------------|
+| **Permissive** (default) | Real internet. HTTP/HTTPS MITM. Other ports forwarded. |
+| **FakeNet** | No WAN. FakeNet-NG answers DNS/HTTP/SMTP/etc. locally (sinkhole). |
+
+```powershell
+.\quarantine-vm.ps1 gateway provision          # once (installs FakeNet on the appliance)
+.\quarantine-vm.ps1 gateway mode               # show
+.\quarantine-vm.ps1 gateway mode fakenet       # sinkhole
+.\quarantine-vm.ps1 gateway mode permissive    # internet + MITM
+```
+
+The desktop UI Gateway panel has the same **Permissive** / **FakeNet** buttons. FakeNet HTTPS is not the mitm CA — pinning still fails (same as any sinkhole). Use permissive when you need real-site MITM.
 
 Gateway session sketch:
 
@@ -289,7 +309,7 @@ Logs (treat as evidence): proxy flows, PCAPs, inbox SHA256 — under `D:\Vbox\La
 | `snapshots` / `status` | List snapshots / VM state |
 | `manifest view` / `diff` | Compare clean vs evidence |
 | `ui` | Desktop app for the same workflow |
-| `network …` / `gateway …` | Isolation and internet path |
+| `network …` / `gateway …` | Isolation, internet path, FakeNet/permissive |
 | `capture start\|stop` | Packet / proxy capture |
 | `inbox push\|open\|close` | One-way sample transfer |
 | `guest …` | Run commands / copy files into guest |

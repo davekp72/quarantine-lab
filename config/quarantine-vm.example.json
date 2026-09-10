@@ -43,7 +43,8 @@
       "sshHostPort": 2222,
       "memoryMb": 1024,
       "cpuCount": 1,
-      "diskSizeGb": 16
+      "diskSizeGb": 16,
+      "trafficMode": "permissive"
     }
   },
     "isolation": {
@@ -119,5 +120,8 @@
     "tokenFile": "D:\\Vbox\\LabVM\\secrets\\agent-token.txt",
     "natRuleName": "quarantine-agent",
     "installPath": "C:\\Users\\Public\\Quarantine\\quarantine-agent.exe"
+  },
+  "ui": {
+    "warnPublicIpBeforeLaunch": true
   }
 }

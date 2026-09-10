@@ -102,7 +102,9 @@ apt-get install -y --no-install-recommends \
   iptables ca-certificates curl openssl net-tools iproute2
 # Build headers only if mirrors work — mitmproxy 12 prefers binary wheels
 apt-get install -y --no-install-recommends \
-  python3-dev build-essential libffi-dev || true
+  python3-dev build-essential libffi-dev libnetfilter-queue-dev || true
+# FakeNet-NG prefers 3.10–3.12; Ubuntu 26 default python may be newer
+apt-get install -y --no-install-recommends python3.12 python3.12-venv python3.12-dev || true
 
 # IP forwarding
 cat >/etc/sysctl.d/99-quarantine-gateway.conf <<EOF
@@ -181,14 +183,29 @@ install -m 0644 "$OPT/mitm/export-flows-jsonl.py" /usr/local/lib/quarantine/expo
 install -m 0644 "$OPT/systemd/quarantine-mitm-explicit.service" /etc/systemd/system/
 install -m 0644 "$OPT/systemd/quarantine-mitm-transparent.service" /etc/systemd/system/
 install -m 0644 "$OPT/systemd/quarantine-capture.service" /etc/systemd/system/
+install -m 0644 "$OPT/systemd/quarantine-fakenet.service" /etc/systemd/system/
+install -m 0644 "$OPT/systemd/quarantine-traffic-mode.service" /etc/systemd/system/
 install -m 0755 "$OPT/scripts/start-capture.sh" /usr/local/sbin/quarantine-capture-start
 install -m 0755 "$OPT/scripts/stop-capture.sh" /usr/local/sbin/quarantine-capture-stop
 install -m 0755 "$OPT/scripts/status.sh" /usr/local/sbin/quarantine-gateway-status
+install -m 0755 "$OPT/scripts/set-traffic-mode.sh" /usr/local/sbin/quarantine-set-traffic-mode
+install -m 0755 "$OPT/scripts/install-fakenet.sh" /usr/local/sbin/quarantine-install-fakenet
+install -m 0755 "$OPT/scripts/repair-wan-dns.sh" /usr/local/sbin/quarantine-repair-wan-dns
 install -m 0755 "$OPT/scripts/sync-hint.txt" /etc/quarantine-gateway/sync-hint.txt 2>/dev/null || true
 
+# FakeNet-NG (optional sinkhole). Separate venv from mitmproxy.
+# Retries WAN DNS + apt for libnetfilter-queue-dev (required to build NetfilterQueue).
+if ! /usr/local/sbin/quarantine-install-fakenet; then
+  echo "WARNING: FakeNet-NG install failed — 'gateway mode fakenet' unavailable until provision succeeds with working WAN DNS."
+fi
+
+[[ -f /etc/quarantine-gateway/traffic-mode ]] || echo permissive >/etc/quarantine-gateway/traffic-mode
+
 systemctl daemon-reload
-systemctl enable quarantine-mitm-explicit quarantine-mitm-transparent
-systemctl restart quarantine-mitm-explicit quarantine-mitm-transparent
+systemctl enable quarantine-traffic-mode
+# Apply saved traffic mode (default permissive). FakeNet stays stopped unless selected.
+# boot enables mitm+dnsmasq in permissive, or FakeNet in sinkhole mode.
+/usr/local/sbin/quarantine-set-traffic-mode boot || true
 
 # Export CA once mitm has run
 sleep 2

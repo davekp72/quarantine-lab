@@ -11,37 +11,52 @@ import (
 
 // Config mirrors config/quarantine-vm.json.
 type Config struct {
-	VMName           string         `json:"vmName"`
-	GuestOSType      string         `json:"guestOsType"`
-	MemoryMB         int            `json:"memoryMb"`
-	CPUCount         int            `json:"cpuCount"`
-	DiskSizeGB       int            `json:"diskSizeGb"`
-	VMDataDir        string         `json:"vmDataDir"`
-	DiskPath         string         `json:"diskPath"`
-	WindowsISOPath   string         `json:"windowsIsoPath"`
-	AutounattendPath string         `json:"autounattendPath"`
-	VBoxManagePath   string         `json:"vboxManagePath"`
-	Network          NetworkConfig  `json:"network"`
+	VMName           string          `json:"vmName"`
+	GuestOSType      string          `json:"guestOsType"`
+	MemoryMB         int             `json:"memoryMb"`
+	CPUCount         int             `json:"cpuCount"`
+	DiskSizeGB       int             `json:"diskSizeGb"`
+	VMDataDir        string          `json:"vmDataDir"`
+	DiskPath         string          `json:"diskPath"`
+	WindowsISOPath   string          `json:"windowsIsoPath"`
+	AutounattendPath string          `json:"autounattendPath"`
+	VBoxManagePath   string          `json:"vboxManagePath"`
+	Network          NetworkConfig   `json:"network"`
 	Isolation        IsolationConfig `json:"isolation"`
-	Inbox            InboxConfig    `json:"inbox"`
-	Guest            AccountConfig  `json:"guest"`
-	Payload          AccountConfig  `json:"payload"`
-	Sysmon           SysmonConfig   `json:"sysmon"`
-	CleanSnapshot    string         `json:"cleanSnapshotName"`
-	Firmware         string         `json:"firmware"`
-	Manifest         ManifestConfig `json:"manifest"`
-	Agent            AgentConfig    `json:"agent"`
+	Inbox            InboxConfig     `json:"inbox"`
+	Guest            AccountConfig   `json:"guest"`
+	Payload          AccountConfig   `json:"payload"`
+	Sysmon           SysmonConfig    `json:"sysmon"`
+	CleanSnapshot    string          `json:"cleanSnapshotName"`
+	Firmware         string          `json:"firmware"`
+	Manifest         ManifestConfig  `json:"manifest"`
+	Agent            AgentConfig     `json:"agent"`
+	UI               UIConfig        `json:"ui"`
+}
+
+// UIConfig controls desktop UI behaviour.
+type UIConfig struct {
+	// WarnPublicIPBeforeLaunch shows host public IP/ISP before Launch (default true).
+	WarnPublicIPBeforeLaunch *bool `json:"warnPublicIpBeforeLaunch"`
+}
+
+// WarnPublicIPBeforeLaunchEnabled is true unless explicitly disabled in config.
+func (c *Config) WarnPublicIPBeforeLaunchEnabled() bool {
+	if c == nil || c.UI.WarnPublicIPBeforeLaunch == nil {
+		return true
+	}
+	return *c.UI.WarnPublicIPBeforeLaunch
 }
 
 type AgentConfig struct {
-	Enabled         bool   `json:"enabled"`
-	Host            string `json:"host"`
-	Port            int    `json:"port"`
-	Token           string `json:"token"`
-	TokenFile       string `json:"tokenFile"`
-	NatRuleName     string `json:"natRuleName"`
-	InstallPath     string `json:"installPath"`
-	HostBinaryPath  string `json:"hostBinaryPath"`
+	Enabled        bool   `json:"enabled"`
+	Host           string `json:"host"`
+	Port           int    `json:"port"`
+	Token          string `json:"token"`
+	TokenFile      string `json:"tokenFile"`
+	NatRuleName    string `json:"natRuleName"`
+	InstallPath    string `json:"installPath"`
+	HostBinaryPath string `json:"hostBinaryPath"`
 }
 
 type NetworkConfig struct {
@@ -70,6 +85,8 @@ type GatewayConfig struct {
 	MemoryMB    int    `json:"memoryMb"`
 	CPUCount    int    `json:"cpuCount"`
 	DiskSizeGB  int    `json:"diskSizeGb"`
+	// TrafficMode is "permissive" (internet + MITM) or "fakenet" (LAN sinkhole).
+	TrafficMode string `json:"trafficMode"`
 }
 
 // WithDefaults fills gateway fields from intnet name when empty.
@@ -113,7 +130,24 @@ func (g GatewayConfig) WithDefaults(intnetFallback string) GatewayConfig {
 	if g.DiskSizeGB <= 0 {
 		g.DiskSizeGB = 16
 	}
+	tm, _ := NormalizeTrafficMode(g.TrafficMode)
+	if tm == "" {
+		tm = "permissive"
+	}
+	g.TrafficMode = tm
 	return g
+}
+
+// NormalizeTrafficMode maps CLI/UI aliases to permissive or fakenet.
+func NormalizeTrafficMode(s string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "permissive", "mitm", "internet":
+		return "permissive", nil
+	case "fakenet", "sinkhole":
+		return "fakenet", nil
+	default:
+		return "", fmt.Errorf("unknown traffic mode %q (use permissive or fakenet)", s)
+	}
 }
 
 type ProxyConfig struct {
@@ -133,24 +167,24 @@ type CaptureConfig struct {
 }
 
 type IsolationConfig struct {
-	DisableClipboard     bool         `json:"disableClipboard"`
-	ClipboardMode        string       `json:"clipboardMode"`
-	DisableDragDrop      bool         `json:"disableDragDrop"`
-	DisableUSB           bool         `json:"disableUsb"`
-	DisableAudio         bool         `json:"disableAudio"`
-	DisableSharedFolders bool         `json:"disableSharedFolders"`
+	DisableClipboard     bool          `json:"disableClipboard"`
+	ClipboardMode        string        `json:"clipboardMode"`
+	DisableDragDrop      bool          `json:"disableDragDrop"`
+	DisableUSB           bool          `json:"disableUsb"`
+	DisableAudio         bool          `json:"disableAudio"`
+	DisableSharedFolders bool          `json:"disableSharedFolders"`
 	Stealth              StealthConfig `json:"stealth"`
 }
 
 // StealthConfig blunts common VirtualBox guest fingerprints without removing Guest Additions.
 // Graphics (VBoxSVGA) and VBox* drivers remain by design — required for guestcontrol/clipboard/resize.
 type StealthConfig struct {
-	Enabled         *bool             `json:"enabled"` // nil/absent = on when stealth object present with defaults from Apply
-	CPUProfile      string            `json:"cpuProfile"`
-	ParavirtProvider string           `json:"paravirtProvider"` // empty = leave VirtualBox default (Hyper-V for Win11)
-	MacAddress      string            `json:"macAddress"`       // 12 hex or AA:BB:...; "auto" = generate Dell-OUI once
-	MacOUI          string            `json:"macOui"`           // used when macAddress is empty/auto (default F8B156)
-	DMI             map[string]string `json:"dmi"`
+	Enabled          *bool             `json:"enabled"` // nil/absent = on when stealth object present with defaults from Apply
+	CPUProfile       string            `json:"cpuProfile"`
+	ParavirtProvider string            `json:"paravirtProvider"` // empty = leave VirtualBox default (Hyper-V for Win11)
+	MacAddress       string            `json:"macAddress"`       // 12 hex or AA:BB:...; "auto" = generate Dell-OUI once
+	MacOUI           string            `json:"macOui"`           // used when macAddress is empty/auto (default F8B156)
+	DMI              map[string]string `json:"dmi"`
 }
 
 type InboxConfig struct {
@@ -239,6 +273,11 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Agent.InstallPath == "" {
 		cfg.Agent.InstallPath = cfg.AgentGuestInstallPath()
+	}
+	if tm, err := NormalizeTrafficMode(cfg.Network.Gateway.TrafficMode); err == nil {
+		cfg.Network.Gateway.TrafficMode = tm
+	} else {
+		cfg.Network.Gateway.TrafficMode = "permissive"
 	}
 	return &cfg, nil
 }
@@ -378,9 +417,9 @@ func (c *Config) ResolveSnapshotName(name string) string {
 		return name
 	}
 	aliases := map[string]string{
-		"clean":         c.CleanSnapshot,
-		"cleansession":  c.Manifest.SessionBaselineSnapshot,
-		"baseline":      c.Manifest.SessionBaselineSnapshot,
+		"clean":        c.CleanSnapshot,
+		"cleansession": c.Manifest.SessionBaselineSnapshot,
+		"baseline":     c.Manifest.SessionBaselineSnapshot,
 	}
 	if mapped, ok := aliases[strings.ToLower(name)]; ok {
 		name = mapped
