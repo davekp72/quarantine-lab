@@ -4,7 +4,9 @@ package collectors
 // Returns ("", false) for non-file events.
 func SysmonFileChangeKind(eid int, typ string) (kind string, ok bool) {
 	switch typ {
-	case "FileCreate", "FileCreateStream":
+	case "FileCreate":
+		return "added", true
+	case "FileCreateStream", "FileCreateStreamHash":
 		return "added", true
 	case "FileDelete", "FileDeleteDetected":
 		return "removed", true
@@ -12,7 +14,7 @@ func SysmonFileChangeKind(eid int, typ string) (kind string, ok bool) {
 		return "modified", true
 	}
 	switch eid {
-	case 11, 12:
+	case 11, 15:
 		return "added", true
 	case 23, 26:
 		return "removed", true

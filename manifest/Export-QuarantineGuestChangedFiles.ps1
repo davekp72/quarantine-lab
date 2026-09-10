@@ -24,12 +24,16 @@ $guestManifestRoot = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Par
 function Resolve-UsnEventPath {
     param($Event)
 
+    if ($Event.path) {
+        $fromPath = [string]$Event.path
+        if (-not [string]::IsNullOrWhiteSpace($fromPath)) { return $fromPath }
+    }
     $name = if ($Event.fileName) { [string]$Event.fileName } else { '' }
     if ([string]::IsNullOrWhiteSpace($name)) { return $null }
     if ($name -match '^[A-Za-z]:\\') { return $name }
     if ($name.StartsWith('\')) { return "C:$name" }
     if ($name -match '(^|\\)hosts$') { return 'C:\Windows\System32\drivers\etc\hosts' }
-    return "C:\$name"
+    return $null
 }
 
 function Get-UsnChangeKind {

@@ -208,7 +208,7 @@ function Resolve-UsnEventPath {
     if ($name -match '^[A-Za-z]:\\') { return $name }
     if ($name.StartsWith('\')) { return "C:$name" }
     if ($name -match '(^|\\)hosts$') { return 'C:\Windows\System32\drivers\etc\hosts' }
-    return "C:\$name"
+    return $null
 }
 
 function Get-UsnChangeKind {

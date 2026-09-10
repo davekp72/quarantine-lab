@@ -5,29 +5,83 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"unicode/utf8"
 )
 
 const (
-	maxChangedFileEntries    = 2500
-	maxFileHashesPerCapture  = 150
+	maxChangedFileEntries   = 4000
+	maxFileHashesPerCapture = 150
+	maxContentEmbedBytes    = 256 * 1024
 )
 
-// ChangedFiles builds file entries from Sysmon file events (create, delete, modify).
-func ChangedFiles(_ json.RawMessage, sysmonRaw json.RawMessage, hashMaxMB, contentMaxKB int) (json.RawMessage, int, error) {
+type fileChange struct {
+	path string
+	kind string
+	src  string
+}
+
+// ChangedFiles builds file entries from USN + Sysmon (create, delete, modify).
+func ChangedFiles(usnRaw json.RawMessage, sysmonRaw json.RawMessage, hashMaxMB, contentMaxKB int) (json.RawMessage, int, error) {
 	if hashMaxMB <= 0 {
 		hashMaxMB = 50
 	}
 	if contentMaxKB <= 0 {
-		contentMaxKB = 51200
+		contentMaxKB = 256
 	}
 	hashMax := int64(hashMaxMB) * 1024 * 1024
 	contentMax := int64(contentMaxKB) * 1024
+	if contentMax > maxContentEmbedBytes {
+		contentMax = maxContentEmbedBytes
+	}
 
 	pathKinds := map[string]string{}
+	pathSrc := map[string]string{}
+	noise := map[string]int{}
+
+	add := func(path, kind, src string) {
+		path = normalizePath(path)
+		if path == "" || isLeafOnlyPath(path) {
+			return
+		}
+		if class := ClassifyFileNoise(path, filepath.Base(path)); class != "" {
+			noise[class]++
+			return
+		}
+		mergeFileChangeKind(pathKinds, path, kind)
+		if existing, ok := pathSrc[path]; ok && existing != src {
+			pathSrc[path] = "usn+sysmon"
+		} else {
+			pathSrc[path] = src
+		}
+	}
+
+	if usnRaw != nil {
+		var usn map[string]any
+		if json.Unmarshal(usnRaw, &usn) == nil {
+			if evs, ok := usn["events"].([]any); ok {
+				for _, e := range evs {
+					em, ok := e.(map[string]any)
+					if !ok {
+						continue
+					}
+					path := stringField(em, "path")
+					if path == "" {
+						path = stringField(em, "fileName")
+					}
+					kind := stringField(em, "change")
+					if kind == "" {
+						kind = usnChangeKind(reasonStringsFromEvent(em))
+					}
+					add(path, kind, "usn")
+				}
+			}
+		}
+	}
 
 	if sysmonRaw != nil {
 		var sysmon map[string]any
@@ -48,42 +102,60 @@ func ChangedFiles(_ json.RawMessage, sysmonRaw json.RawMessage, hashMaxMB, conte
 					if target == "" {
 						target = stringField(em, "targetFilename")
 					}
-					mergeFileChangeKind(pathKinds, target, kind)
+					add(target, kind, "sysmon")
 				}
 			}
 		}
 	}
 
+	items := make([]fileChange, 0, len(pathKinds))
+	for path, kind := range pathKinds {
+		items = append(items, fileChange{path: path, kind: kind, src: pathSrc[path]})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		pi, pj := FilePriority(items[i].path), FilePriority(items[j].path)
+		if pi != pj {
+			return pi < pj
+		}
+		return strings.ToLower(items[i].path) < strings.ToLower(items[j].path)
+	})
+
+	truncated := false
+	if len(items) > maxChangedFileEntries {
+		// Never drop priority 0–2 (System32/etc, Program Files, executables).
+		cut := maxChangedFileEntries
+		for cut < len(items) && FilePriority(items[cut].path) <= 2 {
+			cut++
+		}
+		if cut < len(items) {
+			truncated = true
+			items = items[:cut]
+		}
+	}
+
 	var files []map[string]any
 	hashed := 0
-	truncated := false
-	for path, kind := range pathKinds {
-		if len(files) >= maxChangedFileEntries {
-			truncated = true
-			break
-		}
+	for _, item := range items {
 		entry := map[string]any{
-			"p":      path,
-			"change": kind,
-			"src":    "sysmon",
+			"p":      item.path,
+			"change": item.kind,
+			"src":    item.src,
 		}
-		if isLeafOnlyUSNPath(path) {
-			continue
-		}
-		info, err := os.Stat(path)
+		info, err := os.Stat(item.path)
 		if err != nil || info.IsDir() {
 			files = append(files, entry)
 			continue
 		}
 		entry["s"] = info.Size()
 		entry["m"] = info.ModTime().UTC().Format("2006-01-02T15:04:05Z")
-		if info.Size() <= hashMax && hashed < maxFileHashesPerCapture {
-			if h, err := hashFile(path); err == nil {
+		wantHash := FilePriority(item.path) <= 2 && hashed < maxFileHashesPerCapture && info.Size() <= hashMax
+		if wantHash {
+			if h, err := hashFile(item.path); err == nil {
 				entry["h"] = h
 				hashed++
 			}
-			if info.Size() <= contentMax {
-				if c := fileContentPayload(path, contentMax); c != nil {
+			if info.Size() <= contentMax && FilePriority(item.path) <= 1 {
+				if c := fileContentPayload(item.path, contentMax); c != nil {
 					if v, ok := c["c"]; ok {
 						entry["c"] = v
 					}
@@ -100,23 +172,15 @@ func ChangedFiles(_ json.RawMessage, sysmonRaw json.RawMessage, hashMaxMB, conte
 
 	out := map[string]any{
 		"fileCount": len(files),
+		"pathCount": len(pathKinds),
 		"files":     files,
+		"noise":     noise,
 	}
 	if truncated {
 		out["truncated"] = true
-		out["pathCount"] = len(pathKinds)
 	}
 	payload, err := json.Marshal(out)
 	return payload, len(files), err
-}
-
-func isLeafOnlyUSNPath(p string) bool {
-	p = normalizePath(p)
-	if len(p) < 4 || p[1] != ':' {
-		return false
-	}
-	rest := strings.TrimPrefix(p, p[:3])
-	return rest != "" && !strings.Contains(rest, `\`)
 }
 
 func stringField(m map[string]any, key string) string {
@@ -134,19 +198,33 @@ func normalizePath(p string) string {
 	if strings.HasPrefix(p, `\??\`) {
 		p = p[4:]
 	}
+	if strings.HasPrefix(p, `\\?\`) {
+		p = p[4:]
+	}
 	return filepath.Clean(p)
 }
 
 func hashFile(path string) (string, error) {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
-	sum := sha256.Sum256(data)
-	return fmt.Sprintf("%x", sum[:]), nil
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
 func fileContentPayload(path string, max int64) map[string]any {
+	info, err := os.Stat(path)
+	if err != nil {
+		return map[string]any{"c": "access_denied"}
+	}
+	if info.Size() > max {
+		return map[string]any{"c": "too_large"}
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return map[string]any{"c": "access_denied"}

@@ -47,12 +47,14 @@ function Test-QuarantineSidecarHasEvents {
 function Resolve-QuarantineUsnEventPath {
     param($Event)
 
+    $fromPath = [string](Get-QuarantineJsonProperty -Object $Event -Name 'path')
+    if (-not [string]::IsNullOrWhiteSpace($fromPath)) { return $fromPath }
     $name = [string](Get-QuarantineJsonProperty -Object $Event -Name 'fileName')
     if ([string]::IsNullOrWhiteSpace($name)) { return $null }
     if ($name -match '^[A-Za-z]:\\') { return $name }
     if ($name.StartsWith('\')) { return "C:$name" }
     if ($name -match '(^|\\)hosts$') { return 'C:\Windows\System32\drivers\etc\hosts' }
-    return "C:\$name"
+    return $null
 }
 
 function Get-QuarantineUsnChangeKind {

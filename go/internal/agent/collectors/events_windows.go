@@ -18,21 +18,23 @@ import (
 )
 
 var (
-	modWevtapi          = windows.NewLazySystemDLL("wevtapi.dll")
-	procEvtQuery        = modWevtapi.NewProc("EvtQuery")
-	procEvtNext         = modWevtapi.NewProc("EvtNext")
-	procEvtRender       = modWevtapi.NewProc("EvtRender")
-	procEvtClose        = modWevtapi.NewProc("EvtClose")
+	modWevtapi    = windows.NewLazySystemDLL("wevtapi.dll")
+	procEvtQuery  = modWevtapi.NewProc("EvtQuery")
+	procEvtNext   = modWevtapi.NewProc("EvtNext")
+	procEvtRender = modWevtapi.NewProc("EvtRender")
+	procEvtClose  = modWevtapi.NewProc("EvtClose")
 )
 
 const (
-	evtQueryChannelPath      = 0x1
-	evtRenderEventXml        = 1
+	evtQueryChannelPath = 0x1
+	evtRenderEventXml   = 1
 )
 
 var sysmonEventIDs = map[int]string{
-	1: "ProcessCreate", 2: "FileCreateTime", 11: "FileCreate", 12: "FileCreateStream", 13: "RegistryEvent",
-	22: "DnsQuery", 23: "FileDelete", 26: "FileDeleteDetected",
+	1: "ProcessCreate", 2: "FileCreateTime", 3: "NetworkConnect",
+	11: "FileCreate", 12: "RegistryEvent", 13: "RegistryEvent",
+	15: "FileCreateStreamHash", 22: "DnsQuery", 23: "FileDelete",
+	26: "FileDeleteDetected",
 }
 
 // SysmonEvents reads Sysmon operational log since baselineAt.
@@ -139,7 +141,7 @@ func parseBaselineTime(baselineAt string) string {
 }
 
 func buildTimeQuery(since string) string {
-	ids := []string{"1", "2", "11", "12", "13", "22", "23", "26"}
+	ids := []string{"1", "2", "11", "12", "13", "15", "22", "23", "26"}
 	var parts []string
 	for _, id := range ids {
 		parts = append(parts, fmt.Sprintf("EventID=%s", id))
@@ -150,7 +152,7 @@ func buildTimeQuery(since string) string {
 
 type eventXML struct {
 	System struct {
-		EventID   string `xml:"EventID"`
+		EventID     string `xml:"EventID"`
 		TimeCreated struct {
 			SystemTime string `xml:"SystemTime,attr"`
 		} `xml:"TimeCreated"`
@@ -239,21 +241,21 @@ func normalizeSysmonEvent(ev eventXML, data map[string]string) map[string]any {
 		typ = fmt.Sprintf("Event%d", eid)
 	}
 	out := map[string]any{
-		"eid":        eid,
-		"t":          typ,
-		"time":       ev.System.TimeCreated.SystemTime,
-		"computer":   ev.System.Computer,
-		"image":      data["Image"],
-		"commandLine": data["CommandLine"],
-		"processGuid": data["ProcessGuid"],
-		"processId":  data["ProcessId"],
-		"targetObject": data["TargetObject"],
-		"details":    data["Details"],
-		"queryName":  data["QueryName"],
-		"queryResults": data["QueryResults"],
+		"eid":            eid,
+		"t":              typ,
+		"time":           ev.System.TimeCreated.SystemTime,
+		"computer":       ev.System.Computer,
+		"image":          data["Image"],
+		"commandLine":    data["CommandLine"],
+		"processGuid":    data["ProcessGuid"],
+		"processId":      data["ProcessId"],
+		"targetObject":   data["TargetObject"],
+		"details":        data["Details"],
+		"queryName":      data["QueryName"],
+		"queryResults":   data["QueryResults"],
 		"targetFilename": data["TargetFilename"],
-		"target":     data["TargetFilename"],
-		"hashes":     data["Hashes"],
+		"target":         data["TargetFilename"],
+		"hashes":         data["Hashes"],
 	}
 	return out
 }

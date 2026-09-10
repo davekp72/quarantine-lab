@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/quarantine-lab/quarantine/internal/evidence"
@@ -38,6 +39,33 @@ func TestCompareMinimal(t *testing.T) {
 	}
 	if len(res.Registry.Added) != 1 {
 		t.Fatalf("added reg: %+v", res.Registry.Added)
+	}
+}
+
+func TestCompareEventsBaselineUsesChangeField(t *testing.T) {
+	left := &evidence.Manifest{Snapshot: "CleanSession", ScanMode: "events", Files: nil}
+	right := &evidence.Manifest{
+		Snapshot: "Evidence-test",
+		ScanMode: "events",
+		Files: []evidence.FileEntry{
+			{P: `C:\Windows\System32\dodge.txt`, Change: "added"},
+			{P: `C:\Windows\System32\drivers\etc\hosts`, Change: "modified"},
+			{P: `C:\Windows\System32\gone.dll`, Change: "removed"},
+			{P: `C:\Users\jkcooper\AppData\Local\Temp\noise.txt`, Change: "added"},
+		},
+	}
+	res, err := Compare("l.json", "r.json", left, right)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Files.Added) != 1 || !strings.Contains(res.Files.Added[0].Path, "dodge.txt") {
+		t.Fatalf("added=%+v", res.Files.Added)
+	}
+	if len(res.Files.Modified) != 1 || !strings.Contains(res.Files.Modified[0].Path, "hosts") {
+		t.Fatalf("modified=%+v", res.Files.Modified)
+	}
+	if len(res.Files.Removed) != 1 || !strings.Contains(res.Files.Removed[0].Path, "gone.dll") {
+		t.Fatalf("removed=%+v", res.Files.Removed)
 	}
 }
 

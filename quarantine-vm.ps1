@@ -1018,7 +1018,7 @@ Quarantine VM utility (VirtualBox)
 
   stop       Stop the VM (-Force for power off)
 
-  snapshot   Save a snapshot (-SnapshotName, -SnapshotDescription). Running VM = live (RAM + disk). Existing name prompts to replace (child snapshots such as Evidence-* are deleted); -Force replaces without prompt. -Offline for disk-only.
+  snapshot   Save a snapshot (-SnapshotName, -SnapshotDescription). Captures USN baseline first, then freezes the VM so restore+evidence match. Running VM = live (RAM + disk). -Force replaces. -Offline for disk-only (no live capture).
 
   snapshots  List saved snapshots (live = includes RAM / resume session)
 

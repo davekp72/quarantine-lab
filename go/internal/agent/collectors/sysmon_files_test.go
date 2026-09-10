@@ -10,7 +10,8 @@ func TestSysmonFileChangeKind(t *testing.T) {
 		ok   bool
 	}{
 		{11, "FileCreate", "added", true},
-		{12, "FileCreateStream", "added", true},
+		{15, "FileCreateStreamHash", "added", true},
+		{12, "RegistryEvent", "", false},
 		{23, "FileDelete", "removed", true},
 		{26, "FileDeleteDetected", "removed", true},
 		{2, "FileCreateTime", "modified", true},

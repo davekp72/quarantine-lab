@@ -21,7 +21,7 @@ func sysmonEventsPowerShell(logName, baselineAt string, maxEvents int) ([]map[st
 	script := fmt.Sprintf(`
 $ErrorActionPreference = 'Stop'
 $since = [datetimeoffset]::Parse('%s').UtcDateTime
-$ids = 1,2,11,12,13,22,23,26
+$ids = 1,2,11,12,13,15,22,23,26
 $filter = @{ LogName = '%s'; Id = $ids; StartTime = $since }
 $records = Get-WinEvent -FilterHashtable $filter -MaxEvents %d -ErrorAction Stop
 $out = foreach ($r in $records) {
@@ -30,7 +30,7 @@ $out = foreach ($r in $records) {
   foreach ($node in $xml.Event.EventData.Data) { if ($node.Name) { $data[$node.Name] = [string]$node.'#text' } }
   [ordered]@{
     eid = [int]$r.Id
-    t = switch ([int]$r.Id) { 1 {'ProcessCreate'} 2 {'FileCreateTime'} 11 {'FileCreate'} 12 {'FileCreateStream'} 13 {'RegistryEvent'} 22 {'DnsQuery'} 23 {'FileDelete'} 26 {'FileDeleteDetected'} default {"Event$($r.Id)"} }
+    t = switch ([int]$r.Id) { 1 {'ProcessCreate'} 2 {'FileCreateTime'} 11 {'FileCreate'} 12 {'RegistryEvent'} 13 {'RegistryEvent'} 15 {'FileCreateStreamHash'} 22 {'DnsQuery'} 23 {'FileDelete'} 26 {'FileDeleteDetected'} default {"Event$($r.Id)"} }
     time = $r.TimeCreated.ToUniversalTime().ToString('o')
     target = $data['TargetFilename']
     targetFilename = $data['TargetFilename']

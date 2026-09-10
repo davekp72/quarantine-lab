@@ -13,70 +13,70 @@ import (
 
 // Result matches manifest viewer diff JSON schema.
 type Result struct {
-	Meta    MetaSection    `json:"meta"`
-	Summary SummarySection `json:"summary"`
-	Files   FilesSection   `json:"files"`
-	Registry RegistrySection `json:"registry"`
-	Tasks   TasksSection   `json:"tasks"`
-	Sysmon  SysmonSection  `json:"sysmon"`
+	Meta            MetaSection            `json:"meta"`
+	Summary         SummarySection         `json:"summary"`
+	Files           FilesSection           `json:"files"`
+	Registry        RegistrySection        `json:"registry"`
+	Tasks           TasksSection           `json:"tasks"`
+	Sysmon          SysmonSection          `json:"sysmon"`
 	ServiceInstalls ServiceInstallsSection `json:"serviceInstalls"`
-	USN     *USNSection    `json:"usn,omitempty"`
-	Network *NetworkSection `json:"network,omitempty"`
+	USN             *USNSection            `json:"usn,omitempty"`
+	Network         *NetworkSection        `json:"network,omitempty"`
 }
 
 type MetaSection struct {
-	FromManifest         string   `json:"fromManifest"`
-	ToManifest           string   `json:"toManifest"`
-	FromSnapshot         string   `json:"fromSnapshot"`
-	ToSnapshot           string   `json:"toSnapshot"`
-	FromCaptured         string   `json:"fromCaptured"`
-	ToCaptured           string   `json:"toCaptured"`
-	FromComputer         string   `json:"fromComputer"`
-	ToComputer           string   `json:"toComputer"`
-	FromFileCount        int      `json:"fromFileCount"`
-	ToFileCount          int      `json:"toFileCount"`
-	FromScanMode         string   `json:"fromScanMode"`
-	ToScanMode           string   `json:"toScanMode"`
-	FileDiffSource       string   `json:"fileDiffSource"`
-	RegistryDiffSource   string   `json:"registryDiffSource"`
-	FromUserRegistryCount int     `json:"fromUserRegistryCount"`
-	ToUserRegistryCount   int     `json:"toUserRegistryCount"`
-	CompareMode          string   `json:"compareMode"`
-	Warnings             []string `json:"warnings"`
+	FromManifest          string   `json:"fromManifest"`
+	ToManifest            string   `json:"toManifest"`
+	FromSnapshot          string   `json:"fromSnapshot"`
+	ToSnapshot            string   `json:"toSnapshot"`
+	FromCaptured          string   `json:"fromCaptured"`
+	ToCaptured            string   `json:"toCaptured"`
+	FromComputer          string   `json:"fromComputer"`
+	ToComputer            string   `json:"toComputer"`
+	FromFileCount         int      `json:"fromFileCount"`
+	ToFileCount           int      `json:"toFileCount"`
+	FromScanMode          string   `json:"fromScanMode"`
+	ToScanMode            string   `json:"toScanMode"`
+	FileDiffSource        string   `json:"fileDiffSource"`
+	RegistryDiffSource    string   `json:"registryDiffSource"`
+	FromUserRegistryCount int      `json:"fromUserRegistryCount"`
+	ToUserRegistryCount   int      `json:"toUserRegistryCount"`
+	CompareMode           string   `json:"compareMode"`
+	Warnings              []string `json:"warnings"`
 }
 
 type SummarySection struct {
-	FilesAdded             int    `json:"filesAdded"`
-	FilesRemoved           int    `json:"filesRemoved"`
-	FilesModified          int    `json:"filesModified"`
-	RegistryAdded          int    `json:"registryAdded"`
-	RegistryRemoved        int    `json:"registryRemoved"`
-	RegistryModified       int    `json:"registryModified"`
-	RegistryVolatileFiltered int  `json:"registryVolatileFiltered"`
-	RegistryDiffSource     string `json:"registryDiffSource"`
-	TasksAdded             int    `json:"tasksAdded"`
-	TasksRemoved           int    `json:"tasksRemoved"`
-	TasksModified          int    `json:"tasksModified"`
-	TasksVolatileOnly      int    `json:"tasksVolatileOnly"`
-	SysmonAdded            int    `json:"sysmonAdded"`
-	ServiceInstallsAdded   int    `json:"serviceInstallsAdded"`
-	DNSQueries             int    `json:"dnsQueries"`
-	NetworkRequests        int    `json:"networkRequests"`
-	FileDiffSource         string `json:"fileDiffSource"`
+	FilesAdded               int    `json:"filesAdded"`
+	FilesRemoved             int    `json:"filesRemoved"`
+	FilesModified            int    `json:"filesModified"`
+	RegistryAdded            int    `json:"registryAdded"`
+	RegistryRemoved          int    `json:"registryRemoved"`
+	RegistryModified         int    `json:"registryModified"`
+	RegistryVolatileFiltered int    `json:"registryVolatileFiltered"`
+	RegistryDiffSource       string `json:"registryDiffSource"`
+	TasksAdded               int    `json:"tasksAdded"`
+	TasksRemoved             int    `json:"tasksRemoved"`
+	TasksModified            int    `json:"tasksModified"`
+	TasksVolatileOnly        int    `json:"tasksVolatileOnly"`
+	SysmonAdded              int    `json:"sysmonAdded"`
+	ServiceInstallsAdded     int    `json:"serviceInstallsAdded"`
+	DNSQueries               int    `json:"dnsQueries"`
+	NetworkRequests          int    `json:"networkRequests"`
+	FileDiffSource           string `json:"fileDiffSource"`
 }
 
 type FilesSection struct {
-	Added    []FileDetail `json:"added"`
-	Removed  []FileDetail `json:"removed"`
+	Added    []FileDetail   `json:"added"`
+	Removed  []FileDetail   `json:"removed"`
 	Modified []FileModified `json:"modified"`
 }
 
 type FileDetail struct {
-	Path  string `json:"path"`
-	Size  int64  `json:"size,omitempty"`
-	Hash  string `json:"hash,omitempty"`
-	Mtime string `json:"mtime,omitempty"`
-	Src   string `json:"src,omitempty"`
+	Path   string `json:"path"`
+	Size   int64  `json:"size,omitempty"`
+	Hash   string `json:"hash,omitempty"`
+	Mtime  string `json:"mtime,omitempty"`
+	Src    string `json:"src,omitempty"`
 	Change string `json:"change,omitempty"`
 }
 
@@ -93,10 +93,10 @@ type RegistrySection struct {
 }
 
 type RegistryModified struct {
-	Key      string `json:"key"`
-	Name     string `json:"name"`
-	Before   any    `json:"before"`
-	After    any    `json:"after"`
+	Key        string `json:"key"`
+	Name       string `json:"name"`
+	Before     any    `json:"before"`
+	After      any    `json:"after"`
 	BeforeType string `json:"beforeType,omitempty"`
 	AfterType  string `json:"afterType,omitempty"`
 }
@@ -163,14 +163,16 @@ func Compare(fromPath, toPath string, left, right *evidence.Manifest) (*Result, 
 	fileDiffSource := "manifest-scanned"
 	if left.ScanMode == "events" || right.ScanMode == "events" {
 		fileDiffSource = "events"
-		eventAdded, eventRemoved, eventModified := diffEventFiles(left, right)
-		if len(added)+len(removed)+len(modified) == 0 {
-			added, removed, modified = eventAdded, eventRemoved, eventModified
+		if len(left.Files) == 0 && len(right.Files) > 0 {
+			added, removed, modified = filesFromCapturedChanges(right.Files)
+		} else if len(added)+len(removed)+len(modified) == 0 {
+			added, removed, modified = diffEventFiles(left, right)
 			fileDiffSource = "usn-sysmon"
 		}
 	}
 
 	added, removed, modified = filterUSNLeafFiles(added, removed, modified)
+	added, removed, modified = filterNoisyDiffFiles(added, removed, modified)
 
 	compareMode := "baseline-to-evidence"
 	if left.Snapshot != "" && right.Snapshot != "" {
@@ -372,6 +374,53 @@ func fileDetail(f evidence.FileEntry) FileDetail {
 		Path: f.PathValue(), Size: f.S, Hash: f.H, Mtime: f.M,
 		Src: f.Src, Change: f.Change,
 	}
+}
+
+func filesFromCapturedChanges(files []evidence.FileEntry) (added []FileDetail, removed []FileDetail, modified []FileModified) {
+	for _, f := range files {
+		p := f.PathValue()
+		if p == "" {
+			continue
+		}
+		if collectors.ClassifyFileNoise(p, "") != "" {
+			continue
+		}
+		d := fileDetail(f)
+		switch strings.ToLower(f.Change) {
+		case "removed":
+			removed = append(removed, d)
+		case "modified":
+			modified = append(modified, FileModified{Path: p, After: d})
+		default:
+			added = append(added, d)
+		}
+	}
+	sort.Slice(added, func(i, j int) bool { return added[i].Path < added[j].Path })
+	sort.Slice(removed, func(i, j int) bool { return removed[i].Path < removed[j].Path })
+	sort.Slice(modified, func(i, j int) bool { return modified[i].Path < modified[j].Path })
+	return
+}
+
+func filterNoisyDiffFiles(added []FileDetail, removed []FileDetail, modified []FileModified) ([]FileDetail, []FileDetail, []FileModified) {
+	fa := added[:0]
+	for _, f := range added {
+		if collectors.ClassifyFileNoise(f.Path, "") == "" {
+			fa = append(fa, f)
+		}
+	}
+	fr := removed[:0]
+	for _, f := range removed {
+		if collectors.ClassifyFileNoise(f.Path, "") == "" {
+			fr = append(fr, f)
+		}
+	}
+	fm := modified[:0]
+	for _, f := range modified {
+		if collectors.ClassifyFileNoise(f.Path, "") == "" {
+			fm = append(fm, f)
+		}
+	}
+	return fa, fr, fm
 }
 
 func regKey(e evidence.RegistryEntry) string {
@@ -678,17 +727,30 @@ func diffEventFiles(left, right *evidence.Manifest) (added []FileDetail, removed
 		}
 		collectors.MergeFileChangeKind(pathKinds, target, kind)
 	}
+	for _, ev := range parseEventsSection(right.USN) {
+		path := resolveUSNPath(ev)
+		if path == "" || IsUnresolvedUSNLeafPath(path) {
+			continue
+		}
+		kind := usnKind(ev)
+		if c, _ := ev["change"].(string); c != "" {
+			kind = c
+		}
+		collectors.MergeFileChangeKind(pathKinds, path, kind)
+	}
 	for path, kind := range pathKinds {
-		path = strings.ToLower(path)
+		if collectors.ClassifyFileNoise(path, "") != "" {
+			continue
+		}
 		switch kind {
 		case "added":
-			added = append(added, FileDetail{Path: path, Change: kind, Src: "sysmon"})
+			added = append(added, FileDetail{Path: path, Change: kind, Src: "events"})
 		case "removed":
-			removed = append(removed, FileDetail{Path: path, Change: kind, Src: "sysmon"})
+			removed = append(removed, FileDetail{Path: path, Change: kind, Src: "events"})
 		default:
 			modified = append(modified, FileModified{
-				Path: path,
-				After: FileDetail{Path: path, Change: kind, Src: "sysmon"},
+				Path:  path,
+				After: FileDetail{Path: path, Change: kind, Src: "events"},
 			})
 		}
 	}
@@ -712,10 +774,10 @@ func resolveUSNPath(ev map[string]any) string {
 	if strings.HasPrefix(name, `\`) {
 		return "C:" + name
 	}
-	if strings.HasSuffix(strings.ToLower(name), `\hosts`) || strings.HasSuffix(strings.ToLower(name), "hosts") {
+	if strings.EqualFold(name, "hosts") || strings.HasSuffix(strings.ToLower(name), `\hosts`) {
 		return `C:\Windows\System32\drivers\etc\hosts`
 	}
-	return `C:\` + name
+	return ""
 }
 
 func usnKind(ev map[string]any) string {

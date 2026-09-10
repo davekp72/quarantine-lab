@@ -19,22 +19,22 @@ import (
 
 // Manifest is the canonical snapshot manifest JSON.
 type Manifest struct {
-	Snapshot           string          `json:"snapshot"`
-	CapturedAt         string          `json:"capturedAt"`
-	Version            int             `json:"version"`
-	ScanMode           string          `json:"scanMode"`
-	RegistryEngine     string          `json:"registryEngine"`
-	ComputerName       string          `json:"computerName"`
-	FileCount          int             `json:"fileCount"`
-	RegistryCount      int             `json:"registryCount"`
-	UserRegistryCount  int             `json:"userRegistryCount"`
-	Files              []FileEntry     `json:"files"`
-	Registry           []RegistryEntry `json:"registry"`
-	Tasks              []TaskEntry     `json:"tasks"`
-	USN                json.RawMessage `json:"usn,omitempty"`
-	Sysmon             json.RawMessage `json:"sysmon,omitempty"`
-	ServiceInstalls    json.RawMessage `json:"serviceInstalls,omitempty"`
-	UserRegistryWarn   []string        `json:"userRegistryWarnings,omitempty"`
+	Snapshot          string          `json:"snapshot"`
+	CapturedAt        string          `json:"capturedAt"`
+	Version           int             `json:"version"`
+	ScanMode          string          `json:"scanMode"`
+	RegistryEngine    string          `json:"registryEngine"`
+	ComputerName      string          `json:"computerName"`
+	FileCount         int             `json:"fileCount"`
+	RegistryCount     int             `json:"registryCount"`
+	UserRegistryCount int             `json:"userRegistryCount"`
+	Files             []FileEntry     `json:"files"`
+	Registry          []RegistryEntry `json:"registry"`
+	Tasks             []TaskEntry     `json:"tasks"`
+	USN               json.RawMessage `json:"usn,omitempty"`
+	Sysmon            json.RawMessage `json:"sysmon,omitempty"`
+	ServiceInstalls   json.RawMessage `json:"serviceInstalls,omitempty"`
+	UserRegistryWarn  []string        `json:"userRegistryWarnings,omitempty"`
 }
 
 type FileEntry struct {
@@ -56,6 +56,29 @@ func (f FileEntry) PathValue() string {
 	return f.Path
 }
 
+func fileEntryFromChangedMap(fm map[string]any) FileEntry {
+	fe := FileEntry{}
+	if p, ok := fm["p"].(string); ok {
+		fe.P = p
+	}
+	if s, ok := fm["s"].(float64); ok {
+		fe.S = int64(s)
+	}
+	if h, ok := fm["h"].(string); ok {
+		fe.H = h
+	}
+	if mtime, ok := fm["m"].(string); ok {
+		fe.M = mtime
+	}
+	if src, ok := fm["src"].(string); ok {
+		fe.Src = src
+	}
+	if ch, ok := fm["change"].(string); ok {
+		fe.Change = ch
+	}
+	return fe
+}
+
 type RegistryEntry struct {
 	K string `json:"k"`
 	N string `json:"n"`
@@ -67,10 +90,10 @@ type TaskEntry map[string]any
 
 // Service manages evidence sidecars and manifests.
 type Service struct {
-	Cfg        *config.Config
-	VBox       *vbox.Client
-	Guest      *guest.Client
-	ConfigPath string
+	Cfg         *config.Config
+	VBox        *vbox.Client
+	Guest       *guest.Client
+	ConfigPath  string
 	ProjectRoot string
 }
 
@@ -363,11 +386,7 @@ func (s *Service) publishFromPartialSidecars(snap, hostPath string) (string, err
 		if files, ok := changed["files"].([]any); ok {
 			for _, item := range files {
 				if fm, ok := item.(map[string]any); ok {
-					fe := FileEntry{}
-					if p, ok := fm["p"].(string); ok {
-						fe.P = p
-					}
-					m.Files = append(m.Files, fe)
+					m.Files = append(m.Files, fileEntryFromChangedMap(fm))
 				}
 			}
 			m.FileCount = len(m.Files)
@@ -485,11 +504,7 @@ func (s *Service) writeManifestFromSidecars(snap, hostPath string, payload map[s
 		if files, ok := changed["files"].([]any); ok {
 			for _, item := range files {
 				if fm, ok := item.(map[string]any); ok {
-					fe := FileEntry{}
-					if p, ok := fm["p"].(string); ok {
-						fe.P = p
-					}
-					m.Files = append(m.Files, fe)
+					m.Files = append(m.Files, fileEntryFromChangedMap(fm))
 				}
 			}
 			m.FileCount = len(m.Files)
@@ -611,7 +626,7 @@ func (s *Service) AttachNetworkArtifacts(snapshotName, pcapPath, proxyDir string
 	}
 
 	meta := map[string]any{
-		"snapshot":  snapshotName,
+		"snapshot":   snapshotName,
 		"attachedAt": time.Now().UTC().Format(time.RFC3339),
 	}
 

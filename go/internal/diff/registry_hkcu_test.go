@@ -21,8 +21,8 @@ func TestSuppressFalseHKCURemovals(t *testing.T) {
 		})
 	}
 	right := &evidence.Manifest{
-		Snapshot: "Evidence",
-		Registry: []evidence.RegistryEntry{},
+		Snapshot:         "Evidence",
+		Registry:         []evidence.RegistryEntry{},
 		UserRegistryWarn: []string{"WTSQueryUserToken: Access is denied."},
 	}
 	added, removed, modified, volatile := diffRegistry(left.Registry, right.Registry)

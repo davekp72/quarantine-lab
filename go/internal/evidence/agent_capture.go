@@ -374,7 +374,7 @@ func (s *Service) stopGuestAgentService(creds guest.Credentials) {
 	_, _ = s.VBox.GuestControlRun(
 		s.Cfg.VMName, creds.Username, creds.Password,
 		`C:\Windows\System32\cmd.exe`,
-		[]string{"/c", "taskkill /F /IM quarantine-agent.exe /IM quarantine-agent-v1-0-11.exe /IM quarantine-agent-v1-0-10.exe /IM quarantine-agent-v1-0-9.exe 2>nul"},
+		[]string{"/c", "taskkill /F /IM quarantine-agent.exe /IM quarantine-agent-v1-0-13.exe /IM quarantine-agent-v1-0-12.exe /IM quarantine-agent-v1-0-11.exe /IM quarantine-agent-v1-0-10.exe 2>nul"},
 		timeout,
 	)
 	time.Sleep(1 * time.Second)
@@ -437,4 +437,3 @@ func randomAgentToken() string {
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
-

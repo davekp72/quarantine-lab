@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/quarantine-lab/quarantine/internal/applog"
 	agenttypes "github.com/quarantine-lab/quarantine/internal/agent/types"
+	"github.com/quarantine-lab/quarantine/internal/applog"
 	"github.com/quarantine-lab/quarantine/internal/capture"
 	"github.com/quarantine-lab/quarantine/internal/config"
 	"github.com/quarantine-lab/quarantine/internal/diff"
@@ -21,25 +21,25 @@ import (
 	"github.com/quarantine-lab/quarantine/internal/network"
 	"github.com/quarantine-lab/quarantine/internal/proxy"
 	"github.com/quarantine-lab/quarantine/internal/registry"
-	"github.com/quarantine-lab/quarantine/internal/vm"
 	"github.com/quarantine-lab/quarantine/internal/vbox"
+	"github.com/quarantine-lab/quarantine/internal/vm"
 )
 
 // App is the central application facade for CLI and Wails.
 type App struct {
-	ConfigPath string
-	Cfg        *config.Config
-	VM         *vm.Service
-	Evidence   *evidence.Service
-	Network    *network.Service
-	Proxy      *proxy.Manager
-	Capture    *capture.Manager
-	Gateway    *gateway.Manager
-	Inbox      *inbox.Service
-	Disk       *disk.Reader
-	WailsCtx   context.Context
+	ConfigPath   string
+	Cfg          *config.Config
+	VM           *vm.Service
+	Evidence     *evidence.Service
+	Network      *network.Service
+	Proxy        *proxy.Manager
+	Capture      *capture.Manager
+	Gateway      *gateway.Manager
+	Inbox        *inbox.Service
+	Disk         *disk.Reader
+	WailsCtx     context.Context
 	LastDiffPath string
-	Log        *applog.Buffer
+	Log          *applog.Buffer
 }
 
 // New loads config and services.
@@ -535,9 +535,9 @@ func trimSlash(p string) string {
 // GetConfigSummary returns VM config for UI.
 func (a *App) GetConfigSummary() map[string]string {
 	return map[string]string{
-		"vmName":        a.Cfg.VMName,
+		"vmName":         a.Cfg.VMName,
 		"manifestLogDir": a.Cfg.ManifestLogDir(),
-		"baseline":      a.Cfg.Manifest.SessionBaselineSnapshot,
+		"baseline":       a.Cfg.Manifest.SessionBaselineSnapshot,
 	}
 }
 
@@ -809,17 +809,15 @@ func (a *App) TakeSnapshotWails(name, description string, force bool) error {
 	if strings.TrimSpace(name) == "" {
 		return fmt.Errorf("snapshot name required")
 	}
-	a.logInfo(fmt.Sprintf("Take snapshot %q (force=%v)", name, force))
+	a.logInfo(fmt.Sprintf("Take snapshot %q (force=%v) — capturing baseline then freezing VM", name, force))
+	if capErr := a.captureLiveManifest(name, false); capErr != nil {
+		a.logError(capErr.Error())
+		return capErr
+	}
 	err := a.VM.SaveSnapshot(ctx, name, description, false, force)
 	if err != nil {
 		a.logError(err.Error())
-		return err
-	}
-	if capErr := a.captureLiveManifest(name, true); capErr != nil {
-		// Snapshot itself succeeded — do not fail the UI. Agent may be briefly
-		// unreachable (e.g. gateway intnet without NAT) or still starting.
-		a.logInfo("Snapshot saved: " + name + " (live capture deferred: " + capErr.Error() + ")")
-		return nil
+		return fmt.Errorf("sidecars saved but snapshot failed: %w", err)
 	}
 	a.logInfo("Snapshot saved: " + name)
 	return nil
@@ -909,7 +907,7 @@ func (a *App) PreserveEvidenceWails(label string) (string, error) {
 			a.logInfo(fmt.Sprintf("Registry index ready (%d entries)", meta.EntryCount))
 		}
 	} else if a.Evidence != nil && !a.Evidence.HasRegistryIndex(name) {
-		a.logInfo("No live hive dump for " + name + " — install agent 1.0.12+ or enable registryDiskFlatten for offline RAW extract")
+		a.logInfo("No live hive dump for " + name + " — install agent 1.0.13+ or enable registryDiskFlatten for offline RAW extract")
 	}
 	return name, nil
 }

@@ -88,9 +88,9 @@ func uiCmd(cfgPath *string) *cobra.Command {
 				AssetServer: &assetserver.Options{
 					Assets: assets,
 				},
-				Windows: &windows.Options{WebviewIsTransparent: false},
+				Windows:   &windows.Options{WebviewIsTransparent: false},
 				OnStartup: application.OnStartup,
-				Bind: []any{application},
+				Bind:      []any{application},
 			})
 		},
 	}
@@ -154,6 +154,9 @@ func snapshotCmd(cfgPath *string) *cobra.Command {
 			a, err := app.New(*cfgPath)
 			if err != nil {
 				return err
+			}
+			if !offline {
+				return a.TakeSnapshotWails(name, desc, force)
 			}
 			return a.VM.SaveSnapshot(context.Background(), name, desc, offline, force)
 		},
@@ -310,9 +313,9 @@ func manifestCmd(cfgPath *string) *cobra.Command {
 			fmt.Println("Diff JSON:", path)
 			a.LastDiffPath = path
 			return wails.Run(&options.App{
-				Title:  "Quarantine Lab — Report",
-				Width:  1280,
-				Height: 860,
+				Title:       "Quarantine Lab — Report",
+				Width:       1280,
+				Height:      860,
 				AssetServer: &assetserver.Options{Assets: assets},
 				Windows:     &windows.Options{},
 				Bind:        []any{a},
@@ -331,7 +334,7 @@ func networkCmd(cfgPath *string) *cobra.Command {
 	for _, mode := range []string{"quarantine", "gateway", "offline", "nat", "intnet", "none", "hostonly"} {
 		m := mode
 		cmd.AddCommand(&cobra.Command{
-			Use:  m,
+			Use: m,
 			RunE: func(cmd *cobra.Command, args []string) error {
 				a, err := app.New(*cfgPath)
 				if err != nil {
@@ -352,13 +355,19 @@ func proxyCmd(cfgPath *string) *cobra.Command {
 	cmd := &cobra.Command{Use: "proxy", Short: "Mitmproxy control"}
 	cmd.AddCommand(&cobra.Command{
 		Use: "start", RunE: func(cmd *cobra.Command, args []string) error {
-			a, err := app.New(*cfgPath); if err != nil { return err }
+			a, err := app.New(*cfgPath)
+			if err != nil {
+				return err
+			}
 			return a.Proxy.StartIfHostMode()
 		},
 	})
 	cmd.AddCommand(&cobra.Command{
 		Use: "stop", RunE: func(cmd *cobra.Command, args []string) error {
-			a, err := app.New(*cfgPath); if err != nil { return err }
+			a, err := app.New(*cfgPath)
+			if err != nil {
+				return err
+			}
 			if a.Cfg.IsGatewayMode() {
 				fmt.Println("Network mode is gateway — host proxy stop is a no-op.")
 				return nil
@@ -368,13 +377,20 @@ func proxyCmd(cfgPath *string) *cobra.Command {
 	})
 	cmd.AddCommand(&cobra.Command{
 		Use: "status", RunE: func(cmd *cobra.Command, args []string) error {
-			a, err := app.New(*cfgPath); if err != nil { return err }
-			fmt.Println(a.Proxy.Status()); return nil
+			a, err := app.New(*cfgPath)
+			if err != nil {
+				return err
+			}
+			fmt.Println(a.Proxy.Status())
+			return nil
 		},
 	})
 	cmd.AddCommand(&cobra.Command{
 		Use: "export-ca", RunE: func(cmd *cobra.Command, args []string) error {
-			a, err := app.New(*cfgPath); if err != nil { return err }
+			a, err := app.New(*cfgPath)
+			if err != nil {
+				return err
+			}
 			_, err = a.Proxy.ExportCA(a.Gateway.ExportCA)
 			return err
 		},
@@ -386,21 +402,35 @@ func captureCmd(cfgPath *string) *cobra.Command {
 	cmd := &cobra.Command{Use: "capture", Short: "PCAP capture"}
 	cmd.AddCommand(&cobra.Command{
 		Use: "start", RunE: func(cmd *cobra.Command, args []string) error {
-			a, err := app.New(*cfgPath); if err != nil { return err }
-			path, err := a.Capture.Start(); if err != nil { return err }
-			fmt.Println("PCAP:", path); return nil
+			a, err := app.New(*cfgPath)
+			if err != nil {
+				return err
+			}
+			path, err := a.Capture.Start()
+			if err != nil {
+				return err
+			}
+			fmt.Println("PCAP:", path)
+			return nil
 		},
 	})
 	cmd.AddCommand(&cobra.Command{
 		Use: "stop", RunE: func(cmd *cobra.Command, args []string) error {
-			a, err := app.New(*cfgPath); if err != nil { return err }
+			a, err := app.New(*cfgPath)
+			if err != nil {
+				return err
+			}
 			return a.Capture.Stop()
 		},
 	})
 	cmd.AddCommand(&cobra.Command{
 		Use: "status", RunE: func(cmd *cobra.Command, args []string) error {
-			a, err := app.New(*cfgPath); if err != nil { return err }
-			fmt.Println(a.Capture.Status()); return nil
+			a, err := app.New(*cfgPath)
+			if err != nil {
+				return err
+			}
+			fmt.Println(a.Capture.Status())
+			return nil
 		},
 	})
 	return cmd
@@ -500,13 +530,19 @@ func inboxCmd(cfgPath *string) *cobra.Command {
 	cmd := &cobra.Command{Use: "inbox", Short: "Inbox shared folder"}
 	cmd.AddCommand(&cobra.Command{
 		Use: "open", RunE: func(cmd *cobra.Command, args []string) error {
-			a, err := app.New(*cfgPath); if err != nil { return err }
+			a, err := app.New(*cfgPath)
+			if err != nil {
+				return err
+			}
 			return a.Inbox.Open()
 		},
 	})
 	cmd.AddCommand(&cobra.Command{
 		Use: "close", RunE: func(cmd *cobra.Command, args []string) error {
-			a, err := app.New(*cfgPath); if err != nil { return err }
+			a, err := app.New(*cfgPath)
+			if err != nil {
+				return err
+			}
 			return a.Inbox.Close()
 		},
 	})

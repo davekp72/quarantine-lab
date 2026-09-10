@@ -2,17 +2,17 @@ package types
 
 import "encoding/json"
 
-const Version = "1.0.12"
+const Version = "1.0.13"
 
 // CaptureRequest is POST /v1/capture body.
 type CaptureRequest struct {
-	Snapshot string          `json:"snapshot"`
-	Mode     string          `json:"mode"` // baseline | evidence
-	Baseline json.RawMessage `json:"baseline,omitempty"`
-	BaselineAt string        `json:"baselineAt,omitempty"`
-	HashMaxMB    int         `json:"hashMaxMb,omitempty"`
-	ContentMaxKB int         `json:"contentMaxKb,omitempty"`
-	PayloadUser  string      `json:"payloadUser,omitempty"`
+	Snapshot     string          `json:"snapshot"`
+	Mode         string          `json:"mode"` // baseline | evidence
+	Baseline     json.RawMessage `json:"baseline,omitempty"`
+	BaselineAt   string          `json:"baselineAt,omitempty"`
+	HashMaxMB    int             `json:"hashMaxMb,omitempty"`
+	ContentMaxKB int             `json:"contentMaxKb,omitempty"`
+	PayloadUser  string          `json:"payloadUser,omitempty"`
 }
 
 // CaptureResponse is returned by capture endpoints.
@@ -46,13 +46,13 @@ type HiveFile struct {
 }
 
 type CaptureStats struct {
-	USNEvents           int `json:"usnEvents"`
-	SysmonEvents        int `json:"sysmonEvents"`
+	USNEvents            int `json:"usnEvents"`
+	SysmonEvents         int `json:"sysmonEvents"`
 	ServiceInstallEvents int `json:"serviceInstallEvents"`
-	HKLMEntries         int `json:"hklmEntries"`
-	HKCUEntries         int `json:"hkcuEntries"`
-	HKUEntries          int `json:"hkuEntries"`
-	ChangedFiles        int `json:"changedFiles"`
+	HKLMEntries          int `json:"hklmEntries"`
+	HKCUEntries          int `json:"hkcuEntries"`
+	HKUEntries           int `json:"hkuEntries"`
+	ChangedFiles         int `json:"changedFiles"`
 }
 
 type RegistryBundle struct {

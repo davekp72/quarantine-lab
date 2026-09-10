@@ -19,11 +19,11 @@ import (
 )
 
 const (
-	fsctlQueryUsnJournal = 0x000900f4
-	fsctlReadUsnJournal  = 0x000900bb
-	fsctlEnumUsnData     = 0x000900b3
-	fileFlagBackupSemantics  = 0x02000000
-	fileTraverse             = 0x0020
+	fsctlQueryUsnJournal    = 0x000900f4
+	fsctlReadUsnJournal     = 0x000900bb
+	fsctlEnumUsnData        = 0x000900b3
+	fileFlagBackupSemantics = 0x02000000
+	fileTraverse            = 0x0020
 )
 
 type usnJournalData struct {
@@ -64,6 +64,11 @@ var usnReasonLabels = map[uint32]string{
 	0x00100000: "stream_change",
 	0x00200000: "close",
 }
+
+// File content / identity changes. Excludes close-only and low-signal chatter.
+const usnChangeReasonMask uint32 = 0x00000001 | 0x00000002 | 0x00000004 | 0x00000010 |
+	0x00000020 | 0x00000040 | 0x00000100 | 0x00000200 | 0x00001000 | 0x00002000 |
+	0x00008000 | 0x00010000 | 0x00080000 | 0x00100000
 
 // DefaultVolume returns the NTFS volume used for USN journaling.
 func DefaultVolume() string {
@@ -149,7 +154,22 @@ func USNDelta(baselineRaw json.RawMessage, maxEvents int) (json.RawMessage, int,
 		return nil, 0, err
 	}
 	endUsn := uint64(info.NextUsn)
-	if endUsn <= startUsn {
+	readStart := startUsn
+	readStartStr := startUsnStr
+	warnings := []string{}
+	timeFloor := time.Time{}
+	if endUsn < startUsn {
+		warnings = append(warnings,
+			"USN baseline is ahead of the volume (snapshot was frozen before baseline capture). Retake the session baseline snapshot. Reading journal with a time floor.")
+		readStart = uint64(info.FirstUsn)
+		if readStart == 0 {
+			readStart = uint64(info.LowestValidUsn)
+		}
+		readStartStr = fmt.Sprintf("0x%016x", readStart)
+		if t, err := time.Parse(time.RFC3339, baselineAt); err == nil {
+			timeFloor = t.Add(-10 * time.Minute)
+		}
+	} else if endUsn == startUsn {
 		out, _ := json.Marshal(map[string]any{
 			"available":  true,
 			"eventCount": 0,
@@ -164,20 +184,37 @@ func USNDelta(baselineRaw json.RawMessage, maxEvents int) (json.RawMessage, int,
 		return out, 0, nil
 	}
 
-	events, err := readUsnRecords(volume, info.UsnJournalID, startUsnStr, int64(startUsn), int64(endUsn), maxEvents)
+	rawEvents, err := readUsnRecords(volume, info.UsnJournalID, readStartStr, int64(readStart), int64(endUsn), maxEvents)
 	if err != nil {
 		return nil, 0, err
 	}
-	out, _ := json.Marshal(map[string]any{
+	filterStart := startUsn
+	if endUsn < startUsn {
+		filterStart = 0
+	}
+	events, noise, skipped := FinalizeUSNEvents(volume, rawEvents, filterStart, timeFloor)
+	outObj := map[string]any{
 		"available":  true,
 		"eventCount": len(events),
+		"rawCount":   len(rawEvents),
 		"volume":     volume,
 		"startUsn":   startUsnStr,
 		"endUsn":     fmt.Sprintf("0x%016x", endUsn),
 		"recordedAt": time.Now().UTC().Format(time.RFC3339),
 		"baselineAt": baselineAt,
 		"events":     events,
-	})
+		"noise":      noise,
+	}
+	if skipped > 0 {
+		outObj["skippedBeforeBaseline"] = skipped
+	}
+	if len(warnings) > 0 {
+		outObj["warnings"] = warnings
+	}
+	if len(rawEvents) >= maxEvents {
+		outObj["truncated"] = true
+	}
+	out, _ := json.Marshal(outObj)
 	return out, len(events), nil
 }
 
@@ -347,9 +384,6 @@ func readUsnRecords(volume string, journalID uint64, startUsnHex string, lowUsn,
 		name string
 		fn   func() ([]map[string]any, error)
 	}{
-		{"enum", func() ([]map[string]any, error) {
-			return readUsnRecordsEnum(volume, lowUsn, highUsn, maxEvents)
-		}},
 		{"read-v1", func() ([]map[string]any, error) {
 			return readUsnRecordsHandle(volume, journalID, lowUsn, maxEvents, true)
 		}},
@@ -430,7 +464,7 @@ func readUsnRecordsHandle(volume string, journalID uint64, startUsn int64, maxEv
 
 	readData := readUsnJournalData{
 		StartUsn:          startUsn,
-		ReasonMask:        0xFFFFFFFF,
+		ReasonMask:        usnChangeReasonMask,
 		ReturnOnlyOnClose: 0,
 		Timeout:           0,
 		BytesToWaitFor:    0,
@@ -547,13 +581,31 @@ func decodeUsnRecord(buf []byte, offset, recLen int) (map[string]any, bool) {
 		return nil, false
 	}
 	fileRef := fileRefFromRecord(buf, offset, major)
-	return map[string]any{
+	parentRef := parentRefFromRecord(buf, offset, major)
+	ev := map[string]any{
 		"usn":        fmt.Sprintf("0x%016x", uint64(usn)),
 		"fileName":   name,
 		"fileRef":    fileRef,
+		"parentRef":  parentRef,
 		"reason":     reasonLabels(reason),
 		"reasonCode": fmt.Sprintf("0x%08x", reason),
-	}, true
+	}
+	if ts := filetimeRFC3339(buf[offset+usnOff+8 : offset+usnOff+16]); ts != "" {
+		ev["timestamp"] = ts
+	}
+	return ev, true
+}
+
+func filetimeRFC3339(b []byte) string {
+	if len(b) < 8 {
+		return ""
+	}
+	n := leUint64(b)
+	if n < 116444736000000000 {
+		return ""
+	}
+	unixNs := int64(n-116444736000000000) * 100
+	return time.Unix(0, unixNs).UTC().Format(time.RFC3339)
 }
 
 func usnRecordFieldOffsets(major uint16) (usnOff, reasonOff, nameLenOff, nameOffOff int, ok bool) {
@@ -881,21 +933,6 @@ func reasonLabels(reason uint32) []string {
 		out = append(out, fmt.Sprintf("0x%08x", reason))
 	}
 	return out
-}
-
-func parseUsnValue(v string) (uint64, error) {
-	v = strings.TrimSpace(strings.Trim(v, `"`))
-	if v == "" {
-		return 0, fmt.Errorf("empty")
-	}
-	if strings.HasPrefix(strings.ToLower(v), "0x") {
-		var n uint64
-		_, err := fmt.Sscanf(v, "%x", &n)
-		return n, err
-	}
-	var n uint64
-	_, err := fmt.Sscanf(v, "%d", &n)
-	return n, err
 }
 
 var _ = unsafe.Pointer(nil)
