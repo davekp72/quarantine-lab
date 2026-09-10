@@ -58,7 +58,8 @@
 #
 # Traffic modes (switch anytime; guest IP/DNS unchanged)
 #   permissive — default: WAN NAT, dnsmasq, mitm :80/:443, other ports forwarded
-#   fakenet    — FakeNet-NG MultiHost sinkhole; no LAN→WAN; DNS/HTTP/SMTP faked
+#   fakenet    — FakeNet-NG MultiHost sinkhole; no LAN→WAN; DNS/HTTP/HTTPS/SMTP faked
+#   FakeNet HTTPS reuses the mitmproxy CA (same cert installed in the Windows guest).
 #   FakeNet-NG uses iptables NFQUEUE on the LAN iface. Config sets LinuxFlushIptables=No
 #   so nftables (WAN SSH, agent DNAT) is not wiped. Re-provision once to install the venv:
 #     .\quarantine-vm.ps1 gateway provision

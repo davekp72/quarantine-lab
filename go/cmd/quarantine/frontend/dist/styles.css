@@ -416,3 +416,39 @@ th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #30363d; }
 }
 #dns-table { width: 100%; }
 
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(1, 4, 9, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+  padding: 16px;
+}
+.modal {
+  background: var(--panel);
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 20px 22px;
+  max-width: 480px;
+  width: 100%;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+}
+.modal h2 { margin: 0 0 12px; font-size: 1.05rem; }
+.modal p { margin: 0 0 8px; font-size: 0.9rem; }
+.egress-modal.egress-home { border-color: var(--removed); }
+.egress-modal.egress-ok { border-color: var(--added); }
+.egress-isp-row { font-size: 1rem !important; }
+.egress-isp-name { font-weight: 700; }
+.egress-isp-name.home { color: var(--removed); }
+.egress-isp-name.ok { color: var(--added); }
+.egress-isp-name.unknown { color: var(--modified); }
+.egress-warning { color: var(--text); margin-top: 8px !important; }
+.modal-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+}
+

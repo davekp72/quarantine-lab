@@ -168,7 +168,7 @@ Useful host helpers:
 .\quarantine-vm.ps1 capture stop
 ```
 
-The desktop UI (`.\quarantine-vm.ps1 ui`) shows your **host public IP and ISP** before Launch so you can confirm the VPN is on. Disable with `"ui": { "warnPublicIpBeforeLaunch": false }` in config.
+The desktop UI (`.\quarantine-vm.ps1 ui`) shows your **host public IP and ISP** before Launch so you can confirm the VPN is on. Configured home ISPs (`ui.homeIspPatterns`, default **Community Fibre**) show in red; any other provider shows in green. Disable with `"ui": { "warnPublicIpBeforeLaunch": false }` in config.
 
 Clipboard paste (host → guest only by default):
 
@@ -266,7 +266,7 @@ Both keep LAN PCAP and block private/host LAN. The lab guest IP/DNS does not cha
 .\quarantine-vm.ps1 gateway mode permissive    # internet + MITM
 ```
 
-The desktop UI Gateway panel has the same **Permissive** / **FakeNet** buttons. FakeNet HTTPS is not the mitm CA — pinning still fails (same as any sinkhole). Use permissive when you need real-site MITM.
+The desktop UI Gateway panel has the same **Permissive** / **FakeNet** buttons. FakeNet HTTPS is signed with the **same mitmproxy CA** the guest already trusts for permissive MITM. Certificate pinning can still fail. Use permissive when you need real upstream sites.
 
 Gateway session sketch:
 

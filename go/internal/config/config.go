@@ -38,7 +38,13 @@ type Config struct {
 type UIConfig struct {
 	// WarnPublicIPBeforeLaunch shows host public IP/ISP before Launch (default true).
 	WarnPublicIPBeforeLaunch *bool `json:"warnPublicIpBeforeLaunch"`
+	// HomeISPPatterns are case-insensitive substrings of the public ISP/org that
+	// count as home (non-VPN) egress. Shown in red in the launch prompt.
+	// Omitted/null defaults to ["Community Fibre"]. An empty list means nothing is home.
+	HomeISPPatterns []string `json:"homeIspPatterns"`
 }
+
+var defaultHomeISPPatterns = []string{"Community Fibre"}
 
 // WarnPublicIPBeforeLaunchEnabled is true unless explicitly disabled in config.
 func (c *Config) WarnPublicIPBeforeLaunchEnabled() bool {
@@ -46,6 +52,41 @@ func (c *Config) WarnPublicIPBeforeLaunchEnabled() bool {
 		return true
 	}
 	return *c.UI.WarnPublicIPBeforeLaunch
+}
+
+// HomeISPPatterns returns configured home-ISP match strings, or the default.
+// A non-nil empty slice means "no home ISPs" (everything treated as non-home).
+func (c *Config) HomeISPPatterns() []string {
+	if c == nil || c.UI.HomeISPPatterns == nil {
+		out := make([]string, len(defaultHomeISPPatterns))
+		copy(out, defaultHomeISPPatterns)
+		return out
+	}
+	return c.UI.HomeISPPatterns
+}
+
+// IsHomeISP reports whether any ISP/org string matches a configured home pattern.
+func (c *Config) IsHomeISP(parts ...string) bool {
+	patterns := c.HomeISPPatterns()
+	if len(patterns) == 0 {
+		return false
+	}
+	var b strings.Builder
+	for _, p := range parts {
+		b.WriteString(strings.ToLower(strings.TrimSpace(p)))
+		b.WriteByte(' ')
+	}
+	hay := b.String()
+	for _, pat := range patterns {
+		pat = strings.ToLower(strings.TrimSpace(pat))
+		if pat == "" {
+			continue
+		}
+		if strings.Contains(hay, pat) {
+			return true
+		}
+	}
+	return false
 }
 
 type AgentConfig struct {

@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/quarantine-lab/quarantine/internal/config"
 )
 
 // PublicIPInfo is the host's apparent public egress (for VPN checks before lab launch).
@@ -22,12 +24,25 @@ type PublicIPInfo struct {
 	Warning  string `json:"warning"`
 	Error    string `json:"error,omitempty"`
 	LookedUp bool   `json:"lookedUp"`
+	HomeISP  bool   `json:"homeIsp"`
 }
 
 // CheckHostPublicIPWails looks up the host's public IP and ISP/org.
 // Used by the UI as a VPN sanity check before launching the lab VM.
 func (a *App) CheckHostPublicIPWails() (map[string]any, error) {
 	info := lookupPublicIP(8 * time.Second)
+	var cfg *config.Config
+	if a != nil {
+		cfg = a.Cfg
+	}
+	if info.LookedUp {
+		info.HomeISP = cfg.IsHomeISP(info.ISP, info.Org)
+		if info.HomeISP {
+			info.Warning = "This matches a configured home ISP. Turn on the VPN before malware work."
+		} else {
+			info.Warning = "ISP does not match a configured home provider. Confirm this is your VPN egress before malware work."
+		}
+	}
 	out := map[string]any{
 		"ip":       info.IP,
 		"isp":      info.ISP,
@@ -38,13 +53,18 @@ func (a *App) CheckHostPublicIPWails() (map[string]any, error) {
 		"source":   info.Source,
 		"warning":  info.Warning,
 		"lookedUp": info.LookedUp,
+		"homeIsp":  info.HomeISP,
 	}
 	if info.Error != "" {
 		out["error"] = info.Error
 	}
 	if a != nil && a.Log != nil {
 		if info.LookedUp {
-			a.logInfo(fmt.Sprintf("Host public IP check: %s (%s)", info.IP, firstNonEmpty(info.ISP, info.Org, "unknown ISP")))
+			tag := "not a configured home ISP"
+			if info.HomeISP {
+				tag = "HOME ISP"
+			}
+			a.logInfo(fmt.Sprintf("Host public IP check: %s (%s) — %s", info.IP, firstNonEmpty(info.ISP, info.Org, "unknown ISP"), tag))
 		} else {
 			a.logInfo("Host public IP check failed: " + info.Error)
 		}

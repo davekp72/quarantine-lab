@@ -387,6 +387,110 @@ async function takeSnapshot() {
   }
 }
 
+function showEgressDialog(snapshotName, info) {
+  return new Promise((resolve) => {
+    const lookedUp = !!(info && info.lookedUp);
+    const home = !!(info && info.homeIsp);
+    const tone = !lookedUp ? 'unknown' : home ? 'home' : 'ok';
+    const isp = (info && (info.isp || info.org)) || '';
+
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.setAttribute('aria-labelledby', 'egress-title');
+
+    const modal = document.createElement('div');
+    modal.className = `modal egress-modal egress-${tone}`;
+
+    const title = document.createElement('h2');
+    title.id = 'egress-title';
+    title.textContent = 'VPN / public IP check';
+    modal.appendChild(title);
+
+    const about = document.createElement('p');
+    about.className = 'egress-about';
+    about.textContent = `About to launch: ${snapshotName}`;
+    modal.appendChild(about);
+
+    if (lookedUp) {
+      const ip = document.createElement('p');
+      ip.textContent = `Your host public IP address is: ${info.ip || '?'}`;
+      modal.appendChild(ip);
+
+      if (isp) {
+        const ispRow = document.createElement('p');
+        ispRow.className = 'egress-isp-row';
+        ispRow.append('ISP / org: ');
+        const name = document.createElement('span');
+        name.className = `egress-isp-name ${tone}`;
+        name.textContent = isp;
+        ispRow.appendChild(name);
+        modal.appendChild(ispRow);
+      }
+
+      const loc = [info.city, info.region, info.country].filter(Boolean).join(', ');
+      if (loc) {
+        const locEl = document.createElement('p');
+        locEl.className = 'muted';
+        locEl.textContent = `Location: ${loc}`;
+        modal.appendChild(locEl);
+      }
+      if (info.source) {
+        const src = document.createElement('p');
+        src.className = 'muted';
+        src.textContent = `(lookup: ${info.source})`;
+        modal.appendChild(src);
+      }
+    } else {
+      const fail = document.createElement('p');
+      fail.textContent = 'Could not look up your public IP.';
+      modal.appendChild(fail);
+      if (info && info.error) {
+        const err = document.createElement('p');
+        err.className = 'muted';
+        err.textContent = `Error: ${info.error}`;
+        modal.appendChild(err);
+      }
+    }
+
+    const warn = document.createElement('p');
+    warn.className = 'egress-warning';
+    warn.textContent = (info && info.warning) || 'Confirm this is your VPN egress (not your home ISP) before malware work.';
+    modal.appendChild(warn);
+
+    const actions = document.createElement('div');
+    actions.className = 'modal-actions';
+    const ok = document.createElement('button');
+    ok.type = 'button';
+    ok.className = 'btn-primary';
+    ok.textContent = 'Launch anyway';
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.textContent = 'Cancel';
+    actions.append(ok, cancel);
+    modal.appendChild(actions);
+    overlay.appendChild(modal);
+
+    const close = (result) => {
+      document.removeEventListener('keydown', onKey);
+      overlay.remove();
+      resolve(result);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') close(false);
+    };
+    ok.addEventListener('click', () => close(true));
+    cancel.addEventListener('click', () => close(false));
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) close(false);
+    });
+    document.addEventListener('keydown', onKey);
+    document.body.appendChild(overlay);
+    (home || !lookedUp ? cancel : ok).focus();
+  });
+}
+
 async function confirmVPNBeforeLaunch(api, snapshotName) {
   let warn = true;
   try {
@@ -405,29 +509,7 @@ async function confirmVPNBeforeLaunch(api, snapshotName) {
     info = { lookedUp: false, error: String(e), warning: 'Public IP lookup failed. Verify your VPN is on before launching.' };
   }
 
-  const lines = [
-    'VPN / public IP check',
-    '',
-    `About to launch: ${snapshotName}`,
-    '',
-  ];
-  if (info && info.lookedUp) {
-    lines.push(`Your host public IP address is: ${info.ip || '?'}`);
-    const isp = info.isp || info.org || '';
-    if (isp) lines.push(`ISP / org: ${isp}`);
-    const loc = [info.city, info.region, info.country].filter(Boolean).join(', ');
-    if (loc) lines.push(`Location: ${loc}`);
-    if (info.source) lines.push(`(lookup: ${info.source})`);
-  } else {
-    lines.push('Could not look up your public IP.');
-    if (info && info.error) lines.push(`Error: ${info.error}`);
-  }
-  lines.push('');
-  lines.push(info?.warning || 'Confirm this is your VPN egress (not your home ISP) before malware work.');
-  lines.push('');
-  lines.push('OK = launch anyway   Cancel = abort');
-
-  return confirm(lines.join('\n'));
+  return showEgressDialog(snapshotName, info);
 }
 
 async function launchSnapshot() {

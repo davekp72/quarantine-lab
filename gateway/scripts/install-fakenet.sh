@@ -146,9 +146,10 @@ pip=/opt/quarantine-gateway/venv-fakenet/bin/pip
 pybin=/opt/quarantine-gateway/venv-fakenet/bin/python
 
 "$pip" install --upgrade pip setuptools wheel
-# Build C extensions against installed headers
+# Prefer current cryptography/pyOpenSSL — FakeNet SSL is patched below for modern APIs.
 if ! "$pip" install --prefer-binary \
-  'NetfilterQueue>=1.1.0' dnslib dpkt pyopenssl pyftpdlib netifaces jinja2 cryptography; then
+  'NetfilterQueue>=1.1.0' dnslib dpkt pyopenssl cryptography \
+  pyftpdlib netifaces jinja2; then
   echo "ERROR: FakeNet dependency build failed (netfilterqueue/netifaces)." >&2
   exit 1
 fi
@@ -161,7 +162,32 @@ if ! "$pybin" -c 'import fakenet' 2>/dev/null; then
   fi
 fi
 
-"$pybin" -c 'import fakenet, netfilterqueue, netifaces; print("ok", fakenet.__file__)'
+# Patch FakeNet SSL (X509Extension removed from pyOpenSSL) so HTTPS listeners work.
+patch_src="$OPT/fakenet/ssl_utils_init.py"
+if [[ -f "$patch_src" ]]; then
+  ssl_dst="$("$pybin" -c 'import fakenet.listeners.ssl_utils as s, pathlib; print(pathlib.Path(s.__file__).resolve())')"
+  install -m 0644 "$patch_src" "$ssl_dst"
+  # Drop cached bytecode + any previously generated CA that may be half-written
+  rm -rf "$(dirname "$ssl_dst")/__pycache__" \
+    /opt/quarantine-gateway/venv-fakenet/lib/python*/site-packages/fakenet/configs/temp_certs \
+    2>/dev/null || true
+  echo "Patched FakeNet SSL utils -> $ssl_dst"
+fi
+
+"$pybin" -c 'import fakenet, netfilterqueue, netifaces; from fakenet.listeners.ssl_utils import SSLWrapper; print("ok", fakenet.__file__)'
+
+# Smoke-test cert generation (catches X509Extension regressions early)
+"$pybin" - <<'PY'
+import os, tempfile
+from fakenet.listeners.ssl_utils import SSLWrapper
+td = tempfile.mkdtemp(prefix="fakenet-ssl-")
+cfg = {"cert_dir": td, "static_ca": "No", "networkmode": "multihost", "webroot": None}
+w = SSLWrapper(cfg)
+assert os.path.isfile(w.ca_cert) and os.path.isfile(w.ca_key), "CA not created"
+leaf_c, leaf_k, _ = w.create_cert("example.test", w.ca_cert, w.ca_key, td)
+assert leaf_c and os.path.isfile(leaf_c), "leaf cert failed"
+print("ssl-smoke-ok", w.ca_cert, leaf_c)
+PY
 
 src="$OPT/fakenet/quarantine.ini"
 if [[ -f "$src" ]]; then

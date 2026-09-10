@@ -48,6 +48,29 @@ func TestNormalizeTrafficMode(t *testing.T) {
 	}
 }
 
+func TestIsHomeISP(t *testing.T) {
+	var nilCfg *Config
+	if !nilCfg.IsHomeISP("AS123 Community Fibre Limited") {
+		t.Fatal("default should treat Community Fibre as home")
+	}
+	if nilCfg.IsHomeISP("Mullvad VPN") {
+		t.Fatal("default should not treat other providers as home")
+	}
+
+	empty := &Config{UI: UIConfig{HomeISPPatterns: []string{}}}
+	if empty.IsHomeISP("Community Fibre") {
+		t.Fatal("empty homeIspPatterns should match nothing")
+	}
+
+	custom := &Config{UI: UIConfig{HomeISPPatterns: []string{"Virgin Media", "BT"}}}
+	if !custom.IsHomeISP("Virgin Media") {
+		t.Fatal("expected Virgin Media match")
+	}
+	if custom.IsHomeISP("Community Fibre") {
+		t.Fatal("Community Fibre should not match a custom list without it")
+	}
+}
+
 func TestResolveSnapshotName(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{

@@ -122,6 +122,7 @@
     "installPath": "C:\\Users\\Public\\Quarantine\\quarantine-agent.exe"
   },
   "ui": {
-    "warnPublicIpBeforeLaunch": true
+    "warnPublicIpBeforeLaunch": true,
+    "homeIspPatterns": ["Community Fibre"]
   }
 }
