@@ -350,6 +350,16 @@ func (m *Manager) persistGatewaySettings() error {
 	gwObj["trafficMode"] = g.TrafficMode
 	gwObj["permissive"] = g.Permissive.WithDefaults()
 	gwObj["enabled"] = true
+	gwObj["password"] = ""
+	if g.PasswordFile != "" {
+		gwObj["passwordFile"] = g.PasswordFile
+	}
+	if g.SSHPrivateKey != "" {
+		gwObj["sshPrivateKey"] = g.SSHPrivateKey
+	}
+	if g.SSHPublicKey != "" {
+		gwObj["sshPublicKey"] = g.SSHPublicKey
+	}
 	netObj["mode"] = "gateway"
 	out, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {

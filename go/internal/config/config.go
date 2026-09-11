@@ -121,8 +121,12 @@ type GatewayConfig struct {
 	IntnetName  string `json:"intnetName"`
 	Uplink      string `json:"uplink"`
 	Username    string `json:"username"`
-	Password    string `json:"password"`
+	Password    string `json:"password,omitempty"`
+	PasswordFile string `json:"passwordFile,omitempty"`
 	SSHHostPort int    `json:"sshHostPort"`
+	// SSHPrivateKey is the host path to the gateway ed25519 key (password SSH is disabled).
+	SSHPrivateKey string `json:"sshPrivateKey,omitempty"`
+	SSHPublicKey  string `json:"sshPublicKey,omitempty"`
 	MemoryMB    int    `json:"memoryMb"`
 	CPUCount    int    `json:"cpuCount"`
 	DiskSizeGB  int    `json:"diskSizeGb"`
@@ -205,9 +209,6 @@ func (g GatewayConfig) WithDefaults(intnetFallback string) GatewayConfig {
 	}
 	if g.Username == "" {
 		g.Username = "quarantine"
-	}
-	if g.Password == "" {
-		g.Password = "quarantine"
 	}
 	if g.SSHHostPort <= 0 {
 		g.SSHHostPort = 2222
@@ -385,6 +386,13 @@ func Load(path string) (*Config, error) {
 		cfg.Network.Gateway.TrafficMode = "fakenet"
 	}
 	cfg.Network.Gateway.Permissive = cfg.Network.Gateway.Permissive.WithDefaults()
+	dirty, err := cfg.hydrateSecrets()
+	if err != nil {
+		return nil, err
+	}
+	if dirty {
+		_ = cfg.persistSecretPaths(path)
+	}
 	return &cfg, nil
 }
 

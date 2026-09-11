@@ -80,6 +80,9 @@ func New(configPath string) (*App, error) {
 		Log:        applog.New(1000),
 	}
 	a.wireLogging()
+	if err := cfg.PreflightCredentials(); err != nil {
+		return nil, err
+	}
 	return a, nil
 }
 

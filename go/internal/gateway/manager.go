@@ -128,13 +128,14 @@ func (m *Manager) Create() (string, error) {
 	msg := fmt.Sprintf(`Gateway VM %q created.
   Folder: %s
   NIC1: NAT (uplink)  NIC2: intnet %s (LAN %s/24)
-  SSH: localhost:%d → guest:22 (user %s)
+  SSH: localhost:%d → guest:22 (user %s, key-only)
+  Key: %s
 
 Next:
   1. Attach Ubuntu Server ISO to SATA port 1 and install (enable OpenSSH + Guest Additions)
-  2. quarantine gateway provision
+  2. quarantine gateway provision   # installs SSH key, disables password SSH, drops NOPASSWD sudo
   3. quarantine network gateway
-`, name, folder, g.IntnetName, g.LANGateway, sshPort, g.Username)
+`, name, folder, g.IntnetName, g.LANGateway, sshPort, g.Username, g.SSHPrivateKey)
 	return msg, nil
 }
 
@@ -354,7 +355,41 @@ func (m *Manager) Provision() (string, error) {
 	if err != nil {
 		return out, fmt.Errorf("first-boot: %w (%s)", err, out)
 	}
+	if sshOut, sshErr := m.HardenSSH(); sshErr != nil {
+		return out, fmt.Errorf("provision ok but SSH harden failed: %w\n%s", sshErr, sshOut)
+	} else if sshOut != "" {
+		out += "\n" + sshOut
+	}
 	return "Gateway provisioned.\n" + out, nil
+}
+
+// HardenSSH installs the host key, disables password SSH, and drops NOPASSWD:ALL sudo.
+func (m *Manager) HardenSSH() (string, error) {
+	g := m.gw()
+	pub := strings.TrimSpace(g.SSHPublicKey)
+	if pub == "" && m.Cfg != nil {
+		pub = filepath.Join(m.Cfg.SecretsDir(), "gateway-id_ed25519.pub")
+	}
+	if _, err := os.Stat(pub); err != nil {
+		return "", fmt.Errorf("gateway SSH public key missing (%s) — run setup secrets: %w", pub, err)
+	}
+	if err := m.linuxCopyFileTo(pub, "/tmp/quarantine-gateway.pub"); err != nil {
+		return "", fmt.Errorf("upload gateway SSH public key: %w", err)
+	}
+	script := filepath.Join(m.scriptsHostDir(), "scripts", "harden-ssh.sh")
+	if _, err := os.Stat(script); err != nil {
+		return "", fmt.Errorf("missing harden-ssh.sh: %w", err)
+	}
+	if err := m.linuxCopyFileTo(script, "/tmp/quarantine-harden-ssh.sh"); err != nil {
+		return "", fmt.Errorf("upload harden-ssh.sh: %w", err)
+	}
+	user := g.Username
+	inner := strings.Join([]string{
+		"set -e",
+		"install -m 0755 /tmp/quarantine-harden-ssh.sh /usr/local/sbin/quarantine-harden-ssh",
+		"QUARANTINE_USER=" + shellSingleQuote(user) + " QUARANTINE_SSH_PUB=/tmp/quarantine-gateway.pub /usr/local/sbin/quarantine-harden-ssh " + shellSingleQuote(user),
+	}, "; ")
+	return m.sudoBashLC(inner, 2*time.Minute)
 }
 
 // linuxCopyFileTo copies a single host file to an absolute guest file path.

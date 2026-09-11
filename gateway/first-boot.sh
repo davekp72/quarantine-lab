@@ -218,6 +218,7 @@ install -m 0755 "$OPT/scripts/set-traffic-mode.sh" /usr/local/sbin/quarantine-se
 install -m 0755 "$OPT/scripts/install-fakenet.sh" /usr/local/sbin/quarantine-install-fakenet
 install -m 0755 "$OPT/scripts/fakenet-explicit-proxy.py" /usr/local/sbin/quarantine-fakenet-explicit-proxy
 install -m 0755 "$OPT/scripts/repair-wan-dns.sh" /usr/local/sbin/quarantine-repair-wan-dns
+install -m 0755 "$OPT/scripts/harden-ssh.sh" /usr/local/sbin/quarantine-harden-ssh
 install -m 0755 "$OPT/scripts/sync-hint.txt" /etc/quarantine-gateway/sync-hint.txt 2>/dev/null || true
 
 # FakeNet-NG (optional sinkhole). Separate venv from mitmproxy.

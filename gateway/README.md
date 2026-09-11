@@ -42,12 +42,13 @@
 #
 # Manual first boot (if not using cloud-init)
 #   1. Install Ubuntu Server in Quarantine-Gateway VM (2 NICs: NAT + intnet)
-#   2. Create user matching config network.gateway (username/password)
+#   2. Create user matching network.gateway.username; password from secrets\gateway-password.txt
 #   3. Enable OpenSSH + install Guest Additions
-#   4. Optional (faster provision): passwordless sudo for that user:
-#        echo 'quarantine ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers.d/quarantine
-#   5. On host: .\quarantine-vm.ps1 gateway provision
-#      (provision uses sudo -S if NOPASSWD is not set)
+#   4. On host: .\quarantine-vm.ps1 setup secrets
+#      .\quarantine-vm.ps1 gateway provision
+#      (provision installs the host SSH key, disables password SSH, removes NOPASSWD:ALL)
+#   SSH after provision:
+#      ssh -i D:\Vbox\LabVM\secrets\gateway-id_ed25519 -p 2222 quarantine@127.0.0.1
 #
 # first-boot notes (Ubuntu 24+/26+)
 #   - Disables systemd-resolved stub listener so dnsmasq can bind :53 on 10.66.0.1

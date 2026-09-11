@@ -1141,15 +1141,17 @@ Setup:
 
   2. Set windowsIsoPath to your Windows ISO
 
-  3. .\quarantine-vm.ps1 create
+  3. .\quarantine-vm.ps1 setup secrets
 
-  4. .\quarantine-vm.ps1 install
+  4. .\quarantine-vm.ps1 create
 
-  5. Run network\guest\Configure-QuarantineGuestNetwork.ps1 in guest (Admin)
+  5. .\quarantine-vm.ps1 install
 
-  6. If HTTPS fails, run network\guest\Install-QuarantineProxyCA.ps1 in guest (Admin)
+  6. Run network\guest\Configure-QuarantineGuestNetwork.ps1 in guest (Admin)
 
-  7. .\quarantine-vm.ps1 baseline
+  7. .\quarantine-vm.ps1 guest disable-autologon   (or baseline does this if the VM is running)
+
+  8. .\quarantine-vm.ps1 baseline
 
 
 

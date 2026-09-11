@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -39,7 +40,7 @@ func TestLoadRemapsHostNatNotIntnet(t *testing.T) {
 	path := filepath.Join(dir, "cfg.json")
 	raw := `{
 		"vmName": "TestVM",
-		"vmDataDir": "D:\\Vbox\\LabVM",
+		"vmDataDir": "` + strings.ReplaceAll(dir, `\`, `\\`) + `",
 		"network": {"mode": "host-nat", "gateway": {"enabled": false}}
 	}`
 	if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
@@ -61,7 +62,7 @@ func TestLoadRemapsHostNatNotIntnet(t *testing.T) {
 
 	raw = `{
 		"vmName": "TestVM",
-		"vmDataDir": "D:\\Vbox\\LabVM",
+		"vmDataDir": "` + strings.ReplaceAll(dir, `\`, `\\`) + `",
 		"network": {"mode": "intnet", "gateway": {"enabled": false}}
 	}`
 	if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {

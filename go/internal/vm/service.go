@@ -3,6 +3,8 @@ package vm
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -282,6 +284,7 @@ func (s *Service) Baseline(ctx context.Context) error {
 	}
 	state, _ := s.VBox.VMState(s.Cfg.VMName)
 	if state == "running" || state == "paused" {
+		_ = s.disableAutoLogonIfRunning()
 		_ = s.VBox.PowerOff(s.Cfg.VMName)
 		time.Sleep(3 * time.Second)
 	}
@@ -289,4 +292,43 @@ func (s *Service) Baseline(ctx context.Context) error {
 		_ = s.VBox.DiscardState(s.Cfg.VMName)
 	}
 	return s.SaveSnapshot(ctx, s.Cfg.CleanSnapshot, "Baseline disk-only Clean", true, true)
+}
+
+// DisableAutoLogon clears Winlogon autologon in a running guest (also used by baseline).
+func (s *Service) DisableAutoLogon() error {
+	state, err := s.VBox.VMState(s.Cfg.VMName)
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(state, "running") {
+		return fmt.Errorf("Windows VM is %s (start it to disable autologon)", state)
+	}
+	return s.disableAutoLogonIfRunning()
+}
+
+func (s *Service) disableAutoLogonIfRunning() error {
+	if s == nil || s.Cfg == nil || s.VBox == nil {
+		return nil
+	}
+	user := strings.TrimSpace(s.Cfg.Guest.Username)
+	pass := strings.TrimSpace(s.Cfg.Guest.Password)
+	if user == "" || pass == "" {
+		return fmt.Errorf("guest credentials missing")
+	}
+	root := config.ProjectRoot(s.ConfigPath)
+	host := filepath.Join(root, "network", "guest", "Disable-QuarantineAutoLogon.ps1")
+	if _, err := os.Stat(host); err != nil {
+		return err
+	}
+	dest := `C:\Users\Public\Quarantine\Disable-QuarantineAutoLogon.ps1`
+	if err := s.VBox.GuestControlCopyTo(s.Cfg.VMName, user, pass, host, dest, 45*time.Second); err != nil {
+		return err
+	}
+	_, err := s.VBox.GuestControlRun(
+		s.Cfg.VMName, user, pass,
+		`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`,
+		[]string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", dest},
+		60*time.Second,
+	)
+	return err
 }

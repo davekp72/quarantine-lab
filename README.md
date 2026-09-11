@@ -61,11 +61,14 @@ Think of **Baseline** as “factory reset of the disk,” and **CleanSession** a
 # Copy/edit config if needed
 copy config\quarantine-vm.example.json config\quarantine-vm.json
 
+# Unique passwords + gateway SSH keys (writes {vmDataDir}\secrets\)
+.\quarantine-vm.ps1 setup secrets
+
 .\quarantine-vm.ps1 create
 .\quarantine-vm.ps1 install
 ```
 
-Complete Windows setup in the VirtualBox window.
+Complete Windows setup in the VirtualBox window. Autologon runs once; disable it before the Clean baseline (`.\quarantine-vm.ps1 guest disable-autologon` while the VM is running, or `baseline` does this if the guest is up).
 
 **Stuck on “Let’s connect you to a network”?**  
 Press **Shift+F10**, run `oobe\bypassnro`, reboot, then finish with a **local account**.  
@@ -381,7 +384,8 @@ Important fields:
 | `vmName` / `vmDataDir` | VM name and disk location |
 | `cleanSnapshotName` | Disk baseline name (default `Clean`) |
 | `manifest.sessionBaselineSnapshot` | Live clean name (default `CleanSession`) |
-| `guest` / `payload` | Admin vs sample-user credentials |
+| `guest` / `payload` | Usernames plus `passwordFile` under `{vmDataDir}/secrets` (never commit passwords) |
+| `network.gateway.passwordFile` / `sshPrivateKey` | Unique gateway password (guestcontrol/sudo) and ed25519 key. Password SSH is off. |
 | `network.mode` | Always `gateway` for analysis (Linux VM). Host-NAT mitm is retired. `intnet` remains for offline isolation. |
 | `network.gateway.trafficMode` | Default `fakenet`. `permissive` is allowlisted real internet. |
 | `network.gateway.permissive` | WAN allowlist: `tcpPorts` (default 80,443), `udpPorts`, `forceDnsToGateway`, `allowIcmp`. |

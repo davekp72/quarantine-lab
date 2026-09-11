@@ -2,15 +2,18 @@
 hostname: quarantine-gateway
 manage_etc_hosts: true
 users:
-  - name: quarantine
+  - name: __GATEWAY_USER__
     groups: [sudo]
     shell: /bin/bash
-    sudo: ALL=(ALL) NOPASSWD:ALL
+    sudo: ALL=(ALL) ALL
     lock_passwd: false
-    plain_text_passwd: quarantine
-ssh_pwauth: true
+    passwd: '__GATEWAY_PASSWORD_HASH__'
+    ssh_authorized_keys:
+      - __GATEWAY_SSH_PUBKEY__
+ssh_pwauth: false
 package_update: true
 packages:
+  - openssh-server
   - nftables
   - dnsmasq
   - tcpdump
@@ -27,4 +30,5 @@ runcmd:
       chmod +x /opt/quarantine-gateway-src/first-boot.sh
       /opt/quarantine-gateway-src/first-boot.sh
     fi
+  - chmod +x /opt/quarantine-gateway-src/scripts/harden-ssh.sh 2>/dev/null || true
 final_message: "Quarantine Gateway cloud-init finished"

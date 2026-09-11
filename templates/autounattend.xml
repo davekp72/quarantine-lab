@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   Minimal Windows 11 unattended install for the quarantine VM.
-  Copy to a second ISO (or add to a supplemental floppy/VISO) and set
-  autounattendPath in config. Review passwords and edition before use.
+  Placeholders are filled by `quarantine setup secrets` into {vmDataDir}/unattend/.
+  Do not put real passwords in this template.
 -->
 <unattend xmlns="urn:schemas-microsoft-com:unattend"
           xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
@@ -94,19 +94,28 @@
                versionScope="nonSxS">
       <AutoLogon>
         <Enabled>true</Enabled>
-        <Username>analyst</Username>
+        <LogonCount>1</LogonCount>
+        <Username>__GUEST_USERNAME__</Username>
         <Password>
-          <Value>ChangeMe-Quarantine!</Value>
+          <Value>__GUEST_PASSWORD__</Value>
           <PlainText>true</PlainText>
         </Password>
       </AutoLogon>
       <UserAccounts>
         <LocalAccounts>
           <LocalAccount wcm:action="add">
-            <Name>analyst</Name>
+            <Name>__GUEST_USERNAME__</Name>
             <Group>Administrators</Group>
             <Password>
-              <Value>ChangeMe-Quarantine!</Value>
+              <Value>__GUEST_PASSWORD__</Value>
+              <PlainText>true</PlainText>
+            </Password>
+          </LocalAccount>
+          <LocalAccount wcm:action="add">
+            <Name>__PAYLOAD_USERNAME__</Name>
+            <Group>Users</Group>
+            <Password>
+              <Value>__PAYLOAD_PASSWORD__</Value>
               <PlainText>true</PlainText>
             </Password>
           </LocalAccount>

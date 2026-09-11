@@ -658,9 +658,9 @@ func deployCmd(cfgPath *string) *cobra.Command {
 }
 
 func setupCmd(cfgPath *string) *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "setup",
-		Short: "Check dependencies",
+		Short: "Check dependencies and generate per-build secrets",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			a, err := app.New(*cfgPath)
 			if err != nil {
@@ -669,9 +669,40 @@ func setupCmd(cfgPath *string) *cobra.Command {
 			fmt.Println("VBox:", a.VM.VBox.Binary)
 			fmt.Println("VM:", a.Cfg.VMName)
 			fmt.Println("Manifest log:", a.Cfg.ManifestLogDir())
+			fmt.Println("Secrets dir:", a.Cfg.SecretsDir())
 			return nil
 		},
 	}
+	var generate bool
+	secrets := &cobra.Command{
+		Use:   "secrets",
+		Short: "Generate unique passwords + gateway SSH keys; render unattend and cloud-init",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load(*cfgPath)
+			if err != nil {
+				return err
+			}
+			root := config.ProjectRoot(*cfgPath)
+			msg, err := cfg.EnsureSecrets(*cfgPath, root, generate)
+			if msg != "" {
+				fmt.Println(msg)
+			}
+			if err != nil {
+				return err
+			}
+			if err := cfg.PreflightCredentials(); err != nil {
+				return err
+			}
+			fmt.Println("Credential preflight: ok")
+			fmt.Println("SSH:", fmt.Sprintf("ssh -i %s -p %d %s@127.0.0.1", cfg.Network.Gateway.SSHPrivateKey, cfg.Network.Gateway.WithDefaults(cfg.Network.IntnetName).SSHHostPort, cfg.Network.Gateway.Username))
+			fmt.Println("Disable Windows autologon before baseline (guest, elevated):")
+			fmt.Println("  C:\\Users\\Public\\Quarantine\\Disable-QuarantineAutoLogon.ps1")
+			return nil
+		},
+	}
+	secrets.Flags().BoolVar(&generate, "generate", true, "Generate missing unique passwords")
+	cmd.AddCommand(secrets)
+	return cmd
 }
 
 func clipboardCmd(cfgPath *string) *cobra.Command {
@@ -772,6 +803,17 @@ func guestCmd(cfgPath *string) *cobra.Command {
 			}
 			fmt.Println(msg)
 			return nil
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use:   "disable-autologon",
+		Short: "Clear Windows AutoAdminLogon before taking the Clean baseline",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			a, err := app.New(*cfgPath)
+			if err != nil {
+				return err
+			}
+			return a.VM.DisableAutoLogon()
 		},
 	})
 	return cmd

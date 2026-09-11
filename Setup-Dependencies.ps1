@@ -123,6 +123,9 @@ function Write-QuarantineConfig {
                 intnetName   = 'quarantine-net'
                 uplink       = 'nat'
                 trafficMode  = 'fakenet'
+                passwordFile = 'D:\Vbox\LabVM\secrets\gateway-password.txt'
+                sshPrivateKey = 'D:\Vbox\LabVM\secrets\gateway-id_ed25519'
+                sshPublicKey  = 'D:\Vbox\LabVM\secrets\gateway-id_ed25519.pub'
                 permissive   = [ordered]@{
                     tcpPorts           = @(80, 443)
                     udpPorts           = @()
@@ -147,7 +150,7 @@ function Write-QuarantineConfig {
             logDir            = 'D:\Vbox\LabVM\logs\inbox'
         }
         guest                = [ordered]@{
-            username      = ''
+            username      = 'quarantine'
             password      = ''
             passwordFile  = 'D:\Vbox\LabVM\secrets\guest-password.txt'
             domain        = ''
@@ -166,6 +169,7 @@ function Write-QuarantineConfig {
 
     ($config | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $ConfigPath -Encoding UTF8
     Write-Host "Config: $ConfigPath"
+    Write-Host "Next: .\\quarantine-vm.ps1 setup secrets   # unique passwords + gateway SSH keys"
 }
 
 function Test-DependencyStatus {
