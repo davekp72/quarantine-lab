@@ -910,7 +910,8 @@
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 
   function renderStats(rows, filters) {
@@ -1323,7 +1324,11 @@
     const sysmonCount = (sysmon?.added || []).length;
     const serviceInstallCount = (serviceInstalls?.added || []).length;
     if ((!sysmon || sysmon.available === false) && serviceInstallCount === 0) {
-      panel.innerHTML = `<div class="empty">${sysmon?.message || serviceInstalls?.message || 'Sysmon not captured. Install Sysmon in the guest and re-capture with -Refresh.'}</div>`;
+      panel.replaceChildren();
+      const empty = document.createElement('div');
+      empty.className = 'empty';
+      empty.textContent = sysmon?.message || serviceInstalls?.message || 'Sysmon not captured. Install Sysmon in the guest and re-capture with -Refresh.';
+      panel.appendChild(empty);
       return;
     }
 
@@ -1443,10 +1448,13 @@
   function renderUsnPanel() {
     const panel = $('#panel-usn');
     if (!panel) return;
-    panel.innerHTML = '';
+    panel.replaceChildren();
     const usn = diff.usn;
     if (!usn || usn.available === false) {
-      panel.innerHTML = `<div class="empty">${usn?.message || 'No USN journal data. Run manifest mark after restore, then capture after the test.'}</div>`;
+      const empty = document.createElement('div');
+      empty.className = 'empty';
+      empty.textContent = usn?.message || 'No USN journal data. Run manifest mark after restore, then capture after the test.';
+      panel.appendChild(empty);
       return;
     }
 
@@ -1461,31 +1469,63 @@
     }
 
     const isSnapshotPair = diff.meta?.compareMode === 'snapshot-pair';
-    let html = isSnapshotPair
-      ? `<p class="content-note">Volume ${usn.volume || 'C:'} · ${(usn.events || []).length} USN events in To not in From (${diff.meta?.fromSnapshot || '?'} → ${diff.meta?.toSnapshot || '?'})</p>`
-      : `<p class="content-note">Volume ${usn.volume || 'C:'} · ${(usn.events || []).length} events since baseline (${usn.baselineAt || '?'})</p>`;
+    const note = document.createElement('p');
+    note.className = 'content-note';
+    note.textContent = isSnapshotPair
+      ? `Volume ${usn.volume || 'C:'} · ${(usn.events || []).length} USN events in To not in From (${diff.meta?.fromSnapshot || '?'} → ${diff.meta?.toSnapshot || '?'})`
+      : `Volume ${usn.volume || 'C:'} · ${(usn.events || []).length} events since baseline (${usn.baselineAt || '?'})`;
+    panel.appendChild(note);
+
     if (!events.length) {
-      html += filters.q
-        ? '<div class="empty">No USN events match the current search.</div>'
+      const empty = document.createElement('div');
+      empty.className = 'empty';
+      empty.textContent = filters.q
+        ? 'No USN events match the current search.'
         : (isSnapshotPair
-          ? '<div class="empty">No new USN file activity between these snapshots.</div>'
-          : '<div class="empty">No file activity recorded since USN baseline.</div>');
-      panel.innerHTML = html;
+          ? 'No new USN file activity between these snapshots.'
+          : 'No file activity recorded since USN baseline.');
+      panel.appendChild(empty);
       return;
     }
 
     const display = rowsForDisplay(events, 'usn', filters);
     const visibleEvents = display.visible;
 
-    html += '<table><thead><tr><th>Time (UTC)</th><th>Reason</th><th>File name</th></tr></thead><tbody>';
-    visibleEvents.forEach((e) => {
-      html += `<tr><td class="mono">${e.timestamp || ''}</td><td>${(e.reasons || []).join(', ')}</td><td class="path">${e.fileName || ''}</td></tr>`;
-    });
-    html += '</tbody></table>';
-    if (usn.truncated) {
-      html += '<p class="content-note">Event list truncated at guest capture limit.</p>';
+    const table = document.createElement('table');
+    const thead = document.createElement('thead');
+    const headRow = document.createElement('tr');
+    for (const h of ['Time (UTC)', 'Reason', 'File name']) {
+      const th = document.createElement('th');
+      th.textContent = h;
+      headRow.appendChild(th);
     }
-    panel.innerHTML = html;
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    visibleEvents.forEach((e) => {
+      const tr = document.createElement('tr');
+      const tdTime = document.createElement('td');
+      tdTime.className = 'mono';
+      tdTime.textContent = e.timestamp || '';
+      const tdReason = document.createElement('td');
+      tdReason.textContent = (e.reasons || []).join(', ');
+      const tdFile = document.createElement('td');
+      tdFile.className = 'path';
+      tdFile.textContent = e.fileName || '';
+      tr.appendChild(tdTime);
+      tr.appendChild(tdReason);
+      tr.appendChild(tdFile);
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    panel.appendChild(table);
+
+    if (usn.truncated) {
+      const trunc = document.createElement('p');
+      trunc.className = 'content-note';
+      trunc.textContent = 'Event list truncated at guest capture limit.';
+      panel.appendChild(trunc);
+    }
 
     if (display.capped) {
       appendDisplayCapNote(panel, 'usn', display.total, filters);
@@ -1581,25 +1621,64 @@
     app.classList.remove('hidden');
 
     const m = diff.meta || {};
-    const s = diff.summary || {};
     const fromFiles = m.fromFileCount != null ? ` · ${m.fromFileCount} scanned` : '';
     const toFiles = m.toFileCount != null ? ` · ${m.toFileCount} scanned` : '';
     const fromHku = m.fromUserRegistryCount != null ? ` · ${m.fromUserRegistryCount} HKU reg` : '';
     const toHku = m.toUserRegistryCount != null ? ` · ${m.toUserRegistryCount} HKU reg` : '';
     const fileSrc = m.fileDiffSource ? ` · file diff: ${m.fileDiffSource}` : '';
-    const scanNote = (m.toScanMode === 'events' || m.fromScanMode === 'events')
-      ? `<div class="content-note" style="margin-top:0.35rem">Event-first capture (USN/Sysmon). Run <span class="mono">manifest enrich -SnapshotName …</span> to hash changed paths.</div>`
-      : '';
-    const compareNote = m.compareMode === 'snapshot-pair'
-      ? '<div class="content-note" style="margin-top:0.35rem">Comparing two snapshots (To minus From) — not vs session baseline.</div>'
-      : '';
-    $('#meta').innerHTML = `
-      <div><strong>From:</strong> ${m.fromSnapshot || '?'} <span class="mono">${m.fromCaptured || ''}${fromFiles}${fromHku}${m.fromScanMode ? ` · ${m.fromScanMode}` : ''}</span></div>
-      <div><strong>To:</strong> ${m.toSnapshot || '?'} <span class="mono">${m.toCaptured || ''}${toFiles}${toHku}${m.toScanMode ? ` · ${m.toScanMode}` : ''}</span></div>
-      <div class="mono" style="margin-top:0.25rem;font-size:0.8rem">${m.fromManifest || ''}<br>${m.toManifest || ''}${fileSrc}</div>
-      ${compareNote}
-      ${scanNote}
-    `;
+    const metaEl = $('#meta');
+    metaEl.replaceChildren();
+
+    const fromDiv = document.createElement('div');
+    const fromStrong = document.createElement('strong');
+    fromStrong.textContent = 'From:';
+    fromDiv.appendChild(fromStrong);
+    fromDiv.appendChild(document.createTextNode(` ${m.fromSnapshot || '?'} `));
+    const fromMono = document.createElement('span');
+    fromMono.className = 'mono';
+    fromMono.textContent = `${m.fromCaptured || ''}${fromFiles}${fromHku}${m.fromScanMode ? ` · ${m.fromScanMode}` : ''}`;
+    fromDiv.appendChild(fromMono);
+    metaEl.appendChild(fromDiv);
+
+    const toDiv = document.createElement('div');
+    const toStrong = document.createElement('strong');
+    toStrong.textContent = 'To:';
+    toDiv.appendChild(toStrong);
+    toDiv.appendChild(document.createTextNode(` ${m.toSnapshot || '?'} `));
+    const toMono = document.createElement('span');
+    toMono.className = 'mono';
+    toMono.textContent = `${m.toCaptured || ''}${toFiles}${toHku}${m.toScanMode ? ` · ${m.toScanMode}` : ''}`;
+    toDiv.appendChild(toMono);
+    metaEl.appendChild(toDiv);
+
+    const paths = document.createElement('div');
+    paths.className = 'mono';
+    paths.style.marginTop = '0.25rem';
+    paths.style.fontSize = '0.8rem';
+    paths.appendChild(document.createTextNode(m.fromManifest || ''));
+    paths.appendChild(document.createElement('br'));
+    paths.appendChild(document.createTextNode(`${m.toManifest || ''}${fileSrc}`));
+    metaEl.appendChild(paths);
+
+    if (m.compareMode === 'snapshot-pair') {
+      const compareNote = document.createElement('div');
+      compareNote.className = 'content-note';
+      compareNote.style.marginTop = '0.35rem';
+      compareNote.textContent = 'Comparing two snapshots (To minus From) — not vs session baseline.';
+      metaEl.appendChild(compareNote);
+    }
+    if (m.toScanMode === 'events' || m.fromScanMode === 'events') {
+      const scanNote = document.createElement('div');
+      scanNote.className = 'content-note';
+      scanNote.style.marginTop = '0.35rem';
+      scanNote.appendChild(document.createTextNode('Event-first capture (USN/Sysmon). Run '));
+      const cmd = document.createElement('span');
+      cmd.className = 'mono';
+      cmd.textContent = 'manifest enrich -SnapshotName …';
+      scanNote.appendChild(cmd);
+      scanNote.appendChild(document.createTextNode(' to hash changed paths.'));
+      metaEl.appendChild(scanNote);
+    }
 
     renderWarnings();
     statFilter = null;

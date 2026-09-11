@@ -1,6 +1,13 @@
 import { EventsOn } from './wailsjs/runtime/runtime.js';
 import { filterDiff, isEphemeralTempPath, isUsnLeafPath } from './noise.js';
 import { resolveHttpFlow } from './http_body.js';
+import {
+  escapeHtml,
+  escapeAttr,
+  buildSafeTable,
+  setMutedMessage,
+  appendMuted,
+} from './safe_dom.js';
 
 let diffData = null;
 let toSnapshot = '';
@@ -621,38 +628,67 @@ function activeDiff() {
 function renderOverview() {
   const panel = $('#panel-overview');
   if (!diffData) {
-    panel.innerHTML = '<p class="muted">Pick From/To snapshots and click Compare.</p>';
+    setMutedMessage(panel, 'Pick From/To snapshots and click Compare.');
     return;
   }
   const d = activeDiff();
   const s = d.summary || {};
   const m = d.meta || {};
-  const noiseNote = hideNoiseEnabled()
-    ? '<p class="muted">Routine noise hidden — uncheck to show all changes.</p>'
-    : '';
-  const warnNote = (m.warnings || []).length
-    ? `<ul class="warn-list">${(m.warnings || []).map((w) => `<li>${escapeHtml(w)}</li>`).join('')}</ul>`
-    : '';
-  panel.innerHTML = `
-    <p><strong>${m.fromSnapshot || ''}</strong> → <strong>${m.toSnapshot || ''}</strong></p>
-    <p class="muted">Registry source: ${escapeHtml(m.registryDiffSource || s.registryDiffSource || 'manifest')}${
-      (m.fromUserRegistryCount || m.toUserRegistryCount)
-        ? ` · index entries ${m.fromUserRegistryCount || 0} → ${m.toUserRegistryCount || 0}`
-        : ''
-    }</p>
-    ${noiseNote}
-    ${warnNote}
-    <div class="stat-grid">
-      <div class="stat"><div class="n">${s.filesAdded || 0}</div>Files added</div>
-      <div class="stat"><div class="n">${s.filesRemoved || 0}</div>Files removed</div>
-      <div class="stat"><div class="n">${s.filesModified || 0}</div>Files modified</div>
-      <div class="stat"><div class="n">${s.registryAdded || 0}</div>Registry added</div>
-      <div class="stat"><div class="n">${s.registryRemoved || 0}</div>Registry removed</div>
-      <div class="stat"><div class="n">${s.registryModified || 0}</div>Registry modified</div>
-      <div class="stat"><div class="n">${s.sysmonAdded || 0}</div>Sysmon events</div>
-      <div class="stat"><div class="n">${s.dnsQueries || 0}</div>DNS lookups</div>
-      <div class="stat"><div class="n">${s.networkRequests || 0}</div>HTTP/proxy</div>
-    </div>`;
+  panel.replaceChildren();
+
+  const title = document.createElement('p');
+  const fromEl = document.createElement('strong');
+  fromEl.textContent = m.fromSnapshot || '';
+  const toEl = document.createElement('strong');
+  toEl.textContent = m.toSnapshot || '';
+  title.appendChild(fromEl);
+  title.appendChild(document.createTextNode(' → '));
+  title.appendChild(toEl);
+  panel.appendChild(title);
+
+  let regLine = `Registry source: ${m.registryDiffSource || s.registryDiffSource || 'manifest'}`;
+  if (m.fromUserRegistryCount || m.toUserRegistryCount) {
+    regLine += ` · index entries ${m.fromUserRegistryCount || 0} → ${m.toUserRegistryCount || 0}`;
+  }
+  appendMuted(panel, regLine);
+  if (hideNoiseEnabled()) {
+    appendMuted(panel, 'Routine noise hidden — uncheck to show all changes.');
+  }
+  if ((m.warnings || []).length) {
+    const ul = document.createElement('ul');
+    ul.className = 'warn-list';
+    for (const w of m.warnings) {
+      const li = document.createElement('li');
+      li.textContent = w == null ? '' : String(w);
+      ul.appendChild(li);
+    }
+    panel.appendChild(ul);
+  }
+
+  const grid = document.createElement('div');
+  grid.className = 'stat-grid';
+  const stats = [
+    [s.filesAdded || 0, 'Files added'],
+    [s.filesRemoved || 0, 'Files removed'],
+    [s.filesModified || 0, 'Files modified'],
+    [s.registryAdded || 0, 'Registry added'],
+    [s.registryRemoved || 0, 'Registry removed'],
+    [s.registryModified || 0, 'Registry modified'],
+    [s.sysmonAdded || 0, 'Sysmon events'],
+    [s.dnsQueries || 0, 'DNS lookups'],
+    [s.networkRequests || 0, 'HTTP/proxy'],
+  ];
+  for (const [n, label] of stats) {
+    const stat = document.createElement('div');
+    stat.className = 'stat';
+    const num = document.createElement('div');
+    num.className = 'n';
+    num.textContent = String(n);
+    stat.appendChild(num);
+    stat.appendChild(document.createTextNode(label));
+    grid.appendChild(stat);
+  }
+  panel.appendChild(grid);
 }
 
 function showFileTab(name) {
@@ -970,14 +1006,6 @@ async function renderRegistryTree() {
   renderRegistryNode(tree, host, values, 0, true);
 }
 
-function escapeHtml(s) {
-  return String(s ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
 function formatRegData(v) {
   if (v == null) return '';
   return typeof v === 'string' ? v : JSON.stringify(v);
@@ -1152,12 +1180,19 @@ function renderSysmon() {
   const d = activeDiff();
   const rows = d?.sysmon?.added || [];
   if (!rows.length) {
-    panel.innerHTML = '<p class="muted">No Sysmon events in diff.</p>';
+    setMutedMessage(panel, 'No Sysmon events in diff.');
     return;
   }
-  panel.innerHTML = `<table><thead><tr><th>Time</th><th>EID</th><th>Target</th></tr></thead><tbody>${
-    rows.slice(0, 500).map((e) => `<tr><td>${e.time || e.t || ''}</td><td>${e.eid || ''}</td><td>${e.target || e.targetFilename || e.image || e.queryName || ''}</td></tr>`).join('')
-  }</tbody></table>`;
+  panel.replaceChildren(buildSafeTable(
+    ['Time', 'EID', 'Target'],
+    rows.slice(0, 500).map((e) => ({
+      cells: [
+        e.time || e.t || '',
+        e.eid || '',
+        e.target || e.targetFilename || e.image || e.queryName || '',
+      ],
+    })),
+  ));
 }
 
 function usnReasonText(ev) {
@@ -1170,12 +1205,15 @@ function renderUsn() {
   const d = activeDiff();
   const rows = d?.usn?.events || [];
   if (!rows.length) {
-    panel.innerHTML = '<p class="muted">No USN events in diff.</p>';
+    setMutedMessage(panel, 'No USN events in diff.');
     return;
   }
-  panel.innerHTML = `<table><thead><tr><th>File</th><th>Reasons</th><th>USN</th></tr></thead><tbody>${
-    rows.slice(0, 500).map((e) => `<tr><td>${e.fileName || ''}</td><td>${usnReasonText(e)}</td><td>${e.usn || ''}</td></tr>`).join('')
-  }</tbody></table>`;
+  panel.replaceChildren(buildSafeTable(
+    ['File', 'Reasons', 'USN'],
+    rows.slice(0, 500).map((e) => ({
+      cells: [e.fileName || '', usnReasonText(e), e.usn || ''],
+    })),
+  ));
 }
 
 function renderNetwork() {
@@ -1183,56 +1221,77 @@ function renderNetwork() {
   const d = activeDiff();
   const net = d?.network;
   if (!net) {
-    panel.innerHTML = '<p class="muted">No network section in this diff.</p>';
+    setMutedMessage(panel, 'No network section in this diff.');
     return;
   }
   const reqs = net.requests || [];
   const windowText = net.windowFrom && net.windowTo
     ? `${net.windowFrom} → ${net.windowTo}`
     : 'snapshot capture window';
-  let html = `<p class="muted">${windowText} · ${reqs.length} HTTP/proxy</p>`;
+  panel.replaceChildren();
+  appendMuted(panel, `${windowText} · ${reqs.length} HTTP/proxy`);
   if (hideNoiseEnabled()) {
-    html += '<p class="muted">Routine Microsoft / connectivity noise hidden — uncheck Hide routine noise to show all.</p>';
+    appendMuted(panel, 'Routine Microsoft / connectivity noise hidden — uncheck Hide routine noise to show all.');
   }
   if (net.message) {
-    html += `<p class="muted">${net.message}</p>`;
+    appendMuted(panel, net.message);
   }
   if (!reqs.length) {
-    html += '<p class="muted">No HTTP/proxy requests in this window. DNS is on the DNS tab.</p>';
-    panel.innerHTML = html;
+    appendMuted(panel, 'No HTTP/proxy requests in this window. DNS is on the DNS tab.');
     return;
   }
-  html += `<div class="network-split">
-  <div class="net-req-list">
-    <table id="net-req-table"><thead><tr><th>Method</th><th>Status</th><th>Host</th><th>URL</th><th>Time</th></tr></thead><tbody>${
-      reqs.slice(0, 500).map((r, i) => `<tr data-req-idx="${i}" class="net-req-row${r.hasBody ? ' has-body' : ''}"><td>${r.method || ''}</td><td>${r.status ?? ''}</td><td>${r.host || ''}</td><td title="${escapeAttr(r.url || '')}">${truncate(r.url || r.path || '', 80)}</td><td>${r.t || ''}</td></tr>`).join('')
-    }</tbody></table>
-  </div>
-  <div id="net-req-detail" class="net-req-detail muted">Click a request to view decrypted request/response (mitm).</div>
-</div>`;
-  panel.innerHTML = html;
+
+  const split = document.createElement('div');
+  split.className = 'network-split';
+  const list = document.createElement('div');
+  list.className = 'net-req-list';
+  const table = buildSafeTable(
+    ['Method', 'Status', 'Host', 'URL', 'Time'],
+    reqs.slice(0, 500).map((r, i) => ({
+      className: `net-req-row${r.hasBody ? ' has-body' : ''}`,
+      attrs: { 'data-req-idx': String(i) },
+      cells: [
+        r.method || '',
+        r.status ?? '',
+        r.host || '',
+        { text: truncate(r.url || r.path || '', 80), title: r.url || '' },
+        r.t || '',
+      ],
+    })),
+  );
+  table.id = 'net-req-table';
+  list.appendChild(table);
+  const detail = document.createElement('div');
+  detail.id = 'net-req-detail';
+  detail.className = 'net-req-detail muted';
+  detail.textContent = 'Click a request to view decrypted request/response (mitm).';
+  split.appendChild(list);
+  split.appendChild(detail);
+  panel.appendChild(split);
+
   panel.querySelectorAll('.net-req-row').forEach((tr) => {
     tr.addEventListener('click', () => {
       panel.querySelectorAll('.net-req-row.selected').forEach((x) => x.classList.remove('selected'));
       tr.classList.add('selected');
       const idx = Number(tr.getAttribute('data-req-idx'));
       const r = reqs[idx];
-      const detail = panel.querySelector('#net-req-detail');
-      if (!detail || !r) return;
-      detail.classList.remove('muted');
-      detail.innerHTML = '<p class="muted">Loading body…</p>';
+      const detailEl = panel.querySelector('#net-req-detail');
+      if (!detailEl || !r) return;
+      detailEl.classList.remove('muted');
+      detailEl.replaceChildren();
+      appendMuted(detailEl, 'Loading body…');
       (async () => {
         const api = await backend();
         const decoded = await resolveHttpFlow(r, api || {});
-        if (!detail.isConnected) return;
-        let html = renderHttpFlowHtml(decoded);
+        if (!detailEl.isConnected) return;
+        detailEl.innerHTML = renderHttpFlowHtml(decoded);
         if (decoded.loadError) {
-          html += `<p class="muted">Flow file load: ${escapeAttr(decoded.loadError)}</p>`;
+          appendMuted(detailEl, `Flow file load: ${decoded.loadError}`);
         }
-        detail.innerHTML = html;
       })().catch((e) => {
-        if (!detail.isConnected) return;
-        detail.innerHTML = renderHttpFlowHtml(r) + `<p class="muted">Decode: ${escapeAttr(String(e))}</p>`;
+        if (!detailEl.isConnected) return;
+        detailEl.innerHTML = renderHttpFlowHtml(r);
+        appendMuted(detailEl, `Decode: ${String(e)}`);
       });
     });
   });
@@ -1244,33 +1303,42 @@ function renderDns() {
   const d = activeDiff();
   const net = d?.network;
   if (!net) {
-    panel.innerHTML = '<p class="muted">No network section in this diff.</p>';
+    setMutedMessage(panel, 'No network section in this diff.');
     return;
   }
   const dns = net.dns || [];
   const windowText = net.windowFrom && net.windowTo
     ? `${net.windowFrom} → ${net.windowTo}`
     : 'snapshot capture window';
-  let html = `<p class="muted">${windowText} · ${dns.length} name lookups</p>`;
+  panel.replaceChildren();
+  appendMuted(panel, `${windowText} · ${dns.length} name lookups`);
   if (hideNoiseEnabled()) {
-    html += '<p class="muted">Routine Microsoft / connectivity noise hidden — uncheck Hide routine noise to show all.</p>';
+    appendMuted(panel, 'Routine Microsoft / connectivity noise hidden — uncheck Hide routine noise to show all.');
   }
   if (!dns.length) {
-    html += '<p class="muted">No DNS / host resolution entries in this window.</p>';
-    panel.innerHTML = html;
+    appendMuted(panel, 'No DNS / host resolution entries in this window.');
     return;
   }
-  html += `<div class="dns-table-wrap"><table id="dns-table"><thead><tr><th>Source</th><th>Name</th><th>Resolved</th><th>Type</th><th>Time</th></tr></thead><tbody>${
+  const wrap = document.createElement('div');
+  wrap.className = 'dns-table-wrap';
+  const table = buildSafeTable(
+    ['Source', 'Name', 'Resolved', 'Type', 'Time'],
     dns.slice(0, 500).map((r) => {
       const answers = Array.isArray(r.answers) ? r.answers.filter(Boolean).join(', ') : '';
-      return `<tr><td>${r.source || ''}</td><td>${r.qname || r.query || ''}</td><td>${answers || '—'}</td><td>${r.qtype || r.type || ''}</td><td>${r.t || ''}</td></tr>`;
-    }).join('')
-  }</tbody></table></div>`;
-  panel.innerHTML = html;
-}
-
-function escapeAttr(s) {
-  return String(s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+      return {
+        cells: [
+          r.source || '',
+          r.qname || r.query || '',
+          answers || '—',
+          r.qtype || r.type || '',
+          r.t || '',
+        ],
+      };
+    }),
+  );
+  table.id = 'dns-table';
+  wrap.appendChild(table);
+  panel.appendChild(wrap);
 }
 
 function truncate(s, n) {

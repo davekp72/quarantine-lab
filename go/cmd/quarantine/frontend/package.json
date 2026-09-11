@@ -1,9 +1,1 @@
-{
-  "name": "quarantine-frontend",
-  "private": true,
-  "version": "1.0.0",
-  "description": "Static Wails frontend (prebuilt in dist/)",
-  "scripts": {
-    "build": "node -e \"process.exit(0)\""
-  }
-}
+{ "type": "module" }

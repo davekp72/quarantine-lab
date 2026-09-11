@@ -544,11 +544,23 @@ func (a *App) GetConfigSummary() map[string]string {
 }
 
 // LoadDiffFile reads a diff JSON file from disk.
+// Paths must resolve under the lab evidence/log directories (same roots as LoadHTTPFlowWails).
 func (a *App) LoadDiffFile(path string) (string, error) {
 	if path == "" {
 		path = a.LastDiffPath
 	}
-	raw, err := os.ReadFile(path)
+	if strings.TrimSpace(path) == "" {
+		return "", fmt.Errorf("diff path required")
+	}
+	roots := []string{
+		a.Cfg.ManifestLogDir(),
+		a.Cfg.Network.Proxy.LogDir,
+		filepath.Join(a.Cfg.DataDir(), "logs"),
+	}
+	if !httpbody.AllowedFlowPath(path, roots...) {
+		return "", fmt.Errorf("diff file not under lab evidence dirs")
+	}
+	raw, err := os.ReadFile(filepath.Clean(path))
 	if err != nil {
 		return "", err
 	}
