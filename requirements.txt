@@ -1,1 +1,1 @@
-mitmproxy>=11.0
+mitmproxy>=12.2.3
