@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -65,7 +66,12 @@ $ev = Get-QuarantineNetworkEvidence -ConfigPath '%s' -From $from -To $to -FromSn
 		escapePSPath(fromSnap),
 		escapePSPath(toSnap))
 
-	out, err := exec.Command("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", psScript).CombinedOutput()
+	cmd := exec.Command("powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", psScript)
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow:    true,
+		CreationFlags: 0x08000000, // CREATE_NO_WINDOW
+	}
+	out, err := cmd.CombinedOutput()
 	text := strings.TrimSpace(string(out))
 	if err != nil {
 		result.Network = &NetworkSection{

@@ -58,8 +58,11 @@ export function StopCaptureWails() {
 export function DecodeHTTPBodyWails(encoding, contentEncoding, body) {
   return window.go.app.App.DecodeHTTPBodyWails(encoding, contentEncoding, body);
 }
-export function LoadHTTPFlowWails(flowFile, flowLine) {
-  return window.go.app.App.LoadHTTPFlowWails(flowFile, flowLine);
+export function InspectPcapFlowWails(snapshotName, flowID, format) {
+  return window.go.app.App.InspectPcapFlowWails(snapshotName, flowID, format);
+}
+export function ListPcapFlowsWails(snapshotName) {
+  return window.go.app.App.ListPcapFlowsWails(snapshotName);
 }
 export function GatewayStatusWails() {
   return window.go.app.App.GatewayStatusWails();

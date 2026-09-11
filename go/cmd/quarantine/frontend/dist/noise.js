@@ -161,6 +161,23 @@ export function isNetworkRequestNoise(entry) {
   return isNetworkHostNoise(entry.host || entry.url || entry.path || '');
 }
 
+const TRAFFIC_NOISE_PROTOS = new Set([
+  'ARP', 'IGMP', 'IGMPV2', 'IGMPV3', 'SSDP', 'AGENT',
+]);
+
+/** Link-local / lab-control chatter for the non-HTTP Traffic tab. */
+export function isTrafficFlowNoise(flow) {
+  if (!flow) return false;
+  const proto = String(flow.protocol || '').toUpperCase();
+  if (TRAFFIC_NOISE_PROTOS.has(proto)) return true;
+  if (flow.srcPort === 9443 || flow.dstPort === 9443) return true;
+  if (proto === 'ICMPV6') return true;
+  const info = String(flow.info || '');
+  if (/wpad/i.test(info) && /LLMNR|NBNS/i.test(proto)) return true;
+  return isNetworkHostNoise(flow.srcIp) || isNetworkHostNoise(flow.dstIp)
+    || (flow.names || []).some((n) => isNetworkHostNoise(n));
+}
+
 export function isNoise(text) {
   if (!text) return false;
   const normalized = normalizePath(text);

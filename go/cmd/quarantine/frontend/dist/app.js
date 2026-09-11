@@ -1,6 +1,7 @@
 import { EventsOn } from './wailsjs/runtime/runtime.js';
 import { filterDiff, isEphemeralTempPath, isUsnLeafPath } from './noise.js';
 import { resolveHttpFlow } from './http_body.js';
+import { renderTraffic, invalidateTrafficCache } from './traffic_view.js';
 import {
   escapeHtml,
   escapeAttr,
@@ -615,6 +616,12 @@ async function preserveEvidence() {
 function showTab(name) {
   document.querySelectorAll('.tabs button').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
   document.querySelectorAll('.panel').forEach((p) => p.classList.toggle('active', p.id === `panel-${name}`));
+  if (name === 'traffic') {
+    renderTrafficPanel().catch((e) => {
+      const panel = $('#panel-traffic');
+      if (panel) setMutedMessage(panel, String(e));
+    });
+  }
 }
 
 function hideNoiseEnabled() {
@@ -1217,6 +1224,7 @@ function renderUsn() {
 }
 
 const NETWORK_DISPLAY_LIMIT = 5000;
+let httpDomainFilter = '';
 
 /** Prefer newest rows when capping so the list bottom matches latest activity. */
 function networkRowsForDisplay(rows, limit = NETWORK_DISPLAY_LIMIT) {
@@ -1228,6 +1236,27 @@ function networkRowsForDisplay(rows, limit = NETWORK_DISPLAY_LIMIT) {
   return { rows: all.slice(offset), offset, capped: true, total: all.length };
 }
 
+function httpRequestHost(r) {
+  const host = String(r?.host || '').trim();
+  if (host) return host;
+  try {
+    if (r?.url) return new URL(r.url).hostname || '';
+  } catch (_) { /* plain path */ }
+  return '';
+}
+
+function httpRequestMatchesDomain(r, q) {
+  const needle = String(q || '').trim().toLowerCase();
+  if (!needle) return true;
+  const host = httpRequestHost(r).toLowerCase();
+  const url = String(r?.url || r?.path || '').toLowerCase();
+  if (!host && !url) return false;
+  return host === needle
+    || host.endsWith(`.${needle}`)
+    || host.includes(needle)
+    || url.includes(needle);
+}
+
 function renderNetwork() {
   const panel = $('#panel-network');
   const d = activeDiff();
@@ -1236,24 +1265,77 @@ function renderNetwork() {
     setMutedMessage(panel, 'No network section in this diff.');
     return;
   }
-  const reqs = net.requests || [];
-  const shown = networkRowsForDisplay(reqs);
+  const prevDomainFocus = document.activeElement?.id === 'http-domain' ? {
+    start: document.activeElement.selectionStart,
+    end: document.activeElement.selectionEnd,
+  } : null;
+  const allReqs = net.requests || [];
+  const filtered = allReqs.filter((r) => httpRequestMatchesDomain(r, httpDomainFilter));
+  const shown = networkRowsForDisplay(filtered);
+  const domains = [...new Set(allReqs.map(httpRequestHost).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b));
   const windowText = net.windowFrom && net.windowTo
     ? `${net.windowFrom} → ${net.windowTo}`
     : 'snapshot capture window';
   panel.replaceChildren();
-  appendMuted(panel, `${windowText} · ${reqs.length} HTTP/proxy`);
+  const countText = httpDomainFilter.trim()
+    ? `${filtered.length} of ${allReqs.length} HTTP/proxy`
+    : `${allReqs.length} HTTP/proxy`;
+  appendMuted(panel, `${windowText} · ${countText}`);
   if (shown.capped) {
     appendMuted(panel, `Showing latest ${shown.rows.length} of ${shown.total} (older rows omitted).`);
   }
-  if (hideNoiseEnabled()) {
-    appendMuted(panel, 'Routine Microsoft / connectivity noise hidden — uncheck Hide routine noise to show all.');
+
+  const bar = document.createElement('div');
+  bar.className = 'traffic-filters';
+  const domainLabel = document.createElement('label');
+  domainLabel.textContent = 'Domain';
+  const domainSel = document.createElement('select');
+  domainSel.id = 'http-domain-select';
+  const allOpt = document.createElement('option');
+  allOpt.value = '';
+  allOpt.textContent = 'All domains';
+  domainSel.appendChild(allOpt);
+  for (const host of domains) {
+    const opt = document.createElement('option');
+    opt.value = host;
+    opt.textContent = host;
+    domainSel.appendChild(opt);
   }
-  if (net.message) {
-    appendMuted(panel, net.message);
+  const exactMatch = domains.find((h) => h.toLowerCase() === httpDomainFilter.trim().toLowerCase());
+  domainSel.value = exactMatch || '';
+  domainSel.addEventListener('change', () => {
+    httpDomainFilter = domainSel.value;
+    renderNetwork();
+  });
+  domainLabel.appendChild(domainSel);
+  bar.appendChild(domainLabel);
+
+  const searchLabel = document.createElement('label');
+  searchLabel.textContent = 'Filter';
+  const searchInput = document.createElement('input');
+  searchInput.type = 'search';
+  searchInput.id = 'http-domain';
+  searchInput.placeholder = 'whatsapp.com, /api/, status…';
+  searchInput.value = httpDomainFilter;
+  searchInput.addEventListener('input', () => {
+    httpDomainFilter = searchInput.value;
+    renderNetwork();
+  });
+  searchLabel.appendChild(searchInput);
+  bar.appendChild(searchLabel);
+  panel.appendChild(bar);
+  if (prevDomainFocus) {
+    searchInput.focus();
+    try { searchInput.setSelectionRange(prevDomainFocus.start, prevDomainFocus.end); } catch (_) { /* ignore */ }
   }
-  if (!reqs.length) {
+
+  if (!allReqs.length) {
     appendMuted(panel, 'No HTTP/proxy requests in this window. DNS is on the DNS tab.');
+    return;
+  }
+  if (!filtered.length) {
+    appendMuted(panel, 'No HTTP/proxy requests match the domain filter.');
     return;
   }
 
@@ -1271,7 +1353,7 @@ function renderNetwork() {
         r.status ?? '',
         r.host || '',
         { text: truncate(r.url || r.path || '', 80), title: r.url || '' },
-        r.t || '',
+        { text: formatListTime(r.t), title: r.t || '' },
       ],
     })),
   );
@@ -1290,7 +1372,7 @@ function renderNetwork() {
       panel.querySelectorAll('.net-req-row.selected').forEach((x) => x.classList.remove('selected'));
       tr.classList.add('selected');
       const idx = Number(tr.getAttribute('data-req-idx'));
-      const r = reqs[idx];
+      const r = filtered[idx];
       const detailEl = panel.querySelector('#net-req-detail');
       if (!detailEl || !r) return;
       detailEl.classList.remove('muted');
@@ -1332,9 +1414,6 @@ function renderDns() {
   if (shown.capped) {
     appendMuted(panel, `Showing latest ${shown.rows.length} of ${shown.total} (older rows omitted).`);
   }
-  if (hideNoiseEnabled()) {
-    appendMuted(panel, 'Routine Microsoft / connectivity noise hidden — uncheck Hide routine noise to show all.');
-  }
   if (!dns.length) {
     appendMuted(panel, 'No DNS / host resolution entries in this window.');
     return;
@@ -1364,6 +1443,19 @@ function renderDns() {
 function truncate(s, n) {
   s = String(s || '');
   return s.length > n ? s.slice(0, n) + '…' : s;
+}
+
+/** Compact UTC time for list columns: nearest second, no fractional noise. */
+function formatListTime(t) {
+  const raw = String(t || '').trim();
+  if (!raw) return '';
+  const m = raw.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})/);
+  if (m) return `${m[1]} ${m[2]}Z`;
+  const d = new Date(raw);
+  if (!Number.isNaN(d.getTime())) {
+    return d.toISOString().replace(/\.\d{3}Z$/, 'Z').replace('T', ' ');
+  }
+  return raw;
 }
 
 function renderHttpFlowPartHtml(title, p) {
@@ -1435,11 +1527,24 @@ async function rerenderDiff() {
   renderUsn();
   renderNetwork();
   renderDns();
+  renderTrafficPanel().catch(() => {});
+}
+
+async function renderTrafficPanel() {
+  const panel = $('#panel-traffic');
+  if (!panel || !panel.classList.contains('active')) return;
+  await renderTraffic(panel, {
+    snapshot: toSnapshot || $('#to-snap')?.value || '',
+    hideNoise: hideNoiseEnabled(),
+    backend,
+  });
 }
 
 async function loadDiff(jsonStr) {
   diffData = JSON.parse(jsonStr);
   toSnapshot = diffData.meta?.toSnapshot || $('#to-snap').value;
+  httpDomainFilter = '';
+  invalidateTrafficCache();
   await rerenderDiff();
 }
 

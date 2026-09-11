@@ -81,7 +81,7 @@ func DecodePart(p *FlowPart) map[string]any {
 		"headers":       p.Headers,
 	}
 	ce := ContentEncodingFromHeaders(p.Headers)
-	if !NeedsDecode(ce) && !BodyLooksGzip(p.Encoding, p.Body) {
+	if !NeedsDecode(ce) && !BodyLooksCompressed(p.Encoding, p.Body) {
 		return out
 	}
 	res := Decode(p.Encoding, ce, p.Body)

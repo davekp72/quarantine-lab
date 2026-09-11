@@ -311,6 +311,7 @@ th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #30363d; }
 
 /* Network HTTP + DNS panels */
 #panel-network.panel.active,
+#panel-traffic.panel.active,
 #panel-dns.panel.active {
   display: flex;
   flex-direction: column;
@@ -415,6 +416,61 @@ th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #30363d; }
   border-radius: 6px;
 }
 #dns-table { width: 100%; }
+
+.traffic-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  align-items: flex-end;
+  margin: 0 0 8px;
+  flex-shrink: 0;
+}
+.traffic-filters label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.traffic-filters select,
+.traffic-filters input[type="search"] {
+  background: #0d1117;
+  color: var(--text);
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 5px 8px;
+  min-width: 140px;
+}
+.traffic-filters input[type="search"] { min-width: 220px; }
+.proto-badge {
+  font-family: Consolas, monospace;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.proto-dns { color: #79c0ff; }
+.proto-mail { color: #ffa657; }
+.proto-ssh { color: #3fb950; }
+.proto-icmp { color: #d2a8ff; }
+.proto-dhcp, .proto-udp { color: #a5d6ff; }
+.proto-svc { color: #ff7b72; }
+.proto-link { color: #8b949e; }
+.proto-tcp { color: #e6edf3; }
+.proto-other { color: #e6edf3; }
+.traffic-modes {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.traffic-modes button {
+  padding: 3px 10px;
+  font-size: 0.78rem;
+}
+.traffic-modes button.active {
+  border-color: #58a6ff;
+  color: #58a6ff;
+}
+.traffic-panes { grid-template-columns: 1fr !important; }
 
 .modal-overlay {
   position: fixed;

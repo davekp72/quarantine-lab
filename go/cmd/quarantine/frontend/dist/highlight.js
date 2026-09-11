@@ -242,6 +242,30 @@
       .join('\n');
   }
 
+  const PROTO_KEYWORDS = /\b(HELO|EHLO|MAIL FROM|RCPT TO|DATA|QUIT|RSET|NOOP|AUTH|STARTTLS|SSH-2\.0|SSH-1\.99|INVITE|NOTIFY|M-SEARCH|HTTP\/1\.[01])\b/gi;
+
+  function highlightProtocol(text, protocol) {
+    const src = String(text ?? '');
+    if (!src) {
+      return { html: escapeHtml('(empty)'), lang: 'plain' };
+    }
+    if (src.length > MAX_HIGHLIGHT) {
+      return { html: escapeHtml(src), lang: 'plain' };
+    }
+    const proto = String(protocol || '').toLowerCase();
+    if (proto === 'json' || src.trim().startsWith('{') || src.trim().startsWith('[')) {
+      return { html: highlightJson(prettyJson(src)), lang: 'json' };
+    }
+    let html = escapeHtml(src);
+    html = html.replace(PROTO_KEYWORDS, '<span class="tok-kw">$1</span>');
+    html = html.replace(/^(\s*)(\d{3})(\s+)/gm, '$1<span class="tok-num">$2</span>$3');
+    html = html.replace(/\b((?:[a-z0-9-]+\.)+[a-z]{2,})\b/gi, '<span class="tok-str">$1</span>');
+    if (/dns|mdns|llmnr|nbns/.test(proto)) {
+      html = html.replace(/\b(A|AAAA|PTR|SRV|TXT|MX|CNAME|SOA|ANY|QM|QR)\b/g, '<span class="tok-key">$1</span>');
+    }
+    return { html, lang: proto || 'plain' };
+  }
+
   function highlightBody(body, contentType) {
     let text = body == null ? '' : String(body);
     if (!text) {
@@ -278,6 +302,7 @@
     detectLang,
     highlightBody,
     highlightHeaders,
-    highlightJson
+    highlightJson,
+    highlightProtocol
   };
 });

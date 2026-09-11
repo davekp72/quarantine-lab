@@ -13,19 +13,54 @@ export function contentEncodingOf(part) {
   return headerValue(part?.headers, 'content-encoding');
 }
 
-function bodyLooksGzip(part) {
+function bodyLooksCompressed(part) {
   const body = String(part?.body ?? '');
   if (body.length < 2) return false;
-  // latin-1 / binary capture: char codes match wire bytes
-  return body.charCodeAt(0) === 0x1f && body.charCodeAt(1) === 0x8b;
+  const b0 = body.charCodeAt(0);
+  const b1 = body.charCodeAt(1);
+  if (b0 === 0x1f && b1 === 0x8b) return true; // gzip
+  if (b0 === 0x1f && b1 === 0x9d) return true; // compress
+  if (body.length >= 3 && b0 === 0x42 && b1 === 0x5a && body.charCodeAt(2) === 0x68) return true; // bzip2
+  if (
+    body.length >= 4 &&
+    b0 === 0x28 &&
+    b1 === 0xb5 &&
+    body.charCodeAt(2) === 0x2f &&
+    body.charCodeAt(3) === 0xfd
+  ) {
+    return true; // zstd
+  }
+  if (
+    body.length >= 4 &&
+    b0 === 0x04 &&
+    b1 === 0x22 &&
+    body.charCodeAt(2) === 0x4d &&
+    body.charCodeAt(3) === 0x18
+  ) {
+    return true; // lz4 frame
+  }
+  if (
+    body.length >= 6 &&
+    b0 === 0xfd &&
+    b1 === 0x37 &&
+    body.charCodeAt(2) === 0x7a &&
+    body.charCodeAt(3) === 0x58 &&
+    body.charCodeAt(4) === 0x5a &&
+    body.charCodeAt(5) === 0x00
+  ) {
+    return true; // xz
+  }
+  // zlib/deflate: CMF=0x08 method, header % 31 == 0
+  if (body.length >= 2 && (b0 & 0x0f) === 8 && (((b0 << 8) | b1) % 31) === 0) return true;
+  return false;
 }
 
 export function needsHttpBodyDecode(part) {
   if (!part || part.body == null || part.body === '') return false;
-  if (bodyLooksGzip(part)) return true;
+  if (bodyLooksCompressed(part)) return true;
   const ce = contentEncodingOf(part).toLowerCase();
   if (!ce || ce === 'identity') return false;
-  return /\b(br|brotli|gzip|x-gzip|deflate)\b/.test(ce);
+  return /\b(br|brotli|gzip|x-gzip|deflate|zstd|compress|x-compress|bzip2|bz2|x-bzip2|lz4|lz4frame|x-lz4|xz|lzma|x-xz|snappy|x-snappy-framed)\b/.test(ce);
 }
 
 /**

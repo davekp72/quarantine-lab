@@ -76,3 +76,35 @@ func TestLoadDiffFileEmptyUsesLastDiffPath(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestEvidencePcapPathRestrictsAndResolves(t *testing.T) {
+	root := t.TempDir()
+	manifestDir := filepath.Join(root, "manifests")
+	netDir := filepath.Join(manifestDir, "Evidence-x-network")
+	if err := os.MkdirAll(netDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pcap := filepath.Join(netDir, "capture.pcap")
+	if err := os.WriteFile(pcap, []byte("pcap"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(root, "other.pcap")
+	if err := os.WriteFile(outside, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a := &App{Cfg: &config.Config{
+		VMDataDir: root,
+		Manifest:  config.ManifestConfig{LogDir: manifestDir},
+	}}
+	got, err := a.evidencePcapPath("Evidence-x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != pcap {
+		t.Fatalf("got %s want %s", got, pcap)
+	}
+	if _, err := a.evidencePcapPath(""); err == nil {
+		t.Fatal("expected error for empty snapshot")
+	}
+	_ = outside
+}
