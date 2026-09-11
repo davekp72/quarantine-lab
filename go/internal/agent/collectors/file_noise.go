@@ -70,6 +70,8 @@ var noisePathParts = []string{
 	`\programdata\microsoft\windows defender\support\`,
 	`\programdata\microsoft\windows\caches\`,
 	`\users\public\quarantine\`,
+	`\programdata\quarantinelab\`,
+	`\program files\quarantinelab\`,
 }
 
 var browserCacheParts = []string{
@@ -91,6 +93,8 @@ var browserCacheParts = []string{
 
 var captureSelfParts = []string{
 	`\users\public\quarantine\`,
+	`\programdata\quarantinelab\`,
+	`\program files\quarantinelab\`,
 	`\hives\`,
 }
 
@@ -245,7 +249,9 @@ func isCaptureSelf(p, n string) bool {
 	if strings.HasPrefix(n, "hklm-") && (strings.HasSuffix(n, ".reg") || strings.HasSuffix(n, ".json")) {
 		return true
 	}
-	return strings.Contains(p, `\users\public\quarantine\`)
+	return strings.Contains(p, `\users\public\quarantine\`) ||
+		strings.Contains(p, `\programdata\quarantinelab\`) ||
+		strings.Contains(p, `\program files\quarantinelab\`)
 }
 
 func isAlwaysSignal(p, n string) bool {

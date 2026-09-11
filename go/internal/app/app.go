@@ -663,19 +663,74 @@ func (a *App) InstallAgentWails() (string, error) {
 		a.logError(err.Error())
 		return "", err
 	}
-	msg := fmt.Sprintf(`Deployed quarantine-agent v%s to guest.
+	msg := fmt.Sprintf(`Deployed quarantine-agent v%s to guest (host token saved).
 
 Run in elevated guest PowerShell:
   %s
 
 Then on the host:
-  .\quarantine-vm.ps1 agent sync-token
   .\quarantine-vm.ps1 agent health
+If health is 401:
+  .\quarantine-vm.ps1 agent sync-token
 `, agenttypes.Version, evidence.AgentInstallInstructions())
 	a.logInfo(msg)
 	if health, err := a.Evidence.AgentHealth(ctx); err == nil {
 		msg += fmt.Sprintf("\n(Current agent v%s reachable — re-run guest script to upgrade service.)", health.Version)
 	}
+	return msg, nil
+}
+
+// ProvisionGuest stages every elevated first-boot helper into the guest and prints the one command to run.
+func (a *App) ProvisionGuest() (string, error) {
+	state, _ := a.VM.VBox.VMState(a.Cfg.VMName)
+	if state != "running" && state != "paused" {
+		return "", fmt.Errorf("VM must be running to provision the guest (state: %s)", state)
+	}
+	var notes []string
+	if a.Cfg.Agent.Enabled {
+		a.logInfo("Staging quarantine-agent…")
+		if err := a.Network.EnsureAgentPortForward(); err != nil {
+			return "", err
+		}
+		if _, err := a.Evidence.DeployAgent(""); err != nil {
+			return "", fmt.Errorf("stage agent: %w", err)
+		}
+		notes = append(notes, "quarantine-agent staged (Install-QuarantineAgent.ps1)")
+	}
+	a.logInfo("Copying elevated guest provision scripts…")
+	copied, skipped, err := a.Evidence.Guest.DeployProvisionFiles(a.Evidence.ProjectRoot)
+	if err != nil {
+		return "", err
+	}
+	dir := a.Cfg.Guest.CopyTargetDir
+	if dir == "" {
+		dir = `C:\Users\Public\Quarantine`
+	}
+	skippedText := "(none)"
+	if len(skipped) > 0 {
+		skippedText = strings.Join(skipped, ", ")
+	}
+	copiedText := "(none)"
+	if len(copied) > 0 {
+		copiedText = strings.Join(copied, ", ")
+	}
+	msg := fmt.Sprintf(`Guest provision files copied to %s
+
+Copied:  %s
+Skipped: %s
+
+In elevated guest PowerShell (Run as administrator):
+
+  Set-ExecutionPolicy -Scope Process Bypass -Force
+  & '%s\Invoke-QuarantineGuestProvision.ps1'
+
+That one script installs the agent (with guestcontrol ACLs), gateway network, mitm CA, Sysmon, event-log grant, and disables autologon when those files were staged.
+Then on the host:  .\quarantine-vm.ps1 agent health
+`, dir, copiedText, skippedText, dir)
+	if len(notes) > 0 {
+		msg = strings.Join(notes, "\n") + "\n\n" + msg
+	}
+	a.logInfo(msg)
 	return msg, nil
 }
 

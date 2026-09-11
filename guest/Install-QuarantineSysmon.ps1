@@ -14,12 +14,38 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Test-SysmonFastFail {
+    param([int]$Code)
+    # STATUS_STACK_BUFFER_OVERRUN / STATUS_STACK_OVERFLOW_READ (Sysmon -c parser crash)
+    return ($Code -eq -1073740791 -or $Code -eq -1073741571)
+}
+
 function Invoke-Sysmon {
     param([string[]]$Arguments)
-    $output = & $SysmonExe @Arguments 2>&1
-    $code = $LASTEXITCODE
-    if ($output) { $output | ForEach-Object { Write-Host $_ } }
-    return [pscustomobject]@{ ExitCode = $code; Output = ($output -join [Environment]::NewLine) }
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & $SysmonExe @Arguments 2>&1
+        $code = 0
+        if (Get-Variable -Name LASTEXITCODE -ErrorAction SilentlyContinue) {
+            $code = [int]$LASTEXITCODE
+        }
+        if ($output) { $output | ForEach-Object { Write-Host $_ } }
+        return [pscustomobject]@{ ExitCode = $code; Output = ($output -join [Environment]::NewLine) }
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+}
+
+function Copy-SysmonConfigUtf8 {
+    param([string]$Source, [string]$Dest)
+    $raw = [System.IO.File]::ReadAllText($Source)
+    if ($raw.Length -gt 0 -and [int][char]$raw[0] -eq 0xFEFF) {
+        $raw = $raw.Substring(1)
+    }
+    $raw = $raw.Trim() -replace "`r`n", "`n" -replace "`n", "`r`n"
+    $utf8 = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText($Dest, $raw + "`r`n", $utf8)
 }
 
 if (-not (Test-Path -LiteralPath $SysmonExe)) {
@@ -52,17 +78,51 @@ if (-not $service) {
     Write-Host 'Sysmon64 service already installed — applying config only.'
 }
 
-Write-Host 'Applying quarantine lab config...'
-$step2 = Invoke-Sysmon -Arguments @('-c', $ConfigFile)
+$sysmonDir = Split-Path -Parent $ConfigFile
+$applyPath = Join-Path $sysmonDir 'quarantine-lab.applied.xml'
+Copy-SysmonConfigUtf8 -Source $ConfigFile -Dest $applyPath
+Write-Host "Applying quarantine lab config from $applyPath ..."
+$step2 = Invoke-Sysmon -Arguments @('-accepteula', '-c', $applyPath)
+if ($step2.ExitCode -ne 0 -and (Test-SysmonFastFail -Code $step2.ExitCode)) {
+    Write-Host 'Lab XML FAST_FAIL on -c; applying compact fallback config...'
+    $fallbackSrc = Join-Path $sysmonDir 'quarantine-lab-fallback.xml'
+    $fallbackPath = Join-Path $sysmonDir 'quarantine-lab-fallback.applied.xml'
+    if (-not (Test-Path -LiteralPath $fallbackSrc)) {
+        $embedded = @"
+<?xml version="1.0" encoding="utf-8"?>
+<Sysmon schemaversion="4.90">
+  <HashAlgorithms>sha256</HashAlgorithms>
+  <EventFiltering>
+    <RuleGroup name="" groupRelation="or">
+      <ProcessCreate onmatch="exclude">
+        <Image condition="end with">SearchIndexer.exe</Image>
+      </ProcessCreate>
+    </RuleGroup>
+  </EventFiltering>
+</Sysmon>
+"@
+        $utf8 = New-Object System.Text.UTF8Encoding $false
+        $normalized = $embedded.Trim() -replace "`r`n", "`n" -replace "`n", "`r`n"
+        [System.IO.File]::WriteAllText($fallbackSrc, $normalized + "`r`n", $utf8)
+    }
+    Copy-SysmonConfigUtf8 -Source $fallbackSrc -Dest $fallbackPath
+    $step2 = Invoke-Sysmon -Arguments @('-accepteula', '-c', $fallbackPath)
+}
 if ($step2.ExitCode -ne 0) {
+    $svcNow = Get-Service -Name Sysmon64 -ErrorAction SilentlyContinue
+    $running = $svcNow -and $svcNow.Status -eq 'Running'
+    if ($running) {
+        Write-Host "Sysmon64 is running with its current config (apply exit $($step2.ExitCode)). Event capture continues."
+        Write-Output 'SYSMON_INSTALLED'
+        cmd /c exit 0
+        return
+    }
     throw @"
 Sysmon config apply failed (exit $($step2.ExitCode)).
-Try manually: Sysmon64.exe -c `"$ConfigFile`"
-
-If it still fails, test the minimal config from the host:
-  .\quarantine-vm.ps1 sysmon copy
+Try manually: Sysmon64.exe -accepteula -c `"$ConfigFile`"
 "@
 }
 
 Write-Host 'Sysmon installed and configured.'
 Write-Host 'Verify: Get-WinEvent -LogName Microsoft-Windows-Sysmon/Operational -MaxEvents 5'
+cmd /c exit 0

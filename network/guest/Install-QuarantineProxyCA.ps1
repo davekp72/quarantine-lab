@@ -46,9 +46,20 @@ function Save-UrlToFile {
         [string]$Dest
     )
     Write-Host "Downloading CA: $Url"
-    & curl.exe --noproxy '*' --http1.1 -fsSL --max-time 15 $Url -o $Dest
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning "Download failed (curl exit $LASTEXITCODE): $Url"
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & curl.exe --noproxy '*' --http1.1 -fsSL --max-time 15 $Url -o $Dest
+        $code = 0
+        if (Get-Variable -Name LASTEXITCODE -ErrorAction SilentlyContinue) {
+            $code = [int]$LASTEXITCODE
+        }
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+    if ($code -ne 0) {
+        # FakeNet/MITM on :80 often returns empty (curl 52). Not a failure if :8080 or a local .cer works.
+        Write-Host "  skip $Url (curl $code)"
         return $false
     }
     return $true
@@ -64,11 +75,9 @@ if (-not $dest) {
 }
 
 $urls = New-Object System.Collections.Generic.List[string]
-# FakeNet HTTP (no MITM listener in sinkhole mode)
-$urls.Add('http://10.66.0.1/mitmproxy-ca-cert.cer')
-# Permissive gateway MITM (explicit + transparent addon)
 $urls.Add('http://10.66.0.1:8080/mitmproxy-ca-cert.cer')
 $urls.Add('http://10.66.0.1:8081/mitmproxy-ca-cert.cer')
+$urls.Add('http://10.66.0.1/mitmproxy-ca-cert.cer')
 if ($ProxyHost) {
     $urls.Add("http://${ProxyHost}:${PacPort}/mitmproxy-ca-cert.cer")
     $urls.Add("http://${ProxyHost}:${ProxyPort}/mitmproxy-ca-cert.cer")
@@ -77,46 +86,45 @@ if ($ProxyHost) {
 $urls.Add('http://10.0.2.2:8081/mitmproxy-ca-cert.cer')
 $urls.Add('http://10.0.2.2:8080/mitmproxy-ca-cert.cer')
 
+$cert = $null
+$source = $null
+
 $localCandidates = @(
     $CaPath,
     (Join-Path $PSScriptRoot 'mitmproxy-ca-cert.cer'),
     'C:\Users\Public\Quarantine\mitmproxy-ca-cert.cer'
 )
 
-$cert = $null
-$source = $null
-
-# Live gateway CA first (FakeNet :80, then permissive MITM). Local export next.
-# 10.0.2.2 is the host proxy CA — wrong issuer for FakeNet HTTPS.
-foreach ($url in $urls) {
-    $tmp = Join-Path $env:TEMP ('qca-{0}.cer' -f [Guid]::NewGuid().ToString('N'))
-    try {
-        if (-not (Save-UrlToFile -Url $url -Dest $tmp)) { continue }
-        $parsed = Test-CaFile -Path $tmp
-        if (-not $parsed) {
-            Write-Warning "Not a certificate: $url"
-            continue
+foreach ($p in $localCandidates) {
+    if ([string]::IsNullOrWhiteSpace($p)) { continue }
+    $parsed = Test-CaFile -Path $p
+    if ($parsed) {
+        if ($p -ne $dest) {
+            Copy-Item -LiteralPath $p -Destination $dest -Force
         }
-        Copy-Item -LiteralPath $tmp -Destination $dest -Force
         $cert = $parsed
-        $source = $url
+        $source = $p
         break
-    } finally {
-        if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
     }
 }
 
+# Explicit MITM :8080, then FakeNet :80. 10.0.2.2 is the host proxy CA — wrong for gateway.
 if (-not $cert) {
-    foreach ($p in $localCandidates) {
-        if ([string]::IsNullOrWhiteSpace($p)) { continue }
-        $parsed = Test-CaFile -Path $p
-        if ($parsed) {
-            if ($p -ne $dest) {
-                Copy-Item -LiteralPath $p -Destination $dest -Force
+    foreach ($url in $urls) {
+        $tmp = Join-Path $env:TEMP ('qca-{0}.cer' -f [Guid]::NewGuid().ToString('N'))
+        try {
+            if (-not (Save-UrlToFile -Url $url -Dest $tmp)) { continue }
+            $parsed = Test-CaFile -Path $tmp
+            if (-not $parsed) {
+                Write-Warning "Not a certificate: $url"
+                continue
             }
+            Copy-Item -LiteralPath $tmp -Destination $dest -Force
             $cert = $parsed
-            $source = $p
+            $source = $url
             break
+        } finally {
+            if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
         }
     }
 }

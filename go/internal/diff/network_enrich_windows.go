@@ -81,7 +81,7 @@ $ev = Get-QuarantineNetworkEvidence -ConfigPath '%s' -From $from -To $to -FromSn
 			DNS:       []map[string]any{},
 			Requests:  []map[string]any{},
 		}
-		mergeSysmonDNS(result, fromCaptured, toCaptured, addedSysmon)
+		finishNetwork(cfgPath, result, fromCaptured, toCaptured, addedSysmon)
 		return
 	}
 	var section NetworkSection
@@ -93,7 +93,7 @@ $ev = Get-QuarantineNetworkEvidence -ConfigPath '%s' -From $from -To $to -FromSn
 			DNS:       []map[string]any{},
 			Requests:  []map[string]any{},
 		}
-		mergeSysmonDNS(result, fromCaptured, toCaptured, addedSysmon)
+		finishNetwork(cfgPath, result, fromCaptured, toCaptured, addedSysmon)
 		return
 	}
 	if section.DNS == nil {
@@ -103,9 +103,16 @@ $ev = Get-QuarantineNetworkEvidence -ConfigPath '%s' -From $from -To $to -FromSn
 		section.Requests = []map[string]any{}
 	}
 	result.Network = &section
+	finishNetwork(cfgPath, result, fromCaptured, toCaptured, addedSysmon)
+}
+
+func finishNetwork(cfgPath string, result *Result, fromCaptured, toCaptured string, addedSysmon []map[string]any) {
 	mergeSysmonDNS(result, fromCaptured, toCaptured, addedSysmon)
-	result.Summary.DNSQueries = len(result.Network.DNS)
-	result.Summary.NetworkRequests = len(result.Network.Requests)
+	attachSnapshotHTTP(cfgPath, result)
+	if result.Network != nil {
+		result.Summary.DNSQueries = len(result.Network.DNS)
+		result.Summary.NetworkRequests = len(result.Network.Requests)
+	}
 }
 
 // mergeSysmonDNS appends Event-22 / DnsQuery rows from Sysmon into result.Network.

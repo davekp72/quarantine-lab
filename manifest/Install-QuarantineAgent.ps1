@@ -11,14 +11,17 @@
     Set-ExecutionPolicy -Scope Process Bypass
     & 'C:\Users\Public\Quarantine\Install-QuarantineAgent.ps1'
 
-  Reads optional settings from C:\Users\Public\Quarantine\agent\agent-install.json (written by host deploy).
+  Copies the staged binary into Program Files, stores the token and config under
+  ProgramData with a SYSTEM + Administrators DACL, and removes leftover Public secrets.
 #>
 [CmdletBinding()]
 param(
-    [string]$InstallDir = 'C:\Users\Public\Quarantine',
+    [string]$StagingDir = 'C:\Users\Public\Quarantine\agent-staging',
+    [string]$InstallDir = 'C:\Program Files\QuarantineLab',
+    [string]$DataDir = 'C:\ProgramData\QuarantineLab',
     [string]$ServiceName = 'QuarantineLabAgent',
-    [string]$ConfigDir = 'C:\Users\Public\Quarantine\agent',
     [int]$WaitSeconds = 45,
+    [string]$Token = '',
     [switch]$UninstallOnly
 )
 
@@ -28,6 +31,27 @@ $ErrorActionPreference = 'Stop'
 function Write-Step {
     param([string]$Message)
     Write-Host "==> $Message" -ForegroundColor Cyan
+}
+
+function Protect-QuarantineAcl {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return
+    }
+    $isDir = (Get-Item -LiteralPath $Path).PSIsContainer
+    $sys = '*S-1-5-18:F'
+    $adm = '*S-1-5-32-544:F'
+    $acct = '{0}\{1}' -f $env:USERDOMAIN, $env:USERNAME
+    $user = $acct + ':(RX)'
+    if ($isDir) {
+        $sys = '*S-1-5-18:(OI)(CI)F'
+        $adm = '*S-1-5-32-544:(OI)(CI)F'
+        $user = $acct + ':(OI)(CI)RX'
+    }
+    $null = icacls.exe $Path /inheritance:r /grant:r $sys $adm $user
+    if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+        throw "icacls failed for $Path (exit $LASTEXITCODE)"
+    }
 }
 
 function Wait-ServiceRemoved {
@@ -85,7 +109,6 @@ function Get-NewestAgentExe {
     $versioned = @(Get-ChildItem -LiteralPath $Dir -Filter 'quarantine-agent-v*.exe' -File -ErrorAction SilentlyContinue)
     if ($PreferVersion) {
         $tag = ($PreferVersion -replace '\.', '-')
-        # Newest build for this version tag (includes -new / deploy-* fallbacks locked by the old service).
         $matched = @($versioned | Where-Object {
                 $_.Name -eq ("quarantine-agent-v{0}.exe" -f $tag) -or
                 $_.Name -like ("quarantine-agent-v{0}-*.exe" -f $tag)
@@ -106,34 +129,55 @@ function Get-NewestAgentExe {
 }
 
 function Read-InstallConfig {
-    param([string]$Dir)
-    $path = Join-Path $Dir 'agent-install.json'
-    if (-not (Test-Path -LiteralPath $path)) {
-        return [pscustomobject]@{}
+    param([string[]]$Paths)
+    foreach ($path in $Paths) {
+        if (Test-Path -LiteralPath $path) {
+            $raw = Get-Content -LiteralPath $path -Raw -Encoding UTF8
+            return ($raw | ConvertFrom-Json)
+        }
     }
-    $raw = Get-Content -LiteralPath $path -Raw -Encoding UTF8
-    return ($raw | ConvertFrom-Json)
+    return [pscustomobject]@{}
 }
 
 function Resolve-Token {
-    param([string]$ConfigDir, $Config)
-    $tokenPath = Join-Path $ConfigDir 'agent-token.txt'
-    if (Test-Path -LiteralPath $tokenPath) {
-        $existing = (Get-Content -LiteralPath $tokenPath -Raw).Trim()
-        if ($existing) {
-            Write-Step "Using existing token from $tokenPath"
-            return $existing
+    param([string]$TokenPath, [string]$Explicit, $Config, [string[]]$SearchPaths = @())
+    if ($Explicit) {
+        Write-Step 'Using token from -Token'
+        return $Explicit.Trim()
+    }
+    foreach ($p in @($TokenPath) + @($SearchPaths)) {
+        if (-not $p) { continue }
+        if (Test-Path -LiteralPath $p) {
+            $existing = (Get-Content -LiteralPath $p -Raw).Trim()
+            if ($existing) {
+                Write-Step "Using existing token from $p"
+                return $existing
+            }
         }
     }
-    if ($Config.token) {
-        $tok = [string]$Config.token
-        Write-Step 'Using token from agent-install.json'
-        return $tok.Trim()
+    if ($Config.PSObject.Properties['token'] -and $Config.token) {
+        Write-Step 'Using token from agent-install.json (legacy)'
+        return ([string]$Config.token).Trim()
     }
     Write-Step 'Generating new bearer token'
     $bytes = New-Object byte[] 32
     [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
     return ([BitConverter]::ToString($bytes) -replace '-', '').ToLowerInvariant()
+}
+
+function Remove-PublicSecrets {
+    $legacy = @(
+        'C:\Users\Public\Quarantine\agent\agent-token.txt',
+        'C:\Users\Public\Quarantine\agent-token.txt',
+        'C:\Users\Public\Quarantine\agent-staging\agent-token.txt',
+        'C:\Users\Public\Quarantine\agent-token-sync.txt'
+    )
+    foreach ($p in $legacy) {
+        if (Test-Path -LiteralPath $p) {
+            Write-Step "Removing leftover public secret $p"
+            Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 Write-Step 'Quarantine Lab Agent install (elevated)'
@@ -145,33 +189,66 @@ if ($UninstallOnly) {
     exit 0
 }
 
-if (-not (Test-Path -LiteralPath $InstallDir)) {
-    throw "Install directory missing: $InstallDir"
-}
-if (-not (Test-Path -LiteralPath $ConfigDir)) {
-    New-Item -ItemType Directory -Path $ConfigDir -Force | Out-Null
-}
+New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+New-Item -ItemType Directory -Path $DataDir -Force | Out-Null
+$gcUser = Join-Path $DataDir 'guestcontrol.user'
+Set-Content -LiteralPath $gcUser -Value (('{0}\{1}' -f $env:USERDOMAIN, $env:USERNAME) + [Environment]::NewLine) -Encoding ASCII -NoNewline
+Protect-QuarantineAcl -Path $InstallDir
+Protect-QuarantineAcl -Path $DataDir
 
-$config = Read-InstallConfig -Dir $ConfigDir
-$preferVer = if ($config.version) { [string]$config.version } else { '' }
+$config = Read-InstallConfig -Paths @(
+    'C:\Users\Public\Quarantine\agent-install.json',
+    'C:\Users\Public\Quarantine\agent\agent-install.json',
+    (Join-Path $DataDir 'agent-install.json')
+)
+$preferVer = if ($config.PSObject.Properties['version'] -and $config.version) { [string]$config.version } else { '' }
 $agentExe = $null
-if ($config.binary) {
+if ($config.PSObject.Properties['binary'] -and $config.binary) {
     $cfgBin = [string]$config.binary
     if (Test-Path -LiteralPath $cfgBin) {
-        Write-Step "Using binary from agent-install.json: $cfgBin"
+        Write-Step "Using staged binary from agent-install.json: $cfgBin"
         $agentExe = $cfgBin
     }
 }
 if (-not $agentExe) {
-    $agentExe = Get-NewestAgentExe -Dir $InstallDir -PreferVersion $preferVer
+    $searchDirs = @($StagingDir, 'C:\Users\Public\Quarantine', $InstallDir)
+    foreach ($dir in $searchDirs) {
+        if (Test-Path -LiteralPath $dir) {
+            try {
+                $agentExe = Get-NewestAgentExe -Dir $dir -PreferVersion $preferVer
+                break
+            } catch {
+                $agentExe = $null
+            }
+        }
+    }
 }
-$token = Resolve-Token -ConfigDir $ConfigDir -Config $config
-$port = if ($config.port) { [int]$config.port } else { 9443 }
-$payloadUser = if ($config.payloadUser) { [string]$config.payloadUser } else { 'jkcooper' }
-$sysmonLog = if ($config.sysmonLog) { [string]$config.sysmonLog } else { 'Microsoft-Windows-Sysmon/Operational' }
+if (-not $agentExe) {
+    throw "No quarantine-agent binary found. Run 'quarantine agent install' on the host first."
+}
 
-Write-Step "Installing from $agentExe"
-Write-Host "    Selected binary LastWriteTime: $((Get-Item -LiteralPath $agentExe).LastWriteTime)"
+$tokenPath = Join-Path $DataDir 'agent-token.txt'
+$token = Resolve-Token -TokenPath $tokenPath -Explicit $Token -Config $config -SearchPaths @(
+    'C:\Users\Public\Quarantine\agent-staging\agent-token.txt',
+    'C:\Users\Public\Quarantine\agent\agent-token.txt',
+    'C:\Users\Public\Quarantine\agent-token.txt'
+)
+$port = if ($config.PSObject.Properties['port'] -and $config.port) { [int]$config.port } else { 9443 }
+$payloadUser = if ($config.PSObject.Properties['payloadUser'] -and $config.payloadUser) { [string]$config.payloadUser } else { 'jkcooper' }
+$sysmonLog = if ($config.PSObject.Properties['sysmonLog'] -and $config.sysmonLog) { [string]$config.sysmonLog } else { 'Microsoft-Windows-Sysmon/Operational' }
+
+$finalExe = Join-Path $InstallDir 'quarantine-agent.exe'
+Write-Step "Installing service binary $finalExe"
+Copy-Item -LiteralPath $agentExe -Destination $finalExe -Force
+Protect-QuarantineAcl -Path $finalExe
+Protect-QuarantineAcl -Path $InstallDir
+
+Set-Content -LiteralPath $tokenPath -Value ($token.Trim() + [Environment]::NewLine) -Encoding ASCII -NoNewline
+Protect-QuarantineAcl -Path $tokenPath
+Remove-PublicSecrets
+
+Write-Step "Installing from $finalExe"
+Write-Host "    Selected binary LastWriteTime: $((Get-Item -LiteralPath $finalExe).LastWriteTime)"
 $installArgs = @(
     'install',
     "-token=$token",
@@ -179,25 +256,31 @@ $installArgs = @(
     "-payload-user=$payloadUser",
     "-sysmon-log=$sysmonLog"
 )
-& $agentExe @installArgs
+& $finalExe @installArgs
 if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
     throw "Agent install failed with exit code $LASTEXITCODE"
 }
 
-$tokenPath = Join-Path $ConfigDir 'agent-token.txt'
-Set-Content -LiteralPath $tokenPath -Value ($token.Trim() + [Environment]::NewLine) -Encoding ASCII -NoNewline
-Write-Step "Token saved to $tokenPath"
+Protect-QuarantineAcl -Path $DataDir
+Protect-QuarantineAcl -Path $InstallDir
+Remove-PublicSecrets
 
 Start-Sleep -Seconds 2
 $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if (-not $svc -or $svc.Status -ne 'Running') {
-    throw "Service $ServiceName is not running after install. Check $ConfigDir\agent.log"
+    throw "Service $ServiceName is not running after install. Check $DataDir\agent.log"
 }
 
 Write-Host ''
 Write-Host 'Quarantine Lab Agent installed successfully.' -ForegroundColor Green
 Write-Host "  Service : $ServiceName (Running)"
-Write-Host "  Binary  : $agentExe"
+Write-Host "  Binary  : $finalExe"
+Write-Host "  Data    : $DataDir (SYSTEM + Administrators DACL)"
 Write-Host "  Token   : $tokenPath"
+Write-Host "  Bearer  : $token"
 Write-Host ''
-Write-Host 'On the host run:  .\quarantine-vm.ps1 agent sync-token' -ForegroundColor Yellow
+Write-Host 'On the host, the token from "quarantine agent install" should already match. Try:' -ForegroundColor Yellow
+Write-Host '  .\quarantine-vm.ps1 agent health'
+Write-Host 'If health is 401, sync or paste this bearer token:' -ForegroundColor Yellow
+Write-Host '  .\quarantine-vm.ps1 agent sync-token'
+Write-Host "  .\quarantine-vm.ps1 agent set-token --token $token"

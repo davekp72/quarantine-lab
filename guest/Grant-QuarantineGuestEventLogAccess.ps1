@@ -208,19 +208,47 @@ try {
     }
 }
 
-$baseline = 'C:\Users\Public\Quarantine\usn-baseline.json'
-if (Test-Path -LiteralPath $baseline) {
-    $b = Get-Content -LiteralPath $baseline -Raw | ConvertFrom-Json
-    $start = [string]$b.startUsn
-    $usnOut = & fsutil.exe usn readjournal C: csv "startusn=$start" 2>&1
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host 'USN journal read OK (fsutil readjournal).'
-    } else {
-        Write-Warning "USN readjournal still denied: $($usnOut -join ' ')"
-        Write-Warning 'Reboot the guest so privilege changes apply, then run this script again.'
+function Get-NativeExitCode {
+    if (Get-Variable -Name LASTEXITCODE -ErrorAction SilentlyContinue) {
+        return [int]$LASTEXITCODE
     }
+    return 0
+}
+
+function Invoke-UsnReadJournal {
+    param([string]$StartUsn)
+    $out = & fsutil.exe usn readjournal C: csv "startusn=$StartUsn" 2>&1
+    return [pscustomobject]@{ ExitCode = (Get-NativeExitCode); Output = @($out) }
+}
+
+$queryOut = & fsutil.exe usn queryjournal C: 2>&1
+$queryCode = Get-NativeExitCode
+$queryText = @($queryOut) -join ' '
+if ($queryCode -ne 0 -or $queryText -match 'Access is denied|Error:\s*5\b') {
+    Write-Warning "USN queryjournal failed (exit $queryCode): $queryText"
+    Write-Warning 'Reboot the guest so SeBackupPrivilege applies, then run this script again.'
 } else {
-    Write-Host 'No usn-baseline.json yet - USN check skipped (run reset -Clean on the host after grant).'
+    Write-Host 'USN journal query OK (privileges work).'
+    $baseline = 'C:\Users\Public\Quarantine\usn-baseline.json'
+    if (Test-Path -LiteralPath $baseline) {
+        $b = Get-Content -LiteralPath $baseline -Raw | ConvertFrom-Json
+        $start = [string]$b.startUsn
+        $read = Invoke-UsnReadJournal -StartUsn $start
+        $readText = $read.Output -join ' '
+        if ($read.ExitCode -eq 0) {
+            Write-Host 'USN readjournal from baseline OK.'
+        } elseif ($readText -match '1181|deleted from the journal') {
+            Write-Host 'USN baseline start USN is stale (journal wrapped / Error 1181). Privileges are fine; host reset -Clean will refresh usn-baseline.json.'
+        } elseif ($readText -match 'Access is denied|Error:\s*5\b') {
+            Write-Warning "USN readjournal access denied: $readText"
+            Write-Warning 'Reboot the guest so SeBackupPrivilege applies, then run this script again.'
+        } else {
+            Write-Warning "USN readjournal failed (exit $($read.ExitCode)): $readText"
+        }
+    } else {
+        Write-Host 'No usn-baseline.json yet - read check skipped (run reset -Clean on the host after grant).'
+    }
 }
 
 Write-Output 'GRANT_OK'
+cmd /c exit 0

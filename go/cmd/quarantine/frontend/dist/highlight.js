@@ -3,15 +3,16 @@
  * No external deps — safe for offline Wails builds.
  */
 (function (root, factory) {
+  const api = factory();
   if (typeof module === 'object' && module.exports) {
-    module.exports = factory();
-  } else {
-    root.QuarantineHighlight = factory();
+    module.exports = api;
   }
+  // Always expose the global for <script src="highlight.js"> (Wails / viewer).
+  root.QuarantineHighlight = api;
 })(typeof globalThis !== 'undefined' ? globalThis : window, function () {
   'use strict';
 
-  const MAX_HIGHLIGHT = 200000;
+  const MAX_HIGHLIGHT = 2 << 20; // match Go httpbody maxDecodedBytes (2 MiB)
 
   function escapeHtml(s) {
     return String(s ?? '')
@@ -25,19 +26,21 @@
   function detectLang(contentType, body) {
     const ct = String(contentType || '').toLowerCase();
     const text = String(body || '').trim();
+    const lower = text.slice(0, 200).toLowerCase();
     if (ct.includes('json') || ct.includes('+json')) return 'json';
-    if (ct.includes('html')) return 'html';
+    if (ct.includes('html') || ct.includes('xhtml')) return 'html';
     if (ct.includes('xml') || ct.includes('svg')) return 'xml';
     if (ct.includes('javascript') || ct.includes('ecmascript')) return 'js';
     if (ct.includes('css')) return 'css';
     if (ct.includes('x-www-form-urlencoded')) return 'form';
-    if (ct.includes('text/plain') || ct.includes('text/')) {
-      if (text.startsWith('{') || text.startsWith('[')) return 'json';
-      if (text.startsWith('<')) return text.toLowerCase().includes('<!doctype html') || /<html[\s>]/i.test(text) ? 'html' : 'xml';
+    if (text.startsWith('{') || text.startsWith('[')) {
+      if (ct.includes('text/') || !ct) return 'json';
     }
-    if (!ct) {
-      if ((text.startsWith('{') && text.endsWith('}')) || (text.startsWith('[') && text.endsWith(']'))) return 'json';
-      if (text.startsWith('<')) return 'html';
+    if (text.startsWith('<')) {
+      if (lower.includes('<!doctype html') || /<html[\s>]/.test(lower) || /<(div|span|body|head|script|style|meta|link|p|a|img|table|form)\b/.test(lower)) {
+        return 'html';
+      }
+      if (ct.includes('text/') || ct.includes('xml') || !ct) return 'xml';
     }
     return 'plain';
   }
@@ -117,15 +120,106 @@
   }
 
   function highlightMarkup(src) {
-    return escapeHtml(src)
-      .replace(/(&lt;!--[\s\S]*?--&gt;)/g, '<span class="tok-comment">$1</span>')
-      .replace(/(&lt;\/?)([\w:.-]+)([^&]*?)(\/?&gt;)/g, (_, open, name, rest, close) => {
-        const attrs = rest.replace(
-          /([\w:.-]+)(=)(&quot;[\s\S]*?&quot;|&#39;[\s\S]*?&#39;|[^\s&]+)/g,
-          '<span class="tok-attr">$1</span>$2<span class="tok-str">$3</span>'
-        );
-        return `${open}<span class="tok-tag">${name}</span>${attrs}${close}`;
-      });
+    // Tokenize on the raw string, then escape. Regex-on-escaped HTML fails on
+    // attributes because &quot; / &#39; contain '&' and break [^&]* matchers.
+    const out = [];
+    let i = 0;
+    const s = String(src);
+    while (i < s.length) {
+      if (s.startsWith('<!--', i)) {
+        let j = s.indexOf('-->', i + 4);
+        j = j < 0 ? s.length : j + 3;
+        out.push(`<span class="tok-comment">${escapeHtml(s.slice(i, j))}</span>`);
+        i = j;
+        continue;
+      }
+      if (s[i] === '<' && (s[i + 1] === '!' || s[i + 1] === '?')) {
+        let j = s.indexOf('>', i + 2);
+        j = j < 0 ? s.length : j + 1;
+        out.push(`<span class="tok-comment">${escapeHtml(s.slice(i, j))}</span>`);
+        i = j;
+        continue;
+      }
+      if (s[i] === '<' && (s[i + 1] === '/' || /[A-Za-z]/.test(s[i + 1] || ''))) {
+        out.push(`<span class="tok-punc">${escapeHtml('<')}</span>`);
+        i++;
+        if (s[i] === '/') {
+          out.push(`<span class="tok-punc">${escapeHtml('/')}</span>`);
+          i++;
+        }
+        let j = i;
+        while (j < s.length && /[\w:.-]/.test(s[j])) j++;
+        if (j > i) {
+          out.push(`<span class="tok-tag">${escapeHtml(s.slice(i, j))}</span>`);
+          i = j;
+        }
+        while (i < s.length && s[i] !== '>') {
+          if (/\s/.test(s[i])) {
+            out.push(escapeHtml(s[i]));
+            i++;
+            continue;
+          }
+          if (s[i] === '/' && s[i + 1] === '>') {
+            out.push(`<span class="tok-punc">${escapeHtml('/')}</span>`);
+            i++;
+            break;
+          }
+          j = i;
+          while (j < s.length && /[\w:.-]/.test(s[j])) j++;
+          if (j === i) {
+            out.push(escapeHtml(s[i]));
+            i++;
+            continue;
+          }
+          out.push(`<span class="tok-attr">${escapeHtml(s.slice(i, j))}</span>`);
+          i = j;
+          while (i < s.length && /\s/.test(s[i])) {
+            out.push(escapeHtml(s[i]));
+            i++;
+          }
+          if (s[i] !== '=') continue;
+          out.push(`<span class="tok-punc">=</span>`);
+          i++;
+          while (i < s.length && /\s/.test(s[i])) {
+            out.push(escapeHtml(s[i]));
+            i++;
+          }
+          const q = s[i];
+          if (q === '"' || q === "'") {
+            j = i + 1;
+            while (j < s.length && s[j] !== q) j++;
+            if (j < s.length) j++;
+            out.push(`<span class="tok-str">${escapeHtml(s.slice(i, j))}</span>`);
+            i = j;
+            continue;
+          }
+          j = i;
+          while (j < s.length && !/[\s>]/.test(s[j]) && !(s[j] === '/' && s[j + 1] === '>')) j++;
+          if (j > i) {
+            out.push(`<span class="tok-str">${escapeHtml(s.slice(i, j))}</span>`);
+            i = j;
+          }
+        }
+        if (s[i] === '>') {
+          out.push(`<span class="tok-punc">${escapeHtml('>')}</span>`);
+          i++;
+        }
+        continue;
+      }
+      if (s[i] === '<') {
+        out.push(escapeHtml('<'));
+        i++;
+        continue;
+      }
+      let j = s.indexOf('<', i);
+      if (j < 0) j = s.length;
+      out.push(escapeHtml(s.slice(i, j)).replace(
+        /(&amp;(?:#\d+|#x[\da-fA-F]+|[\w.:-]+);)/g,
+        '<span class="tok-kw">$1</span>'
+      ));
+      i = j;
+    }
+    return out.join('');
   }
 
   function highlightJs(src) {
@@ -271,30 +365,41 @@
     if (!text) {
       return { html: escapeHtml('(empty body)'), lang: 'plain', pretty: false };
     }
+    let highlightTruncated = false;
     if (text.length > MAX_HIGHLIGHT) {
-      return { html: escapeHtml(text), lang: 'plain', pretty: false };
+      // Still color the leading window; do not drop highlighting entirely
+      // (Wikipedia pages often land just over a small cap).
+      text = text.slice(0, MAX_HIGHLIGHT);
+      highlightTruncated = true;
     }
     let lang = detectLang(contentType, text);
     let pretty = false;
+    let html;
     if (lang === 'json') {
       const prettyText = prettyJson(text);
       if (prettyText !== text) pretty = true;
       text = prettyText;
-      return { html: highlightJson(text), lang, pretty };
+      if (text.length > MAX_HIGHLIGHT) {
+        text = text.slice(0, MAX_HIGHLIGHT);
+        highlightTruncated = true;
+      }
+      html = highlightJson(text);
+    } else if (lang === 'html' || lang === 'xml') {
+      html = highlightMarkup(text);
+    } else if (lang === 'js') {
+      html = highlightJs(text);
+    } else if (lang === 'css') {
+      html = highlightCss(text);
+    } else if (lang === 'form') {
+      html = highlightForm(text);
+    } else {
+      html = escapeHtml(text);
+      lang = 'plain';
     }
-    if (lang === 'html' || lang === 'xml') {
-      return { html: highlightMarkup(text), lang, pretty };
+    if (highlightTruncated) {
+      html += `\n<span class="tok-comment">${escapeHtml('… [highlight truncated]')}</span>`;
     }
-    if (lang === 'js') {
-      return { html: highlightJs(text), lang, pretty };
-    }
-    if (lang === 'css') {
-      return { html: highlightCss(text), lang, pretty };
-    }
-    if (lang === 'form') {
-      return { html: highlightForm(text), lang, pretty };
-    }
-    return { html: escapeHtml(text), lang: 'plain', pretty: false };
+    return { html, lang, pretty };
   }
 
   return {

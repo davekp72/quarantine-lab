@@ -127,7 +127,7 @@
     "port": 9443,
     "tokenFile": "D:\\Vbox\\LabVM\\secrets\\agent-token.txt",
     "natRuleName": "quarantine-agent",
-    "installPath": "C:\\Users\\Public\\Quarantine\\quarantine-agent.exe"
+    "installPath": "C:\\Users\\Public\\Quarantine\\agent-staging\\quarantine-agent.exe"
   },
   "ui": {
     "warnPublicIpBeforeLaunch": true,

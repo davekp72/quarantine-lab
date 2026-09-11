@@ -169,6 +169,11 @@ func USNDelta(baselineRaw json.RawMessage, maxEvents int) (json.RawMessage, int,
 		if t, err := time.Parse(time.RFC3339, baselineAt); err == nil {
 			timeFloor = t.Add(-10 * time.Minute)
 		}
+	} else if info.FirstUsn > 0 && startUsn < uint64(info.FirstUsn) {
+		warnings = append(warnings,
+			"USN baseline start was deleted from the journal (wrapped). Reading from FirstUsn; early changes may be missing. Re-mark with reset -Clean.")
+		readStart = uint64(info.FirstUsn)
+		readStartStr = fmt.Sprintf("0x%016x", readStart)
 	} else if endUsn == startUsn {
 		out, _ := json.Marshal(map[string]any{
 			"available":  true,
@@ -189,7 +194,7 @@ func USNDelta(baselineRaw json.RawMessage, maxEvents int) (json.RawMessage, int,
 		return nil, 0, err
 	}
 	filterStart := startUsn
-	if endUsn < startUsn {
+	if endUsn < startUsn || (info.FirstUsn > 0 && startUsn < uint64(info.FirstUsn)) {
 		filterStart = 0
 	}
 	events, noise, skipped := FinalizeUSNEvents(volume, rawEvents, filterStart, timeFloor)

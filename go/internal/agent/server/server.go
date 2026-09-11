@@ -13,6 +13,7 @@ import (
 
 	"github.com/quarantine-lab/quarantine/internal/agent/capture"
 	"github.com/quarantine-lab/quarantine/internal/agent/collectors"
+	"github.com/quarantine-lab/quarantine/internal/agent/guestpaths"
 	"github.com/quarantine-lab/quarantine/internal/agent/types"
 )
 
@@ -20,11 +21,11 @@ const defaultPort = 9443
 
 // Server is the guest HTTP API.
 type Server struct {
-	Token       string
-	Config      types.AgentConfig
-	started     time.Time
-	mu          sync.Mutex
-	httpServer  *http.Server
+	Token      string
+	Config     types.AgentConfig
+	started    time.Time
+	mu         sync.Mutex
+	httpServer *http.Server
 }
 
 func New(token string, cfg types.AgentConfig) *Server {
@@ -39,6 +40,7 @@ func (s *Server) ListenAndServe() error {
 	mux.HandleFunc("/health", s.auth(s.handleHealth))
 	mux.HandleFunc("/v1/baseline", s.auth(s.handleBaseline))
 	mux.HandleFunc("/v1/capture", s.auth(s.handleCapture))
+	mux.HandleFunc("/v1/hives", s.auth(s.handleHives))
 
 	addr := fmt.Sprintf(":%d", s.Config.Port)
 	s.httpServer = &http.Server{
@@ -133,6 +135,74 @@ func (s *Server) handleCapture(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSONCompact(w, resp)
+}
+
+func (s *Server) handleHives(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.serveHiveFile(w, r)
+	case http.MethodDelete:
+		s.deleteHiveDir(w, r)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) serveHiveFile(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimSpace(r.URL.Query().Get("path"))
+	if path == "" {
+		snap := r.URL.Query().Get("snapshot")
+		name := r.URL.Query().Get("file")
+		resolved, err := guestpaths.HiveFilePath(snap, name)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		path = resolved
+	}
+	if !guestpaths.IsHivePath(path) {
+		http.Error(w, "refusing path outside hive root", http.StatusForbidden)
+		return
+	}
+	st, err := os.Lstat(path)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if st.Mode()&os.ModeSymlink != 0 || st.IsDir() {
+		http.Error(w, "hive path must be a regular file", http.StatusForbidden)
+		return
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer f.Close()
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", st.Size()))
+	_, _ = io.Copy(w, f)
+}
+
+func (s *Server) deleteHiveDir(w http.ResponseWriter, r *http.Request) {
+	dir := strings.TrimSpace(r.URL.Query().Get("dir"))
+	if dir == "" {
+		snap := strings.TrimSpace(r.URL.Query().Get("snapshot"))
+		if snap == "" {
+			http.Error(w, "dir or snapshot is required", http.StatusBadRequest)
+			return
+		}
+		dir = guestpaths.HiveDir(snap)
+	}
+	if !guestpaths.ShouldDeleteHiveDir(dir) {
+		http.Error(w, "refusing to delete path outside hive roots", http.StatusForbidden)
+		return
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

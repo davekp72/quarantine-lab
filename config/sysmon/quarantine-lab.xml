@@ -1,38 +1,15 @@
-<!--
-  Sysmon 15.21 lab config (schema 4.91)
-  Validate:  Sysmon64.exe -c quarantine-lab.xml
-  Install:   see Install-QuarantineSysmon.ps1 (install service first, then apply config)
--->
-<Sysmon schemaversion="4.91">
-  <HashAlgorithms>sha256,IMPHASH</HashAlgorithms>
-  <CheckRevocation>false</CheckRevocation>
+<?xml version="1.0" encoding="utf-8"?>
+<Sysmon schemaversion="4.90">
+  <HashAlgorithms>sha256</HashAlgorithms>
   <EventFiltering>
-
-    <RuleGroup name="ProcessCreate" groupRelation="or">
+    <RuleGroup name="" groupRelation="or">
       <ProcessCreate onmatch="exclude">
-        <Image condition="is">C:\Program Files\Sysmon\Sysmon64.exe</Image>
-        <Image condition="is">C:\Windows\System32\SearchIndexer.exe</Image>
-      </ProcessCreate>
-      <ProcessCreate onmatch="include">
-        <Image condition="end with">.exe</Image>
-        <Image condition="end with">.scr</Image>
-        <Image condition="end with">.bat</Image>
-        <Image condition="end with">.cmd</Image>
-        <Image condition="end with">.ps1</Image>
-        <Image condition="end with">.vbs</Image>
-        <Image condition="end with">.js</Image>
-        <Image condition="end with">.hta</Image>
-        <Image condition="end with">.msi</Image>
+        <Image condition="end with">Sysmon64.exe</Image>
+        <Image condition="end with">SearchIndexer.exe</Image>
+        <Image condition="end with">MsMpEng.exe</Image>
       </ProcessCreate>
     </RuleGroup>
-
-    <RuleGroup name="NetworkConnect" groupRelation="or">
-      <NetworkConnect onmatch="exclude">
-        <Image condition="is">C:\Windows\System32\svchost.exe</Image>
-        <DestinationIp condition="begin with">127.</DestinationIp>
-        <DestinationIp condition="is">10.0.2.2</DestinationIp>
-        <DestinationIp condition="is">10.0.2.3</DestinationIp>
-      </NetworkConnect>
+    <RuleGroup name="" groupRelation="or">
       <NetworkConnect onmatch="include">
         <DestinationPort condition="is">443</DestinationPort>
         <DestinationPort condition="is">80</DestinationPort>
@@ -41,70 +18,18 @@
         <DestinationPort condition="is">8080</DestinationPort>
       </NetworkConnect>
     </RuleGroup>
-
-    <RuleGroup name="DnsQuery" groupRelation="or">
+    <RuleGroup name="" groupRelation="or">
       <DnsQuery onmatch="exclude">
         <QueryName condition="end with">.local</QueryName>
         <QueryName condition="end with">.lan</QueryName>
-        <QueryName condition="end with">.internal</QueryName>
       </DnsQuery>
     </RuleGroup>
-
-    <!-- All file create / delete / modify (creation-time change) on C:\ -->
-    <RuleGroup name="FileCreate" groupRelation="or">
+    <RuleGroup name="" groupRelation="or">
       <FileCreate onmatch="include">
-        <TargetFilename condition="begin with">C:\</TargetFilename>
+        <TargetFilename condition="begin with">C:\Users\</TargetFilename>
+        <TargetFilename condition="begin with">C:\ProgramData\</TargetFilename>
+        <TargetFilename condition="begin with">C:\Windows\Temp\</TargetFilename>
       </FileCreate>
     </RuleGroup>
-
-    <RuleGroup name="FileCreateStream" groupRelation="or">
-      <FileCreateStream onmatch="include">
-        <TargetFilename condition="begin with">C:\</TargetFilename>
-      </FileCreateStream>
-    </RuleGroup>
-
-    <RuleGroup name="FileDelete" groupRelation="or">
-      <FileDelete onmatch="include">
-        <TargetFilename condition="begin with">C:\</TargetFilename>
-      </FileDelete>
-    </RuleGroup>
-
-    <RuleGroup name="FileDeleteDetected" groupRelation="or">
-      <FileDeleteDetected onmatch="include">
-        <TargetFilename condition="begin with">C:\</TargetFilename>
-      </FileDeleteDetected>
-    </RuleGroup>
-
-    <RuleGroup name="FileCreateTime" groupRelation="or">
-      <FileCreateTime onmatch="include">
-        <TargetFilename condition="begin with">C:\</TargetFilename>
-      </FileCreateTime>
-    </RuleGroup>
-
-    <RuleGroup name="RegistryEvent" groupRelation="or">
-      <RegistryEvent onmatch="include">
-        <TargetObject condition="contains">CurrentVersion\Run</TargetObject>
-        <TargetObject condition="contains">CurrentVersion\RunOnce</TargetObject>
-        <TargetObject condition="contains">Winlogon</TargetObject>
-        <TargetObject condition="contains">Software\Microsoft\Feeds</TargetObject>
-        <TargetObject condition="contains">CurrentControlSet\Services</TargetObject>
-      </RegistryEvent>
-    </RuleGroup>
-
-    <RuleGroup name="ImageLoad" groupRelation="or">
-      <ImageLoad onmatch="include">
-        <ImageLoaded condition="contains">Users\Public</ImageLoaded>
-        <ImageLoaded condition="contains">AppData</ImageLoaded>
-        <ImageLoaded condition="contains">ProgramData</ImageLoaded>
-        <ImageLoaded condition="contains">Windows\Temp</ImageLoaded>
-      </ImageLoad>
-    </RuleGroup>
-
-    <RuleGroup name="DriverLoad" groupRelation="or">
-      <DriverLoad onmatch="include">
-        <Signed condition="is">false</Signed>
-      </DriverLoad>
-    </RuleGroup>
-
   </EventFiltering>
 </Sysmon>

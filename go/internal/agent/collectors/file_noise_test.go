@@ -18,6 +18,8 @@ func TestClassifyFileNoise(t *testing.T) {
 		{`C:\Users\jkcooper\AppData\Local\Temp\foo.txt`, "foo.txt", "temp"},
 		{`C:\Windows\Prefetch\NOTEPAD.EXE-123.pf`, "NOTEPAD.EXE-123.pf", "os_telemetry"},
 		{`C:\Users\Public\Quarantine\hives\SOFTWARE`, "SOFTWARE", "capture"},
+		{`C:\ProgramData\QuarantineLab\hives\SOFTWARE`, "SOFTWARE", "capture"},
+		{`C:\Program Files\QuarantineLab\quarantine-agent.exe`, "quarantine-agent.exe", "capture"},
 		{`C:\Users\Public\Quarantine\hklm-registry-cli\hklm-HKLM_Software.reg`, "hklm-HKLM_Software.reg", "capture"},
 		{`C:\Windows\System32\config\systemprofile\AppData\Local\x.dat`, "x.dat", "os_telemetry"},
 		{`C:\Users\jkcooper\AppData\Local\Microsoft\Windows\INetCache\foo`, "foo", "os_telemetry"},

@@ -790,6 +790,22 @@ func guestCmd(cfgPath *string) *cobra.Command {
 	cmd.AddCommand(copyC)
 
 	cmd.AddCommand(&cobra.Command{
+		Use:   "provision",
+		Short: "Stage all elevated first-boot scripts (agent, ACLs, gateway, Sysmon) into the guest",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			a, err := app.New(*cfgPath)
+			if err != nil {
+				return err
+			}
+			msg, err := a.ProvisionGuest()
+			if err != nil {
+				return err
+			}
+			fmt.Println(msg)
+			return nil
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
 		Use:   "gateway-setup",
 		Short: "Upload gateway commission scripts + CA into the lab guest",
 		RunE: func(cmd *cobra.Command, args []string) error {

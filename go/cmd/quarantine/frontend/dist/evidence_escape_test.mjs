@@ -11,7 +11,12 @@ import {
 } from './safe_dom.js';
 
 const require = createRequire(import.meta.url);
-const highlight = require('./highlight.js');
+require('./highlight.js');
+const highlight = globalThis.QuarantineHighlight;
+if (!highlight || typeof highlight.highlightBody !== 'function') {
+  console.error('FAIL: QuarantineHighlight.highlightBody missing after loading highlight.js');
+  process.exit(1);
+}
 
 const XSS_PAYLOADS = [
   '<img src=x onerror=alert(1)>',
@@ -44,6 +49,28 @@ for (const payload of XSS_PAYLOADS) {
   const hl = highlight.highlightBody(payload, 'text/html');
   assert(!hl.html.includes('<img src'), `highlightBody must escape HTML body: ${hl.html}`);
   assert(!/onerror\s*=/i.test(hl.html.replace(/&[a-z]+;/gi, '')), `highlightBody must not leave raw onerror: ${hl.html}`);
+}
+
+{
+  const sample = '<!DOCTYPE html><div class="foo" id=\'bar\' data-x=1>hi &amp; bye</div><!-- note --><br/>';
+  const hl = highlight.highlightBody(sample, 'text/html; charset=utf-8');
+  assert(hl.lang === 'html', `expected html lang, got ${hl.lang}`);
+  assert(hl.html.includes('tok-tag'), `HTML tags should highlight: ${hl.html}`);
+  assert(hl.html.includes('tok-attr'), `HTML attrs should highlight: ${hl.html}`);
+  assert(hl.html.includes('tok-str'), `HTML attr values should highlight: ${hl.html}`);
+  assert(hl.html.includes('tok-comment'), `HTML comments/doctype should highlight: ${hl.html}`);
+  assert(hl.html.includes('&lt;div') || hl.html.includes('tok-tag">div'), `escaped open tag present: ${hl.html}`);
+  assert(!hl.html.includes('<div class='), 'raw HTML tag must not survive highlighting');
+}
+
+{
+  // Wikipedia-sized bodies previously skipped highlighting at 200KB.
+  const big = `<!DOCTYPE html><html><body>${'<p class="x">hi</p>'.repeat(12000)}</body></html>`;
+  assert(big.length > 200000, `fixture should exceed old cap (${big.length})`);
+  const hl = highlight.highlightBody(big, 'text/html; charset=UTF-8');
+  assert(hl.lang === 'html', `large HTML lang=${hl.lang}`);
+  assert(hl.html.includes('tok-tag'), 'large HTML should still highlight tags');
+  assert(hl.html.includes('tok-attr'), 'large HTML should still highlight attrs');
 }
 
 // DOM table path: textContent must preserve payload as text, not nodes.

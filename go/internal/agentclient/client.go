@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -58,6 +61,63 @@ func (c *Client) Capture(ctx context.Context, req types.CaptureRequest) (*types.
 		return nil, err
 	}
 	return &out, nil
+}
+
+func (c *Client) DownloadHive(ctx context.Context, guestPath, dest string) error {
+	u := c.BaseURL + "/v1/hives?path=" + url.QueryEscape(guestPath)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return fmt.Errorf("agent hive download: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		msg := strings.TrimSpace(string(data))
+		if msg == "" {
+			msg = resp.Status
+		}
+		return fmt.Errorf("agent HTTP %d: %s", resp.StatusCode, msg)
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return err
+	}
+	f, err := os.Create(dest)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		return fmt.Errorf("write hive %s: %w", dest, err)
+	}
+	return nil
+}
+
+func (c *Client) DeleteHiveDir(ctx context.Context, guestDir string) error {
+	u := c.BaseURL + "/v1/hives?dir=" + url.QueryEscape(guestDir)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, u, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return fmt.Errorf("agent hive delete: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		msg := strings.TrimSpace(string(data))
+		if msg == "" {
+			msg = resp.Status
+		}
+		return fmt.Errorf("agent HTTP %d: %s", resp.StatusCode, msg)
+	}
+	return nil
 }
 
 func (c *Client) Baseline(ctx context.Context) (json.RawMessage, error) {

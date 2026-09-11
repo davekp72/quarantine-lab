@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/quarantine-lab/quarantine/internal/agent/guestpaths"
 	"github.com/quarantine-lab/quarantine/internal/agent/types"
 	"github.com/quarantine-lab/quarantine/internal/agentclient"
 	"github.com/quarantine-lab/quarantine/internal/guest"
@@ -23,10 +24,6 @@ func (s *Service) agentClient() (*agentclient.Client, error) {
 	}
 	return agentclient.New(s.Cfg)
 }
-
-const guestAgentTokenPath = `C:\Users\Public\Quarantine\agent\agent-token.txt`
-const guestAgentInstallScript = `C:\Users\Public\Quarantine\Install-QuarantineAgent.ps1`
-const guestAgentInstallConfig = `C:\Users\Public\Quarantine\agent\agent-install.json`
 
 // EnsureHostAgentToken loads the host token file or syncs it from the guest agent install.
 func (s *Service) EnsureHostAgentToken() error {
@@ -43,9 +40,52 @@ func (s *Service) SyncAgentTokenFromGuest() error {
 	}
 	creds := s.Guest.GuestCreds()
 	tmp := filepath.Join(os.TempDir(), "quarantine-agent-token-sync.txt")
-	if err := s.copyFromGuest(guestAgentTokenPath, tmp, creds); err != nil {
-		return fmt.Errorf("sync token from guest (%s): %w — install agent in VM first", guestAgentTokenPath, err)
+	var errs []string
+	for _, guestPath := range guestpaths.TokenCopyCandidates() {
+		if err := s.copyFromGuest(guestPath, tmp, creds); err != nil {
+			errs = append(errs, guestPath+": "+shortGuestErr(err))
+			continue
+		}
+		if err := s.saveSyncedAgentToken(tmp); err != nil {
+			errs = append(errs, guestPath+": "+err.Error())
+			continue
+		}
+		return nil
 	}
+	if err := s.syncAgentTokenElevated(tmp, creds); err != nil {
+		errs = append(errs, "elevated export: "+shortGuestErr(err))
+		return fmt.Errorf("sync token from guest failed (%s). Guest Additions cannot read the ACL-locked token, and schtasks elevation is denied from an unelevated session.\nIn elevated guest PowerShell, either re-run Install-QuarantineAgent.ps1 or:\n  icacls C:\\ProgramData\\QuarantineLab /grant:r \"${env:USERDOMAIN}\\${env:USERNAME}:(OI)(CI)RX\"\n  icacls C:\\ProgramData\\QuarantineLab\\agent-token.txt /grant:r \"${env:USERDOMAIN}\\${env:USERNAME}:(RX)\"\nThen retry sync-token, or paste the Bearer line:\n  quarantine agent set-token --token <token>", strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+func shortGuestErr(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	for _, prefix := range []string{"VBoxManage.exe: error: ", "ERROR: "} {
+		if i := strings.LastIndex(msg, prefix); i >= 0 {
+			line := strings.TrimSpace(msg[i+len(prefix):])
+			if j := strings.IndexAny(line, "\r\n"); j > 0 {
+				line = line[:j]
+			}
+			return line
+		}
+	}
+	if i := strings.Index(msg, "exit status"); i >= 0 {
+		rest := strings.TrimSpace(msg[i:])
+		if j := strings.Index(rest, ":"); j > 0 && j < 40 {
+			return strings.TrimSpace(rest)
+		}
+	}
+	if len(msg) > 180 {
+		return msg[:180] + "…"
+	}
+	return msg
+}
+
+func (s *Service) saveSyncedAgentToken(tmp string) error {
 	raw, err := os.ReadFile(tmp)
 	_ = os.Remove(tmp)
 	if err != nil {
@@ -55,10 +95,80 @@ func (s *Service) SyncAgentTokenFromGuest() error {
 	if tok == "" {
 		return fmt.Errorf("guest agent token file is empty")
 	}
-	if err := s.Cfg.SaveAgentToken(tok); err != nil {
+	return s.Cfg.SaveAgentToken(tok)
+}
+
+func (s *Service) deleteGuestFile(guestPath string, creds guest.Credentials) {
+	_, _ = s.VBox.GuestControlRun(
+		s.Cfg.VMName, creds.Username, creds.Password,
+		`C:\Windows\System32\cmd.exe`,
+		[]string{"/c", "del", "/f", "/q", guestPath},
+		30*time.Second,
+	)
+}
+
+func (s *Service) syncAgentTokenElevated(hostTmp string, creds guest.Credentials) error {
+	guestDir := s.guestDir()
+	exportHost := filepath.Join(s.ProjectRoot, "guest", "Export-QuarantineAgentToken.ps1")
+	elevHost := filepath.Join(s.ProjectRoot, "guest", "Invoke-QuarantineGuestElevated.ps1")
+	if err := s.deployToGuest(exportHost, guestDir, creds); err != nil {
 		return err
 	}
-	return nil
+	if err := s.deployToGuest(elevHost, guestDir, creds); err != nil {
+		return err
+	}
+
+	outGuest := guestpaths.SyncExportPath()
+	s.deleteGuestFile(outGuest, creds)
+
+	credHost := filepath.Join(os.TempDir(), "qv-token-sync-cred.json")
+	credRaw, err := json.Marshal(map[string]string{
+		"user":     creds.Username,
+		"password": creds.Password,
+	})
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(credHost, credRaw, 0o600); err != nil {
+		return err
+	}
+	defer os.Remove(credHost)
+	credGuest := filepath.Join(guestDir, "qv-token-sync-cred.json")
+	if err := s.VBox.GuestControlCopyTo(
+		s.Cfg.VMName, creds.Username, creds.Password,
+		credHost, credGuest, s.captureTimeout(),
+	); err != nil {
+		return fmt.Errorf("copy elevated creds: %w", err)
+	}
+
+	elevGuest := filepath.Join(guestDir, "Invoke-QuarantineGuestElevated.ps1")
+	exportGuest := filepath.Join(guestDir, "Export-QuarantineAgentToken.ps1")
+	out, err := s.VBox.GuestControlRun(
+		s.Cfg.VMName, creds.Username, creds.Password,
+		`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`,
+		[]string{
+			"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", elevGuest,
+			"-ScriptPath", exportGuest,
+			"-OutFile", outGuest,
+			"-CredentialFile", credGuest,
+			"-TimeoutSeconds", "90",
+		},
+		2*time.Minute,
+	)
+	if err != nil {
+		s.deleteGuestFile(outGuest, creds)
+		s.deleteGuestFile(credGuest, creds)
+		msg := strings.TrimSpace(out)
+		if msg == "" {
+			return err
+		}
+		return fmt.Errorf("%w (%s)", err, msg)
+	}
+	defer s.deleteGuestFile(outGuest, creds)
+	if err := s.copyFromGuest(outGuest, hostTmp, creds); err != nil {
+		return err
+	}
+	return s.saveSyncedAgentToken(hostTmp)
 }
 
 // SaveHostAgentToken writes a token provided by the user to the host token file.
@@ -206,7 +316,8 @@ func (s *Service) writeSidecarsFromCapture(snapshotName string, resp *types.Capt
 	return nil
 }
 
-// pullHiveDump copies guest `reg save` hive files to the host manifests folder.
+// pullHiveDump copies guest `reg save` hive files to the host manifests folder,
+// then deletes the guest staging directory (SYSTEM agent HTTP, with guestcontrol fallback).
 func (s *Service) pullHiveDump(snapshotName string, dump *types.HiveDump) error {
 	hostDir := s.RegistryHivesDir(snapshotName)
 	_ = os.RemoveAll(hostDir)
@@ -214,6 +325,9 @@ func (s *Service) pullHiveDump(snapshotName string, dump *types.HiveDump) error 
 		return err
 	}
 	creds := s.Guest.GuestCreds()
+	client, clientErr := s.agentClient()
+	ctx, cancel := context.WithTimeout(context.Background(), s.captureTimeout())
+	defer cancel()
 	manifest := map[string]any{
 		"guestDir": dump.GuestDir,
 		"files":    []map[string]any{},
@@ -222,7 +336,7 @@ func (s *Service) pullHiveDump(snapshotName string, dump *types.HiveDump) error 
 	var files []map[string]any
 	for _, f := range dump.Files {
 		hostPath := filepath.Join(hostDir, f.Name)
-		if err := s.copyFromGuest(f.GuestPath, hostPath, creds); err != nil {
+		if err := s.pullHiveFile(ctx, client, clientErr, f.GuestPath, hostPath, creds); err != nil {
 			return fmt.Errorf("copy %s: %w", f.GuestPath, err)
 		}
 		files = append(files, map[string]any{
@@ -237,7 +351,37 @@ func (s *Service) pullHiveDump(snapshotName string, dump *types.HiveDump) error 
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(hostDir, "manifest.json"), raw, 0o644)
+	if err := os.WriteFile(filepath.Join(hostDir, "manifest.json"), raw, 0o644); err != nil {
+		return err
+	}
+	s.deleteGuestHiveDir(ctx, client, clientErr, dump.GuestDir, creds)
+	return nil
+}
+
+func (s *Service) pullHiveFile(ctx context.Context, client *agentclient.Client, clientErr error, guestPath, hostPath string, creds guest.Credentials) error {
+	if clientErr == nil && guestpaths.IsHivePath(guestPath) {
+		if err := client.DownloadHive(ctx, guestPath, hostPath); err == nil {
+			return nil
+		}
+	}
+	return s.copyFromGuest(guestPath, hostPath, creds)
+}
+
+func (s *Service) deleteGuestHiveDir(ctx context.Context, client *agentclient.Client, clientErr error, guestDir string, creds guest.Credentials) {
+	if !guestpaths.ShouldDeleteHiveDir(guestDir) {
+		return
+	}
+	if clientErr == nil && guestpaths.IsHivePath(guestDir) {
+		if err := client.DeleteHiveDir(ctx, guestDir); err == nil {
+			return
+		}
+	}
+	_, _ = s.VBox.GuestControlRun(
+		s.Cfg.VMName, creds.Username, creds.Password,
+		`C:\Windows\System32\cmd.exe`,
+		[]string{"/c", "rmdir", "/s", "/q", guestDir},
+		s.captureTimeout(),
+	)
 }
 
 func prettyJSON(raw json.RawMessage) []byte {
@@ -282,8 +426,6 @@ func (s *Service) DeployAgent(token string) (string, error) {
 	}
 
 	_ = s.VBox.GuestControlMkdir(s.Cfg.VMName, creds.Username, creds.Password, guestDir, s.captureTimeout())
-	agentConfigDir := filepath.Dir(guestAgentInstallConfig)
-	_ = s.VBox.GuestControlMkdir(s.Cfg.VMName, creds.Username, creds.Password, agentConfigDir, s.captureTimeout())
 
 	guestStaging, err := s.copyAgentBinary(hostBin, guestDir, creds)
 	if err != nil {
@@ -291,9 +433,13 @@ func (s *Service) DeployAgent(token string) (string, error) {
 	}
 	if err := s.VBox.GuestControlCopyTo(
 		s.Cfg.VMName, creds.Username, creds.Password,
-		hostScript, guestAgentInstallScript, s.captureTimeout(),
+		hostScript, guestpaths.InstallScript(), s.captureTimeout(),
 	); err != nil {
 		return "", fmt.Errorf("copy install script to guest: %w", err)
+	}
+
+	if err := s.stageGuestToken(token, creds); err != nil {
+		return "", err
 	}
 
 	installCfg := map[string]any{
@@ -301,7 +447,7 @@ func (s *Service) DeployAgent(token string) (string, error) {
 		"binary":      guestStaging,
 		"port":        s.Cfg.Agent.Port,
 		"payloadUser": s.Cfg.Payload.Username,
-		"token":       token,
+		"installExe":  guestpaths.InstallExe(),
 	}
 	if s.Cfg.Sysmon.EventLog != "" {
 		installCfg["sysmonLog"] = s.Cfg.Sysmon.EventLog
@@ -317,12 +463,32 @@ func (s *Service) DeployAgent(token string) (string, error) {
 	defer os.Remove(tmpCfg)
 	if err := s.VBox.GuestControlCopyTo(
 		s.Cfg.VMName, creds.Username, creds.Password,
-		tmpCfg, guestAgentInstallConfig, s.captureTimeout(),
+		tmpCfg, guestpaths.InstallConfig(), s.captureTimeout(),
 	); err != nil {
 		return "", fmt.Errorf("copy agent install config to guest: %w", err)
 	}
 
 	return token, nil
+}
+
+func (s *Service) stageGuestToken(token string, creds guest.Credentials) error {
+	tmpTok := filepath.Join(os.TempDir(), "quarantine-agent-token-stage.txt")
+	if err := os.WriteFile(tmpTok, []byte(strings.TrimSpace(token)+"\n"), 0o600); err != nil {
+		return err
+	}
+	defer os.Remove(tmpTok)
+	// Public staging is guestcontrol-writable. ProgramData is created/locked by the elevated installer.
+	if err := s.VBox.GuestControlCopyTo(
+		s.Cfg.VMName, creds.Username, creds.Password,
+		tmpTok, guestpaths.StagingTokenPath(), s.captureTimeout(),
+	); err != nil {
+		return fmt.Errorf("stage agent token to guest: %w", err)
+	}
+	_ = s.VBox.GuestControlCopyTo(
+		s.Cfg.VMName, creds.Username, creds.Password,
+		tmpTok, guestpaths.TokenPath(), s.captureTimeout(),
+	)
+	return nil
 }
 
 func (s *Service) copyAgentBinary(hostBin, guestDir string, creds guest.Credentials) (string, error) {
@@ -374,7 +540,7 @@ func (s *Service) stopGuestAgentService(creds guest.Credentials) {
 	_, _ = s.VBox.GuestControlRun(
 		s.Cfg.VMName, creds.Username, creds.Password,
 		`C:\Windows\System32\cmd.exe`,
-		[]string{"/c", "taskkill /F /IM quarantine-agent.exe /IM quarantine-agent-v1-0-13.exe /IM quarantine-agent-v1-0-12.exe /IM quarantine-agent-v1-0-11.exe /IM quarantine-agent-v1-0-10.exe 2>nul"},
+		[]string{"/c", "taskkill /F /IM quarantine-agent.exe /IM quarantine-agent-v1-0-15.exe /IM quarantine-agent-v1-0-14.exe /IM quarantine-agent-v1-0-13.exe /IM quarantine-agent-v1-0-12.exe 2>nul"},
 		timeout,
 	)
 	time.Sleep(1 * time.Second)
@@ -401,7 +567,7 @@ func isGuestFileSharingViolation(err error) bool {
 
 // AgentInstallInstructions returns the elevated guest install command after DeployAgent.
 func AgentInstallInstructions() string {
-	return "Set-ExecutionPolicy -Scope Process Bypass; & '" + guestAgentInstallScript + "'"
+	return "Set-ExecutionPolicy -Scope Process Bypass; & '" + guestpaths.InstallScript() + "'"
 }
 
 // AgentHealth queries the guest agent /health endpoint.

@@ -12,8 +12,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/quarantine-lab/quarantine/internal/agent/guestpaths"
 	"github.com/quarantine-lab/quarantine/internal/agent/server"
 	"github.com/quarantine-lab/quarantine/internal/agent/types"
+	"github.com/quarantine-lab/quarantine/internal/agent/winacl"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/debug"
@@ -96,6 +98,12 @@ func Install(exePath, token string, cfg types.AgentConfig) error {
 	}
 	if cfg.TokenFile == "" {
 		cfg.TokenFile = DefaultTokenPath()
+	}
+	winacl.RememberGuestControlUser()
+	if dir := filepath.Dir(exePath); guestpaths.IsProtectedRoot(dir) {
+		if err := winacl.Protect(dir); err != nil {
+			return fmt.Errorf("protect install dir: %w", err)
+		}
 	}
 	if err := SaveConfig(cfg); err != nil {
 		return err
@@ -207,28 +215,36 @@ func waitForServiceRemoved(m *mgr.Mgr, timeout time.Duration) error {
 	return fmt.Errorf("service %q still deleting after %v — close services.msc or reboot the VM", ServiceName, timeout)
 }
 
-// ConfigDir returns guest agent config directory (writable by lab admin, readable by SYSTEM).
+// ConfigDir is SYSTEM/Administrators-only ProgramData (not Users\Public).
 func ConfigDir() string {
-	return `C:\Users\Public\Quarantine\agent`
+	return guestpaths.DataDir
 }
 
 func ConfigPath() string {
-	return filepath.Join(ConfigDir(), "agent.json")
+	return guestpaths.ConfigPath()
 }
 
 func DefaultTokenPath() string {
-	return filepath.Join(ConfigDir(), "agent-token.txt")
+	return guestpaths.TokenPath()
 }
 
 func SaveConfig(cfg types.AgentConfig) error {
-	if err := os.MkdirAll(ConfigDir(), 0o755); err != nil {
-		return err
+	if err := winacl.Protect(ConfigDir()); err != nil {
+		if mkErr := os.MkdirAll(ConfigDir(), 0o700); mkErr != nil {
+			return mkErr
+		}
+		if err := winacl.Protect(ConfigDir()); err != nil {
+			return fmt.Errorf("protect agent data dir: %w", err)
+		}
 	}
 	raw, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(ConfigPath(), raw, 0o644)
+	if err := os.WriteFile(ConfigPath(), raw, 0o600); err != nil {
+		return err
+	}
+	return winacl.Protect(ConfigPath())
 }
 
 func LoadConfig() (types.AgentConfig, error) {
@@ -247,10 +263,16 @@ func SaveToken(token, path string) error {
 	if path == "" {
 		path = DefaultTokenPath()
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := winacl.Protect(filepath.Dir(path)); err != nil {
+		if mkErr := os.MkdirAll(filepath.Dir(path), 0o700); mkErr != nil {
+			return mkErr
+		}
+		_ = winacl.Protect(filepath.Dir(path))
+	}
+	if err := os.WriteFile(path, []byte(strings.TrimSpace(token)+"\n"), 0o600); err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte(strings.TrimSpace(token)+"\n"), 0o600)
+	return winacl.Protect(path)
 }
 
 func LoadToken(path string) (string, error) {
@@ -292,8 +314,9 @@ func ensureFirewallRule(port int) {
 }
 
 func appendAgentLog(msg string) error {
-	path := filepath.Join(ConfigDir(), "agent.log")
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	path := guestpaths.LogPath()
+	_ = winacl.Protect(filepath.Dir(path))
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}

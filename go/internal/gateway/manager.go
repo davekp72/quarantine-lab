@@ -527,17 +527,37 @@ func (m *Manager) ApplyAgentLANForward() error {
 	if port <= 0 {
 		port = 9443
 	}
-	nftHost := filepath.Join(m.scriptsHostDir(), "nftables.conf")
-	shHost := filepath.Join(m.scriptsHostDir(), "scripts", "enable-agent-forward.sh")
-	if err := m.linuxCopyFileTo(nftHost, "/tmp/quarantine-nftables.conf"); err != nil {
-		return fmt.Errorf("copy nftables.conf: %w", err)
+	root := m.scriptsHostDir()
+	type upload struct {
+		host, guest string
+		required    bool
 	}
-	if err := m.linuxCopyFileTo(shHost, "/tmp/enable-agent-forward.sh"); err != nil {
-		return fmt.Errorf("copy enable-agent-forward.sh: %w", err)
+	files := []upload{
+		{filepath.Join(root, "nftables.conf"), "/tmp/quarantine-nftables.conf", true},
+		{filepath.Join(root, "nftables-fakenet.conf"), "/tmp/quarantine-nftables-fakenet.conf", false},
+		{filepath.Join(root, "nftables-permissive-forward.inc"), "/tmp/quarantine-nftables-permissive-forward.inc", false},
+		{filepath.Join(root, "nftables-permissive-nat.inc"), "/tmp/quarantine-nftables-permissive-nat.inc", false},
+		{filepath.Join(root, "scripts", "enable-agent-forward.sh"), "/tmp/enable-agent-forward.sh", true},
+	}
+	for _, f := range files {
+		if _, err := os.Stat(f.host); err != nil {
+			if f.required {
+				return fmt.Errorf("copy %s: %w", filepath.Base(f.host), err)
+			}
+			continue
+		}
+		if err := m.linuxCopyFileTo(f.host, f.guest); err != nil {
+			return fmt.Errorf("copy %s: %w", filepath.Base(f.host), err)
+		}
 	}
 	inner := strings.Join([]string{
-		"mkdir -p /opt/quarantine-gateway",
+		"mkdir -p /opt/quarantine-gateway /etc/quarantine-gateway",
 		"cp /tmp/quarantine-nftables.conf /opt/quarantine-gateway/nftables.conf",
+		"[[ -f /tmp/quarantine-nftables-fakenet.conf ]] && cp /tmp/quarantine-nftables-fakenet.conf /opt/quarantine-gateway/nftables-fakenet.conf || true",
+		"[[ -f /tmp/quarantine-nftables-permissive-forward.inc ]] && cp /tmp/quarantine-nftables-permissive-forward.inc /opt/quarantine-gateway/nftables-permissive-forward.inc || true",
+		"[[ -f /tmp/quarantine-nftables-permissive-nat.inc ]] && cp /tmp/quarantine-nftables-permissive-nat.inc /opt/quarantine-gateway/nftables-permissive-nat.inc || true",
+		"[[ -f /etc/quarantine-gateway/nftables-permissive-forward.inc ]] || { [[ -f /tmp/quarantine-nftables-permissive-forward.inc ]] && cp /tmp/quarantine-nftables-permissive-forward.inc /etc/quarantine-gateway/nftables-permissive-forward.inc; }",
+		"[[ -f /etc/quarantine-gateway/nftables-permissive-nat.inc ]] || { [[ -f /tmp/quarantine-nftables-permissive-nat.inc ]] && cp /tmp/quarantine-nftables-permissive-nat.inc /etc/quarantine-gateway/nftables-permissive-nat.inc; }",
 		"chmod +x /tmp/enable-agent-forward.sh",
 		fmt.Sprintf("/tmp/enable-agent-forward.sh %s %d %s %s",
 			g.GuestIP, port, g.LANGateway, g.LANCidr),

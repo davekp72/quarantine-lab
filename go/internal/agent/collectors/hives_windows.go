@@ -12,17 +12,24 @@ import (
 
 	"golang.org/x/sys/windows/registry"
 
+	"github.com/quarantine-lab/quarantine/internal/agent/guestpaths"
 	"github.com/quarantine-lab/quarantine/internal/agent/types"
+	"github.com/quarantine-lab/quarantine/internal/agent/winacl"
 )
 
 // SaveRegistryHives dumps live hives with `reg save` for offline indexing on the host.
 // Avoids multi-GB snapshot disk flatten for Compare.
 func SaveRegistryHives(snapshotName, payloadUser string) (*types.HiveDump, error) {
-	safe := sanitizeSnap(snapshotName)
-	outDir := filepath.Join(`C:\Users\Public\Quarantine\hives`, safe)
+	outDir := guestpaths.HiveDir(snapshotName)
 	_ = os.RemoveAll(outDir)
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
+	if err := os.MkdirAll(outDir, 0o700); err != nil {
 		return nil, err
+	}
+	if err := winacl.Protect(guestpaths.HiveRoot()); err != nil {
+		return nil, fmt.Errorf("protect hive root: %w", err)
+	}
+	if err := winacl.Protect(outDir); err != nil {
+		return nil, fmt.Errorf("protect hive dir: %w", err)
 	}
 
 	dump := &types.HiveDump{GuestDir: outDir}
@@ -43,6 +50,7 @@ func SaveRegistryHives(snapshotName, payloadUser string) (*types.HiveDump, error
 			dump.Warnings = append(dump.Warnings, fmt.Sprintf("%s: %v", s.key, err))
 			continue
 		}
+		_ = winacl.Protect(dest)
 		dump.Files = append(dump.Files, types.HiveFile{
 			Name:      s.file,
 			GuestPath: dest,
@@ -56,6 +64,7 @@ func SaveRegistryHives(snapshotName, payloadUser string) (*types.HiveDump, error
 		if err := regSave(key, dest); err != nil {
 			dump.Warnings = append(dump.Warnings, fmt.Sprintf("%s: %v", key, err))
 		} else {
+			_ = winacl.Protect(dest)
 			dump.Files = append(dump.Files, types.HiveFile{
 				Name:      filepath.Base(dest),
 				GuestPath: dest,

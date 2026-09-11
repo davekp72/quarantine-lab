@@ -187,12 +187,12 @@ function Read-QuarantineFlowsJsonl {
         }
 
         $tText = if ($ts) { $ts.ToUniversalTime().ToString('o') } else { [string]$obj.t }
-        $reqPrev = Compress-QuarantineFlowPart -Part $obj.request -MaxChars $BodyPreviewChars
-        $respPrev = Compress-QuarantineFlowPart -Part $obj.response -MaxChars $BodyPreviewChars
         $resolved = @()
         if ($obj.PSObject.Properties['resolvedIps'] -and $obj.resolvedIps) {
             $resolved = @($obj.resolvedIps | ForEach-Object { [string]$_ } | Where-Object { $_ })
         }
+        # Do not embed request/response bodies: ConvertTo-Json emits invalid `\a`/`\v`
+        # escapes for control bytes, which drops the entire HTTP list in the UI.
         $results += [pscustomobject]@{
             t            = $tText
             method       = $method
@@ -204,8 +204,6 @@ function Read-QuarantineFlowsJsonl {
             flowFile     = $Path
             flowLine     = $lineNo
             resolvedIps  = $resolved
-            request      = $reqPrev
-            response     = $respPrev
         }
     }
 

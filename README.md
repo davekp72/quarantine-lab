@@ -100,15 +100,25 @@ Press **Shift+F10**, run `oobe\bypassnro`, reboot, then finish with a **local ac
    .\quarantine-vm.ps1 network gateway
    ```
 
-   In the guest (Admin):
+5. **Guest provision** (one elevated script: agent, guestcontrol ACLs, gateway NIC/proxy/CA, Sysmon, event-log grant, disable autologon):
 
    ```powershell
-   powershell -ExecutionPolicy Bypass -File C:\Users\Public\Quarantine\Configure-QuarantineGuestNetwork.ps1 -Mode gateway
+   .\quarantine-vm.ps1 guest provision
    ```
+
+   In the guest (elevated PowerShell as `quarantine`), run **only** this line:
+
+   ```powershell
+   & 'C:\Users\Public\Quarantine\Invoke-QuarantineGuestProvision.ps1'
+   ```
+
+   Do not paste `Set-ExecutionPolicy` after it. The script sets Bypass itself; a second line becomes a `>>` continuation.
+
+   Then on the host: `.\quarantine-vm.ps1 agent health`
 
    Details: [`gateway/README.md`](gateway/README.md).
 
-5. **Optional — soften VirtualBox fingerprints** (MAC / CPU profile / ACPI; Guest Additions stay):
+6. **Optional — soften VirtualBox fingerprints** (MAC / CPU profile / ACPI; Guest Additions stay):
 
    ```powershell
    # VM powered off

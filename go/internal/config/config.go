@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/quarantine-lab/quarantine/internal/agent/guestpaths"
 )
 
 // Config mirrors config/quarantine-vm.json.
@@ -113,23 +115,23 @@ type NetworkConfig struct {
 
 // GatewayConfig describes the Linux quarantine gateway VM.
 type GatewayConfig struct {
-	Enabled     bool   `json:"enabled"`
-	VMName      string `json:"vmName"`
-	LANCidr     string `json:"lanCidr"`
-	LANGateway  string `json:"lanGateway"`
-	GuestIP     string `json:"guestIp"`
-	IntnetName  string `json:"intnetName"`
-	Uplink      string `json:"uplink"`
-	Username    string `json:"username"`
-	Password    string `json:"password,omitempty"`
+	Enabled      bool   `json:"enabled"`
+	VMName       string `json:"vmName"`
+	LANCidr      string `json:"lanCidr"`
+	LANGateway   string `json:"lanGateway"`
+	GuestIP      string `json:"guestIp"`
+	IntnetName   string `json:"intnetName"`
+	Uplink       string `json:"uplink"`
+	Username     string `json:"username"`
+	Password     string `json:"password,omitempty"`
 	PasswordFile string `json:"passwordFile,omitempty"`
-	SSHHostPort int    `json:"sshHostPort"`
+	SSHHostPort  int    `json:"sshHostPort"`
 	// SSHPrivateKey is the host path to the gateway ed25519 key (password SSH is disabled).
 	SSHPrivateKey string `json:"sshPrivateKey,omitempty"`
 	SSHPublicKey  string `json:"sshPublicKey,omitempty"`
-	MemoryMB    int    `json:"memoryMb"`
-	CPUCount    int    `json:"cpuCount"`
-	DiskSizeGB  int    `json:"diskSizeGb"`
+	MemoryMB      int    `json:"memoryMb"`
+	CPUCount      int    `json:"cpuCount"`
+	DiskSizeGB    int    `json:"diskSizeGb"`
 	// TrafficMode is "permissive" (allowlisted internet + MITM) or "fakenet" (LAN sinkhole).
 	TrafficMode string `json:"trafficMode"`
 	// Permissive is the WAN allowlist used only in permissive mode.
@@ -302,6 +304,7 @@ type AccountConfig struct {
 
 type SysmonConfig struct {
 	HostConfigPath  string `json:"hostConfigPath"`
+	HostSysmonExe   string `json:"hostSysmonExe"`
 	GuestDir        string `json:"guestDir"`
 	GuestConfigName string `json:"guestConfigName"`
 	GuestSysmonExe  string `json:"guestSysmonExe"`
@@ -396,17 +399,15 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// AgentGuestInstallPath returns a guest path writable by the lab admin account.
+// AgentGuestInstallPath is the guestcontrol staging path (writable, non-secret).
+// The running service binary is C:\Program Files\QuarantineLab\quarantine-agent.exe.
 func (c *Config) AgentGuestInstallPath() string {
 	p := strings.TrimSpace(c.Agent.InstallPath)
-	if p != "" && !strings.Contains(strings.ToLower(p), `\program files`) {
+	low := strings.ToLower(strings.ReplaceAll(p, `/`, `\`))
+	if p != "" && !strings.Contains(low, `\program files`) && !strings.Contains(low, `\programdata\`) {
 		return p
 	}
-	base := strings.TrimSpace(c.Guest.CopyTargetDir)
-	if base == "" {
-		base = `C:\Users\Public\Quarantine`
-	}
-	return filepath.Join(base, "quarantine-agent.exe")
+	return guestpaths.StagingDir() + `\quarantine-agent.exe`
 }
 
 // SaveAgentToken writes the bearer token to the configured host token file.

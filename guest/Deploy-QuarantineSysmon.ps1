@@ -95,6 +95,10 @@ Wait-QuarantineGuestDeployReady -ConfigPath $ConfigPath
 
 Copy-QuarantineVMGuestFile -Path $hostConfig -ConfigPath $ConfigPath -TargetDirectory $guestDir
 Copy-QuarantineVMGuestFile -Path $installScript -ConfigPath $ConfigPath -TargetDirectory $guestDir
+$fallbackConfig = Join-Path $projectRoot 'config\sysmon\quarantine-lab-fallback.xml'
+if (Test-Path -LiteralPath $fallbackConfig) {
+    Copy-QuarantineVMGuestFile -Path $fallbackConfig -ConfigPath $ConfigPath -TargetDirectory $guestDir
+}
 
 $hostSysmonExeRel = if ($cfg.sysmon.PSObject.Properties['hostSysmonExe']) { [string]$cfg.sysmon.hostSysmonExe } else { '' }
 $hostExe = $null

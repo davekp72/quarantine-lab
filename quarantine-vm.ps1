@@ -777,7 +777,7 @@ Tip: Mark USN + payload registry baseline before making test changes:
                 Invoke-QuarantineGuestHostsEntry -ConfigPath $ConfigPath
             }
 
-            default { throw 'Usage: .\quarantine-vm.ps1 guest run|ps|copy|test|hosts|gateway-setup' }
+            default { throw 'Usage: .\quarantine-vm.ps1 guest run|ps|copy|test|hosts|provision|gateway-setup' }
 
         }
 
@@ -1114,6 +1114,7 @@ Guest control (requires Guest Additions + guest credentials):
   guest ps <script>       Run PowerShell -Command in guest
 
   guest copy <file>       Copy host file(s) into guest (no shared folder)
+  guest provision         Stage agent/network/Sysmon scripts; run Invoke-QuarantineGuestProvision.ps1 elevated in the guest
   guest gateway-setup     Upload Configure + CA installer + mitm CA for gateway mode
 
 
@@ -1147,7 +1148,10 @@ Setup:
 
   5. .\quarantine-vm.ps1 install
 
-  6. Run network\guest\Configure-QuarantineGuestNetwork.ps1 in guest (Admin)
+  6. .\quarantine-vm.ps1 guest provision
+     Then in elevated guest PowerShell:
+       Set-ExecutionPolicy -Scope Process Bypass -Force
+       & 'C:\Users\Public\Quarantine\Invoke-QuarantineGuestProvision.ps1'
 
   7. .\quarantine-vm.ps1 guest disable-autologon   (or baseline does this if the VM is running)
 

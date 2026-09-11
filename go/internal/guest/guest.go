@@ -1,9 +1,11 @@
 package guest
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/quarantine-lab/quarantine/internal/config"
@@ -140,7 +142,126 @@ If SSL warnings remain:
   powershell -ExecutionPolicy Bypass -File %s\Install-QuarantineProxyCA.ps1 -ProxyHost 10.66.0.1 -ProxyPort 8080 -PacPort 8080 -CaPath %s\mitmproxy-ca-cert.cer
 
 Host reaches the agent only via the Linux gateway: 127.0.0.1:9443 → gateway → lab 10.66.0.15:9443 (no lab NAT NIC).
-`, dir, dir, dir, dir, dir), nil
+
+Prefer a full first-boot in the guest:
+  powershell -ExecutionPolicy Bypass -File %s\Invoke-QuarantineGuestProvision.ps1
+`, dir, dir, dir, dir, dir, dir), nil
+}
+
+func (c *Client) publicDir() string {
+	dir := c.Cfg.Guest.CopyTargetDir
+	if dir == "" {
+		return `C:\Users\Public\Quarantine`
+	}
+	return dir
+}
+
+func resolveProjectFile(root, p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return ""
+	}
+	if filepath.IsAbs(p) {
+		return p
+	}
+	return filepath.Join(root, filepath.FromSlash(p))
+}
+
+func (c *Client) copyOptional(hostPath, destDir string, creds Credentials) (string, error) {
+	if _, err := os.Stat(hostPath); err != nil {
+		return "", nil
+	}
+	if err := c.CopyTo(hostPath, destDir, creds); err != nil {
+		return "", fmt.Errorf("copy %s: %w", filepath.Base(hostPath), err)
+	}
+	return filepath.Base(hostPath), nil
+}
+
+// DeployProvisionFiles copies every elevated guest helper used on a new lab VM.
+func (c *Client) DeployProvisionFiles(projectRoot string) (copied []string, skipped []string, err error) {
+	creds := c.GuestCreds()
+	dir := c.publicDir()
+	optional := []string{
+		filepath.Join(projectRoot, "guest", "Invoke-QuarantineGuestProvision.ps1"),
+		filepath.Join(projectRoot, "manifest", "Install-QuarantineAgent.ps1"),
+		filepath.Join(projectRoot, "guest", "Grant-QuarantineGuestEventLogAccess.ps1"),
+		filepath.Join(projectRoot, "guest", "Invoke-QuarantineGuestElevated.ps1"),
+		filepath.Join(projectRoot, "guest", "Export-QuarantineAgentToken.ps1"),
+		filepath.Join(projectRoot, "network", "guest", "Configure-QuarantineGuestNetwork.ps1"),
+		filepath.Join(projectRoot, "network", "guest", "Harden-QuarantineGuestNetwork.ps1"),
+		filepath.Join(projectRoot, "network", "guest", "Install-QuarantineProxyCA.ps1"),
+		filepath.Join(projectRoot, "network", "guest", "Disable-QuarantineAutoLogon.ps1"),
+		filepath.Join(projectRoot, "network", "guest", "Disable-QuarantineGuestUpdates.ps1"),
+		filepath.Join(projectRoot, "network", "proxy", "mitmproxy-ca-cert.cer"),
+	}
+	for _, f := range optional {
+		name, cErr := c.copyOptional(f, dir, creds)
+		if cErr != nil {
+			return copied, skipped, cErr
+		}
+		if name == "" {
+			skipped = append(skipped, filepath.Base(f))
+			continue
+		}
+		copied = append(copied, name)
+	}
+
+	hints, hErr := json.MarshalIndent(map[string]string{
+		"payloadUser": c.Cfg.Payload.Username,
+		"labAdmin":    c.Cfg.Guest.Username,
+		"networkMode": "gateway",
+	}, "", "  ")
+	if hErr != nil {
+		return copied, skipped, hErr
+	}
+	tmpHints := filepath.Join(os.TempDir(), "guest-provision.json")
+	if err := os.WriteFile(tmpHints, append(hints, '\n'), 0o600); err != nil {
+		return copied, skipped, err
+	}
+	defer os.Remove(tmpHints)
+	if err := c.CopyTo(tmpHints, dir, creds); err != nil {
+		return copied, skipped, fmt.Errorf("copy guest-provision.json: %w", err)
+	}
+	copied = append(copied, "guest-provision.json")
+
+	sysmonDir := strings.TrimSpace(c.Cfg.Sysmon.GuestDir)
+	if sysmonDir == "" {
+		sysmonDir = dir + `\sysmon`
+	}
+	sysmonName := strings.TrimSpace(c.Cfg.Sysmon.GuestConfigName)
+	if sysmonName == "" {
+		sysmonName = "quarantine-lab.xml"
+	}
+	sysmonFiles := []string{
+		filepath.Join(projectRoot, "guest", "Install-QuarantineSysmon.ps1"),
+		resolveProjectFile(projectRoot, c.Cfg.Sysmon.HostConfigPath),
+		filepath.Join(projectRoot, "config", "sysmon", "quarantine-lab.xml"),
+		filepath.Join(projectRoot, "config", "sysmon", "quarantine-lab-fallback.xml"),
+		resolveProjectFile(projectRoot, c.Cfg.Sysmon.HostSysmonExe),
+		filepath.Join(projectRoot, "tools", "Sysmon64.exe"),
+	}
+	seenSysmon := map[string]bool{}
+	for _, f := range sysmonFiles {
+		if f == "" {
+			continue
+		}
+		base := filepath.Base(f)
+		if seenSysmon[base] {
+			continue
+		}
+		if _, err := os.Stat(f); err != nil {
+			if strings.EqualFold(base, "Sysmon64.exe") || strings.EqualFold(base, sysmonName) || strings.EqualFold(base, "Install-QuarantineSysmon.ps1") {
+				skipped = append(skipped, "sysmon/"+base)
+			}
+			continue
+		}
+		if err := c.CopyTo(f, sysmonDir, creds); err != nil {
+			return copied, skipped, fmt.Errorf("copy sysmon %s: %w", base, err)
+		}
+		seenSysmon[base] = true
+		copied = append(copied, "sysmon/"+base)
+	}
+	return copied, skipped, nil
 }
 
 // TestGuestSession verifies guest credentials work.

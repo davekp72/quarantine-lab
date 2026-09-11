@@ -28,10 +28,19 @@ func TestLoadExample(t *testing.T) {
 	}
 }
 
-func TestSafeSnapshotFileName(t *testing.T) {
-	got := SafeSnapshotFileName(`Evidence/hostfile`)
-	if got != "Evidence_hostfile" {
-		t.Fatalf("got %q", got)
+func TestAgentGuestInstallPathAvoidsProgramFiles(t *testing.T) {
+	c := &Config{}
+	got := c.AgentGuestInstallPath()
+	if strings.Contains(strings.ToLower(got), `\program files`) {
+		t.Fatalf("staging path must be guestcontrol-writable, got %s", got)
+	}
+	if strings.Contains(strings.ToLower(got), `\programdata\`) {
+		t.Fatalf("staging path must not be under ACL'd ProgramData, got %s", got)
+	}
+	c.Agent.InstallPath = `C:\Program Files\QuarantineLab\quarantine-agent.exe`
+	got = c.AgentGuestInstallPath()
+	if strings.Contains(strings.ToLower(got), `\program files`) {
+		t.Fatalf("Program Files installPath must remap to staging, got %s", got)
 	}
 }
 
