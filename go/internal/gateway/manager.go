@@ -625,6 +625,7 @@ func (m *Manager) EnsureCaptureScripts() error {
 			"install -m 0755 /tmp/quarantine-capture-sync.sh /usr/local/sbin/quarantine-capture-sync; "+
 			"install -m 0644 /tmp/quarantine-capture.service /etc/systemd/system/quarantine-capture.service; "+
 			"mkdir -p /var/log/quarantine/pcap; "+
+			"if [[ -x /usr/local/sbin/quarantine-ensure-service-users ]]; then /usr/local/sbin/quarantine-ensure-service-users || true; fi; "+
 			"systemctl daemon-reload; "+
 			"command -v tcpdump >/dev/null")
 	return err

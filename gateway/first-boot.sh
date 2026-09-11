@@ -194,7 +194,11 @@ fi
 # Ensure appliance files (from this script's tree) are under $OPT
 test -f "$ROOT/mitm/quarantine.pac"
 test -f "$ROOT/systemd/quarantine-mitm-explicit.service"
+test -f "$ROOT/fakenet/patch_diverter_privcheck.py"
+test -f "$ROOT/scripts/ensure-service-users.sh"
 cp -a "$ROOT/." "$OPT/"
+test -f "$OPT/fakenet/patch_diverter_privcheck.py"
+test -f "$OPT/systemd/quarantine-fakenet.service"
 
 # PAC for explicit fallback (gateway LAN IP)
 sed "s/__GATEWAY__/${LAN_IP}/g" "$OPT/mitm/quarantine.pac" >/etc/quarantine-gateway/quarantine.pac

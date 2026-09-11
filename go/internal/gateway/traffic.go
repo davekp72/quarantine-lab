@@ -233,6 +233,7 @@ func (m *Manager) EnsureTrafficModeScripts() error {
 		{filepath.Join(root, "fakenet", "quarantine.ini"), "/tmp/quarantine-fakenet.ini"},
 		{filepath.Join(root, "fakenet", "ssl_utils_init.py"), "/tmp/quarantine-fakenet-ssl_utils.py"},
 		{filepath.Join(root, "fakenet", "patch_httplistener.py"), "/tmp/quarantine-fakenet-patch_httplistener.py"},
+		{filepath.Join(root, "fakenet", "patch_diverter_privcheck.py"), "/tmp/quarantine-fakenet-patch_diverter_privcheck.py"},
 		{filepath.Join(root, "fakenet", "HTTPListener.py"), "/tmp/quarantine-fakenet-HTTPListener.py"},
 		{filepath.Join(root, "fakenet", "test_connect_proxy.py"), "/tmp/quarantine-fakenet-test_connect_proxy.py"},
 		{filepath.Join(root, "systemd", "quarantine-fakenet.service"), "/tmp/quarantine-fakenet.service"},
@@ -278,6 +279,7 @@ install -m 0644 /tmp/quarantine-nftables-permissive-output.inc /etc/quarantine-g
 install -m 0644 /tmp/quarantine-fakenet.ini /opt/quarantine-gateway/fakenet/quarantine.ini
 install -m 0644 /tmp/quarantine-fakenet-ssl_utils.py /opt/quarantine-gateway/fakenet/ssl_utils_init.py
 install -m 0644 /tmp/quarantine-fakenet-patch_httplistener.py /opt/quarantine-gateway/fakenet/patch_httplistener.py
+install -m 0644 /tmp/quarantine-fakenet-patch_diverter_privcheck.py /opt/quarantine-gateway/fakenet/patch_diverter_privcheck.py
 install -m 0644 /tmp/quarantine-fakenet-HTTPListener.py /opt/quarantine-gateway/fakenet/HTTPListener.py
 install -m 0644 /tmp/quarantine-fakenet-test_connect_proxy.py /opt/quarantine-gateway/fakenet/test_connect_proxy.py
 cp /tmp/quarantine-install-fakenet.sh /opt/quarantine-gateway/scripts/install-fakenet.sh

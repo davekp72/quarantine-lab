@@ -22,9 +22,15 @@
 # Service isolation
 #   mitm + capture: quarantine-mitm / quarantine-capture (non-root + caps).
 #   FakeNet: quarantine-fakenet + CAP_NET_ADMIN/RAW/BIND_SERVICE (NFQUEUE + :53/:80/:443).
+#   fakenet/patch_diverter_privcheck.py lets the diverter accept CAP_NET_ADMIN (upstream requires uid 0).
 #   ExecStartPre=+quarantine-ensure-service-users prepares users/dirs/venv perms.
 #   nftables output still drops private/metadata and allowlists public upstream.
 #   mitm CA: /var/lib/quarantine-mitm
+#
+# Provisioning
+#   Full: .\quarantine-vm.ps1 gateway provision  (tar + first-boot; asserts diverter patch present)
+#   Incremental sync (mode / post-provision): EnsureTrafficModeScripts uploads units, ensure-users,
+#   FakeNet patches (incl. diverter privcheck), nft templates, and set-traffic-mode.
 
 # Guest Windows (Configure-QuarantineGuestNetwork.ps1 -Mode gateway):
 #   Outbound allow (normal internet). Only special block: SSH to the gateway itself.

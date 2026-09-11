@@ -188,10 +188,16 @@ if [[ -f "$http_src" && -n "$http_dst" ]]; then
 fi
 
 priv_patch="$OPT/fakenet/patch_diverter_privcheck.py"
-if [[ -f "$priv_patch" ]]; then
-  div_dst="$("$pybin" -c 'import fakenet.diverters.diverterbase as d, pathlib; print(pathlib.Path(d.__file__).resolve())')"
-  "$pybin" "$priv_patch" "$div_dst"
-  rm -rf "$(dirname "$div_dst")/__pycache__" 2>/dev/null || true
+if [[ ! -f "$priv_patch" ]]; then
+  echo "ERROR: missing FakeNet diverter privcheck patch: $priv_patch" >&2
+  exit 1
+fi
+div_dst="$("$pybin" -c 'import fakenet.diverters.diverterbase as d, pathlib; print(pathlib.Path(d.__file__).resolve())')"
+"$pybin" "$priv_patch" "$div_dst"
+rm -rf "$(dirname "$div_dst")/__pycache__" 2>/dev/null || true
+if ! grep -q 'CapEff:' "$div_dst" || ! grep -q '1 << 12' "$div_dst"; then
+  echo "ERROR: diverter privcheck patch did not apply" >&2
+  exit 1
 fi
 
 "$pybin" -c 'import fakenet, netfilterqueue, netifaces; from fakenet.listeners.ssl_utils import SSLWrapper; print("ok", fakenet.__file__)'
@@ -245,6 +251,13 @@ src="$OPT/fakenet/quarantine.ini"
 if [[ -f "$src" ]]; then
   sed -e "s/__LAN__/${LAN_IF}/g" -e "s/__LAN_IP__/${LAN_IP}/g" \
     "$src" >"$ETC/fakenet.ini"
+fi
+
+# Non-root FakeNet needs owned dirs / CRL group perms / traversable venv.
+if [[ -x /usr/local/sbin/quarantine-ensure-service-users ]]; then
+  /usr/local/sbin/quarantine-ensure-service-users || true
+elif [[ -x "$OPT/scripts/ensure-service-users.sh" ]]; then
+  "$OPT/scripts/ensure-service-users.sh" || true
 fi
 
 echo "FakeNet-NG installed ($py)"

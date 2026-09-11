@@ -282,6 +282,7 @@ Edit the allowlist in the UI (**Permissive allowlist**) or in `network.gateway.p
 .\quarantine-vm.ps1 gateway mode permissive    # allowlisted internet + MITM
 ```
 
+Analysis daemons (FakeNet, mitm, capture) run as dedicated non-root users with bounded capabilities; `gateway provision` / `gateway mode` sync those units and patches.
 The desktop UI Gateway panel has the same **FakeNet** / **Permissive** buttons (confirms before opening WAN). FakeNet HTTPS is signed with the **same mitmproxy CA** the guest already trusts. Certificate pinning can still fail. Use permissive when you need real upstream sites.
 
 Gateway session sketch:

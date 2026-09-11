@@ -197,18 +197,23 @@ patch_fakenet_ssl() {
     echo "ERROR: HTTPListener CONNECT copy did not install" >&2
     return 1
   fi
-  # Allow non-root FakeNet when systemd grants CAP_NET_ADMIN.
+  # Allow non-root FakeNet when systemd grants CAP_NET_ADMIN (required with User=quarantine-fakenet).
   local priv_patch="$OPT/fakenet/patch_diverter_privcheck.py"
-  if [[ -f "$priv_patch" ]]; then
-    local div_dst
-    div_dst="$("$pybin" -c 'import fakenet.diverters.diverterbase as d, pathlib; print(pathlib.Path(d.__file__).resolve())' 2>/dev/null || true)"
-    if [[ -n "$div_dst" && -f "$div_dst" ]]; then
-      "$pybin" "$priv_patch" "$div_dst" || return 1
-      rm -rf "$(dirname "$div_dst")/__pycache__" 2>/dev/null || true
-    else
-      echo "ERROR: could not locate FakeNet diverterbase to patch" >&2
-      return 1
-    fi
+  if [[ ! -f "$priv_patch" ]]; then
+    echo "ERROR: missing FakeNet diverter privcheck patch: $priv_patch" >&2
+    return 1
+  fi
+  local div_dst
+  div_dst="$("$pybin" -c 'import fakenet.diverters.diverterbase as d, pathlib; print(pathlib.Path(d.__file__).resolve())' 2>/dev/null || true)"
+  if [[ -z "$div_dst" || ! -f "$div_dst" ]]; then
+    echo "ERROR: could not locate FakeNet diverterbase to patch" >&2
+    return 1
+  fi
+  "$pybin" "$priv_patch" "$div_dst" || return 1
+  rm -rf "$(dirname "$div_dst")/__pycache__" 2>/dev/null || true
+  if ! grep -q 'CapEff:' "$div_dst" || ! grep -q '1 << 12' "$div_dst"; then
+    echo "ERROR: diverter privcheck patch did not apply" >&2
+    return 1
   fi
   rm -rf /opt/quarantine-gateway/venv-fakenet/lib/python*/site-packages/fakenet/configs/temp_certs \
     2>/dev/null || true
