@@ -15,6 +15,9 @@ WAN_IF="${QUARANTINE_WAN_IF:-}"
 
 mkdir -p "$OPT" "$LOG/pcap" "$LOG/proxy" /etc/quarantine-gateway
 cp -a "$ROOT/." "$OPT/"
+test -f "$OPT/python/requirements-mitm.txt"
+test -f "$OPT/python/requirements-fakenet.txt"
+test -f "$OPT/python/fakenet-source.pin"
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -205,11 +208,14 @@ rm -f /etc/quarantine-gateway/nft-emergency 2>/dev/null || true
 # mitmproxy venv
 # Ubuntu 26.04 ships Python 3.14; mitmproxy 11 pins deps without cp314 wheels
 # (Brotli/zstandard source builds fail). Prefer mitmproxy 12+ with binary wheels.
+# Install from hashed lockfile (gateway/python/requirements-mitm.txt) — never floating ranges.
 if [[ ! -x /opt/quarantine-gateway/venv/bin/mitmdump ]]; then
+  test -f "$OPT/python/requirements-mitm.txt"
   rm -rf /opt/quarantine-gateway/venv
   python3 -m venv /opt/quarantine-gateway/venv
   /opt/quarantine-gateway/venv/bin/pip install --upgrade pip setuptools wheel
-  /opt/quarantine-gateway/venv/bin/pip install --prefer-binary 'mitmproxy>=12,<13'
+  /opt/quarantine-gateway/venv/bin/pip install --require-hashes --prefer-binary \
+    -r "$OPT/python/requirements-mitm.txt"
 else
   echo "mitmproxy already present — skipping pip install"
 fi
@@ -220,10 +226,15 @@ test -f "$ROOT/systemd/quarantine-mitm-explicit.service"
 test -f "$ROOT/fakenet/patch_diverter_privcheck.py"
 test -f "$ROOT/scripts/ensure-service-users.sh"
 test -f "$ROOT/nftables-emergency.conf"
+test -f "$ROOT/python/requirements-mitm.txt"
+test -f "$ROOT/python/requirements-fakenet.txt"
+test -f "$ROOT/python/fakenet-source.pin"
 cp -a "$ROOT/." "$OPT/"
 test -f "$OPT/fakenet/patch_diverter_privcheck.py"
 test -f "$OPT/systemd/quarantine-fakenet.service"
 test -f "$OPT/nftables-emergency.conf"
+test -f "$OPT/python/requirements-mitm.txt"
+test -f "$OPT/python/fakenet-source.pin"
 
 # PAC for explicit fallback (gateway LAN IP)
 sed "s/__GATEWAY__/${LAN_IP}/g" "$OPT/mitm/quarantine.pac" >/etc/quarantine-gateway/quarantine.pac

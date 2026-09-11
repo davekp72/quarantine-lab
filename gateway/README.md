@@ -32,6 +32,7 @@
 #   Incremental sync (mode / post-provision): EnsureTrafficModeScripts uploads units, ensure-users,
 #   FakeNet patches (incl. diverter privcheck), nft templates, and set-traffic-mode.
 #   nft load failures apply nftables-emergency.conf (drop LAN→WAN) and fail provision/mode.
+#   Python pins: gateway/python/requirements-{mitm,fakenet}.txt + fakenet-source.pin (hashed; no master.zip).
 
 # Guest Windows (Configure-QuarantineGuestNetwork.ps1 -Mode gateway):
 #   Outbound allow (normal internet). Only special block: SSH to the gateway itself.

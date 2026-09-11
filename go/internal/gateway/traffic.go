@@ -248,6 +248,9 @@ func (m *Manager) EnsureTrafficModeScripts() error {
 		{filepath.Join(root, "scripts", "start-capture.sh"), "/tmp/quarantine-capture-start.sh"},
 		{filepath.Join(root, "scripts", "stop-capture.sh"), "/tmp/quarantine-capture-stop.sh"},
 		{filepath.Join(root, "scripts", "export-ca.sh"), "/tmp/quarantine-export-ca.sh"},
+		{filepath.Join(root, "python", "fakenet-source.pin"), "/tmp/quarantine-fakenet-source.pin"},
+		{filepath.Join(root, "python", "requirements-fakenet.txt"), "/tmp/quarantine-requirements-fakenet.txt"},
+		{filepath.Join(root, "python", "requirements-mitm.txt"), "/tmp/quarantine-requirements-mitm.txt"},
 	}
 	for _, pair := range pairs {
 		if _, err := os.Stat(pair[0]); err != nil {
@@ -258,7 +261,7 @@ func (m *Manager) EnsureTrafficModeScripts() error {
 		}
 	}
 	script := `set -e
-mkdir -p /opt/quarantine-gateway/scripts /opt/quarantine-gateway/fakenet /var/log/quarantine/fakenet /etc/quarantine-gateway /usr/local/lib/quarantine
+mkdir -p /opt/quarantine-gateway/scripts /opt/quarantine-gateway/fakenet /opt/quarantine-gateway/python /var/log/quarantine/fakenet /etc/quarantine-gateway /usr/local/lib/quarantine
 install -m 0755 /tmp/quarantine-set-traffic-mode.sh /usr/local/sbin/quarantine-set-traffic-mode
 install -m 0755 /tmp/quarantine-install-fakenet.sh /usr/local/sbin/quarantine-install-fakenet
 install -m 0755 /tmp/quarantine-repair-wan-dns.sh /usr/local/sbin/quarantine-repair-wan-dns
@@ -284,6 +287,9 @@ install -m 0644 /tmp/quarantine-fakenet-patch_httplistener.py /opt/quarantine-ga
 install -m 0644 /tmp/quarantine-fakenet-patch_diverter_privcheck.py /opt/quarantine-gateway/fakenet/patch_diverter_privcheck.py
 install -m 0644 /tmp/quarantine-fakenet-HTTPListener.py /opt/quarantine-gateway/fakenet/HTTPListener.py
 install -m 0644 /tmp/quarantine-fakenet-test_connect_proxy.py /opt/quarantine-gateway/fakenet/test_connect_proxy.py
+install -m 0644 /tmp/quarantine-fakenet-source.pin /opt/quarantine-gateway/python/fakenet-source.pin
+install -m 0644 /tmp/quarantine-requirements-fakenet.txt /opt/quarantine-gateway/python/requirements-fakenet.txt
+install -m 0644 /tmp/quarantine-requirements-mitm.txt /opt/quarantine-gateway/python/requirements-mitm.txt
 cp /tmp/quarantine-install-fakenet.sh /opt/quarantine-gateway/scripts/install-fakenet.sh
 cp /tmp/quarantine-repair-wan-dns.sh /opt/quarantine-gateway/scripts/repair-wan-dns.sh
 cp /tmp/quarantine-ensure-service-users.sh /opt/quarantine-gateway/scripts/ensure-service-users.sh

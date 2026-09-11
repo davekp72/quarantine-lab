@@ -1,0 +1,7 @@
+# FakeNet-NG source pin (reviewed release tag v3.5).
+# Update deliberately after testing: bump COMMIT, re-download zip, refresh SHA256.
+# URL must be the commit archive (immutable), never refs/heads/master.
+FAKENET_REF=v3.5
+FAKENET_COMMIT=82c01b00f8da2f29fc4ae77c6f5546bb26dd8904
+FAKENET_URL=https://github.com/mandiant/flare-fakenet-ng/archive/82c01b00f8da2f29fc4ae77c6f5546bb26dd8904.zip
+FAKENET_SHA256=ba1e29111c63dd44fbd7250f54affe84eaddc30ae20eef45b4e97aec2b476660

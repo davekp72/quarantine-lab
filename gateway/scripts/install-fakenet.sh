@@ -144,22 +144,50 @@ fi
 
 pip=/opt/quarantine-gateway/venv-fakenet/bin/pip
 pybin=/opt/quarantine-gateway/venv-fakenet/bin/python
+PIN_FILE="$OPT/python/fakenet-source.pin"
+REQ_FILE="$OPT/python/requirements-fakenet.txt"
+
+if [[ ! -f "$PIN_FILE" || ! -f "$REQ_FILE" ]]; then
+  echo "ERROR: missing FakeNet pins under $OPT/python/ (re-run gateway provision)." >&2
+  exit 1
+fi
+# shellcheck disable=SC1090
+set -a
+# shellcheck source=/dev/null
+source "$PIN_FILE"
+set +a
+if [[ -z "${FAKENET_URL:-}" || -z "${FAKENET_SHA256:-}" ]]; then
+  echo "ERROR: $PIN_FILE must define FAKENET_URL and FAKENET_SHA256" >&2
+  exit 1
+fi
 
 "$pip" install --upgrade pip setuptools wheel
 # Prefer current cryptography/pyOpenSSL — FakeNet SSL is patched below for modern APIs.
-if ! "$pip" install --prefer-binary \
-  'NetfilterQueue>=1.1.0' dnslib dpkt pyopenssl cryptography \
-  pyftpdlib netifaces jinja2; then
-  echo "ERROR: FakeNet dependency build failed (netfilterqueue/netifaces)." >&2
+if ! "$pip" install --require-hashes --prefer-binary -r "$REQ_FILE"; then
+  echo "ERROR: FakeNet dependency install failed (hashed requirements)." >&2
   exit 1
 fi
 
 if ! "$pybin" -c 'import fakenet' 2>/dev/null; then
-  if ! "$pip" install --prefer-binary \
-    'https://github.com/mandiant/flare-fakenet-ng/archive/refs/heads/master.zip'; then
+  zip=$(mktemp /tmp/fakenet-src.XXXXXX)
+  cleanup_zip() { rm -f "$zip"; }
+  trap cleanup_zip EXIT
+  echo "Downloading FakeNet-NG ${FAKENET_REF:-pin} (${FAKENET_COMMIT:-unknown})..."
+  if ! curl -fsSL --retry 3 --connect-timeout 20 -o "$zip" "$FAKENET_URL"; then
+    echo "ERROR: failed to download FakeNet source from $FAKENET_URL" >&2
+    exit 1
+  fi
+  echo "${FAKENET_SHA256}  ${zip}" | sha256sum -c - || {
+    echo "ERROR: FakeNet source SHA-256 mismatch (refusing to install)." >&2
+    exit 1
+  }
+  # --no-deps: runtime deps already installed from the hashed lockfile.
+  if ! "$pip" install --no-deps --prefer-binary "$zip"; then
     echo "ERROR: FakeNet-NG pip install failed." >&2
     exit 1
   fi
+  cleanup_zip
+  trap - EXIT
 fi
 
 # Patch FakeNet SSL (X509Extension removed from pyOpenSSL) so HTTPS listeners work.
