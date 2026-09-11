@@ -27,8 +27,9 @@ if (-not $ViewerDir) {
 $indexPath = Join-Path $ViewerDir 'index.html'
 $stylesPath = Join-Path $ViewerDir 'styles.css'
 $appPath = Join-Path $ViewerDir 'app.js'
+$highlightPath = Join-Path $ViewerDir 'highlight.js'
 
-foreach ($required in @($indexPath, $stylesPath, $appPath)) {
+foreach ($required in @($indexPath, $stylesPath, $appPath, $highlightPath)) {
     if (-not (Test-Path -LiteralPath $required)) {
         throw "Viewer asset missing: $required"
     }
@@ -79,12 +80,28 @@ $viewerJson = ConvertTo-HtmlEmbeddedJson -Json ($viewerDiff | ConvertTo-Json -De
 
 $styles = Get-Content -LiteralPath $stylesPath -Raw -Encoding UTF8
 $appJs = Get-Content -LiteralPath $appPath -Raw -Encoding UTF8
+$highlightJs = Get-Content -LiteralPath $highlightPath -Raw -Encoding UTF8
 $html = Get-Content -LiteralPath $indexPath -Raw -Encoding UTF8
 
-$html = $html -replace '<link rel="stylesheet" href="styles.css">', "<style>`n$styles`n</style>"
-$html = $html -replace '<script src="app.js"></script>', @"
+# Inline style/script need CSP nonces (index.html uses script-src/style-src 'self' for external assets).
+$nonceBytes = New-Object byte[] 16
+[System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($nonceBytes)
+$cspNonce = [Convert]::ToBase64String($nonceBytes)
+$csp = "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'; img-src 'none'; font-src 'none'; connect-src 'none'; style-src 'nonce-$cspNonce'; script-src 'nonce-$cspNonce'"
+$html = [regex]::Replace(
+    $html,
+    '<meta http-equiv="Content-Security-Policy" content="[^"]*">',
+    "<meta http-equiv=`"Content-Security-Policy`" content=`"$csp`">",
+    1
+)
+
+$html = $html -replace '<link rel="stylesheet" href="styles.css">', "<style nonce=`"$cspNonce`">`n$styles`n</style>"
+$html = $html -replace '<script src="highlight.js"></script>\s*<script src="app.js"></script>', @"
 <script type="application/json" id="manifest-diff-data">$viewerJson</script>
-<script>
+<script nonce="$cspNonce">
+$highlightJs
+</script>
+<script nonce="$cspNonce">
 $appJs
 </script>
 "@

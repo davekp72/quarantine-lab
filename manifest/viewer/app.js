@@ -827,7 +827,10 @@
     wrap.className = 'http-flow-detail';
 
     const urlEl = document.createElement('p');
-    urlEl.innerHTML = `<strong>${escapeHtml(n.method || '')}</strong> ${escapeHtml(n.url || '')}`;
+    const methodEl = document.createElement('strong');
+    methodEl.textContent = n.method || '';
+    urlEl.appendChild(methodEl);
+    urlEl.appendChild(document.createTextNode(` ${n.url || ''}`));
     wrap.appendChild(urlEl);
 
     const resolved = Array.isArray(n.resolvedIps) ? n.resolvedIps.filter(Boolean) : [];
@@ -956,7 +959,14 @@
       card.className = 'stat-card';
       const activeKind = filterKind === 'dns' || filterKind === 'requests' ? 'added' : kind;
       if (statFilter === activeKind && filters.category === cat) card.classList.add('active');
-      card.innerHTML = `<div class="label">${label}</div><div class="value">${val}</div>`;
+      const labelEl = document.createElement('div');
+      labelEl.className = 'label';
+      labelEl.textContent = label;
+      const valueEl = document.createElement('div');
+      valueEl.className = 'value';
+      valueEl.textContent = String(val);
+      card.appendChild(labelEl);
+      card.appendChild(valueEl);
       card.addEventListener('click', () => {
         statFilter = activeKind;
         $('#changeFilter').value = 'added';
@@ -1253,66 +1263,155 @@
 
   function renderOverview(filtered) {
     const panel = $('#panel-overview');
+    panel.replaceChildren();
+
     const byDir = {};
     filtered.filter((r) => r.category === 'files' && r.kind !== 'volatile').forEach((r) => {
-      const p = r.label || '';
+      const p = String(r.label || '');
       const m = p.match(/^([A-Z]:\\[^\\]+\\[^\\]+)/i);
       const bucket = m ? m[1] : '(other)';
       byDir[bucket] = (byDir[bucket] || 0) + 1;
     });
 
+    const folderHeading = document.createElement('h3');
+    folderHeading.textContent = 'File changes by top-level folder';
+    panel.appendChild(folderHeading);
+
     const entries = Object.entries(byDir).sort((a, b) => b[1] - a[1]);
-    let html = '<h3>File changes by top-level folder</h3>';
     if (!entries.length) {
-      html += '<div class="empty">No file changes match current filters.</div>';
+      const empty = document.createElement('div');
+      empty.className = 'empty';
+      empty.textContent = 'No file changes match current filters.';
+      panel.appendChild(empty);
     } else {
-      html += '<table><thead><tr><th>Folder prefix</th><th>Changes</th></tr></thead><tbody>';
-      entries.forEach(([dir, count]) => {
-        html += `<tr><td class="path">${dir}</td><td>${count}</td></tr>`;
-      });
-      html += '</tbody></table>';
+      panel.appendChild(buildPlainTable(
+        ['Folder prefix', 'Changes'],
+        entries.map(([dir, count]) => [
+          { text: dir, className: 'path' },
+          String(count),
+        ])
+      ));
     }
 
     const interesting = filtered.filter((r) => !r.noise && r.kind !== 'volatile');
-    html += `<h3 style="margin-top:1.5rem">Notable changes <span class="count-pill">(${interesting.length})</span></h3>`;
-    html += '<p class="content-note" style="padding-top:0">Open Files, Registry, Network, or Sysmon tabs and click a row for details.</p>';
-    if (!interesting.length) {
-      html += '<div class="empty">Nothing notable after noise filter — toggle "Hide routine noise".</div>';
-    } else {
-      html += '<table><thead><tr><th>Type</th><th>Item</th><th>Detail</th></tr></thead><tbody>';
-      interesting.slice(0, 80).forEach((r) => {
-        const detail = r.cells.slice(2).map((c) => (typeof c === 'string' ? c : '')).join(' · ');
-        const kindHtml = r.cells[0] instanceof HTMLElement ? r.cells[0].outerHTML : r.kind;
-        html += `<tr class="selectable overview-row" data-row-id="${r.id}"><td>${kindHtml}</td><td class="path">${r.label || ''}</td><td>${detail}</td></tr>`;
-      });
-      if (interesting.length > 80) {
-        html += `<tr><td colspan="3" class="muted">… and ${interesting.length - 80} more (use tabs/filters)</td></tr>`;
-      }
-      html += '</tbody></table>';
-    }
-    panel.innerHTML = html;
+    const notableHeading = document.createElement('h3');
+    notableHeading.style.marginTop = '1.5rem';
+    notableHeading.append('Notable changes ');
+    const pill = document.createElement('span');
+    pill.className = 'count-pill';
+    pill.textContent = `(${interesting.length})`;
+    notableHeading.appendChild(pill);
+    panel.appendChild(notableHeading);
 
-    panel.querySelectorAll('.overview-row').forEach((tr) => {
+    const note = document.createElement('p');
+    note.className = 'content-note';
+    note.style.paddingTop = '0';
+    note.textContent = 'Open Files, Registry, Network, or Sysmon tabs and click a row for details.';
+    panel.appendChild(note);
+
+    if (!interesting.length) {
+      const empty = document.createElement('div');
+      empty.className = 'empty';
+      empty.textContent = 'Nothing notable after noise filter — toggle "Hide routine noise".';
+      panel.appendChild(empty);
+      return;
+    }
+
+    const rowsById = new Map();
+    interesting.forEach((r) => {
+      if (r && typeof r.id === 'string' && r.id) rowsById.set(r.id, r);
+    });
+
+    const shown = interesting.slice(0, 80);
+    const table = buildPlainTable(
+      ['Type', 'Item', 'Detail'],
+      shown.map((r) => {
+        const detail = r.cells.slice(2).map((c) => (typeof c === 'string' ? c : '')).join(' · ');
+        return {
+          rowId: r.id,
+          cells: [
+            { node: r.cells[0] instanceof HTMLElement ? r.cells[0].cloneNode(true) : null, text: r.kind },
+            { text: r.label || '', className: 'path' },
+            detail,
+          ],
+        };
+      })
+    );
+    table.querySelectorAll('tbody tr[data-row-id]').forEach((tr) => {
+      tr.classList.add('selectable', 'overview-row');
       tr.addEventListener('click', () => {
-        const rowId = tr.dataset.rowId;
-        const row = filtered.find((r) => r.id === rowId) || buildRows().find((r) => r.id === rowId);
-        if (row) {
-          const tab = row.category === 'tasks' ? 'tasks'
-            : row.category === 'registry' ? 'registry'
-            : row.category === 'sysmon' ? 'sysmon'
-            : row.category === 'network' && row.networkKind === 'dns' ? 'dns'
-            : row.category === 'network' ? 'network'
-            : 'files';
-          if (row.registryKey) {
-            selectedRegistryKey = row.registryKey;
-            ensureRegistryPathExpanded(row.registryKey);
-          }
-          setActiveTab(tab);
-          showDetail(row);
-          render();
+        const rowId = tr.getAttribute('data-row-id');
+        if (!isSafeOverviewRowId(rowId) || !rowsById.has(rowId)) return;
+        const row = rowsById.get(rowId);
+        const tab = row.category === 'tasks' ? 'tasks'
+          : row.category === 'registry' ? 'registry'
+          : row.category === 'sysmon' ? 'sysmon'
+          : row.category === 'network' && row.networkKind === 'dns' ? 'dns'
+          : row.category === 'network' ? 'network'
+          : 'files';
+        if (row.registryKey) {
+          selectedRegistryKey = row.registryKey;
+          ensureRegistryPathExpanded(row.registryKey);
         }
+        setActiveTab(tab);
+        showDetail(row);
+        render();
       });
     });
+    panel.appendChild(table);
+
+    if (interesting.length > 80) {
+      const more = document.createElement('p');
+      more.className = 'muted';
+      more.textContent = `… and ${interesting.length - 80} more (use tabs/filters)`;
+      panel.appendChild(more);
+    }
+  }
+
+  /** Overview row ids come from buildRows; reject control chars / absurd length. */
+  function isSafeOverviewRowId(id) {
+    if (typeof id !== 'string' || !id || id.length > 4096) return false;
+    if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(id)) return false;
+    return /^(file|registry|tasks|sysmon|network|usn):/.test(id);
+  }
+
+  function buildPlainTable(headers, rows) {
+    const table = document.createElement('table');
+    const thead = document.createElement('thead');
+    const headRow = document.createElement('tr');
+    headers.forEach((h) => {
+      const th = document.createElement('th');
+      th.textContent = h;
+      headRow.appendChild(th);
+    });
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+
+    const tbody = document.createElement('tbody');
+    rows.forEach((row) => {
+      const cells = Array.isArray(row) ? row : (row.cells || []);
+      const tr = document.createElement('tr');
+      if (row && typeof row.rowId === 'string' && row.rowId) {
+        tr.setAttribute('data-row-id', row.rowId);
+      }
+      cells.forEach((cell) => {
+        const td = document.createElement('td');
+        if (cell && typeof cell === 'object' && !Array.isArray(cell)) {
+          if (cell.className) td.className = cell.className;
+          if (cell.node instanceof Node) {
+            td.appendChild(cell.node);
+          } else {
+            td.textContent = cell.text != null ? String(cell.text) : '';
+          }
+        } else {
+          td.textContent = cell == null ? '' : String(cell);
+        }
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    return table;
   }
 
   function renderSysmonPanel() {
@@ -1745,4 +1844,10 @@
   } else if (window.__MANIFEST_DIFF__) {
     showDiff(window.__MANIFEST_DIFF__);
   }
+
+  // Expose DOM-safe helpers for offline regression tests (no secrets).
+  globalThis.QuarantineViewerSafeDOM = {
+    isSafeOverviewRowId,
+    buildPlainTable,
+  };
 })();
