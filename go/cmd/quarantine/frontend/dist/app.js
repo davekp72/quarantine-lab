@@ -253,6 +253,10 @@ async function setGatewayTrafficMode(mode) {
     if (st?.message) {
       const detailEl = $('#gateway-detail');
       if (detailEl) detailEl.textContent = String(st.message).split('\n')[0];
+      // Gateway switch already applied; guest probe failures are warnings only.
+      if (/WARNING:/i.test(String(st.message))) {
+        alert(String(st.message));
+      }
     }
     await refreshGatewayStatus();
   } catch (e) {

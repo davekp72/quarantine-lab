@@ -355,6 +355,10 @@ func (m *Manager) Provision() (string, error) {
 	if err != nil {
 		return out, fmt.Errorf("first-boot: %w (%s)", err, out)
 	}
+	// Refresh sbin/systemd/snippets from the host tree (covers updates without a mode switch).
+	if syncErr := m.EnsureTrafficModeScripts(); syncErr != nil {
+		out += "\n(WARNING: EnsureTrafficModeScripts: " + syncErr.Error() + ")"
+	}
 	if sshOut, sshErr := m.HardenSSH(); sshErr != nil {
 		return out, fmt.Errorf("provision ok but SSH harden failed: %w\n%s", sshErr, sshOut)
 	} else if sshOut != "" {
@@ -537,6 +541,8 @@ func (m *Manager) ApplyAgentLANForward() error {
 		{filepath.Join(root, "nftables-fakenet.conf"), "/tmp/quarantine-nftables-fakenet.conf", false},
 		{filepath.Join(root, "nftables-permissive-forward.inc"), "/tmp/quarantine-nftables-permissive-forward.inc", false},
 		{filepath.Join(root, "nftables-permissive-nat.inc"), "/tmp/quarantine-nftables-permissive-nat.inc", false},
+		{filepath.Join(root, "nftables-permissive-output.inc"), "/tmp/quarantine-nftables-permissive-output.inc", false},
+		{filepath.Join(root, "scripts", "nft-inject-permissive.py"), "/tmp/nft-inject-permissive.py", false},
 		{filepath.Join(root, "scripts", "enable-agent-forward.sh"), "/tmp/enable-agent-forward.sh", true},
 	}
 	for _, f := range files {
@@ -551,13 +557,18 @@ func (m *Manager) ApplyAgentLANForward() error {
 		}
 	}
 	inner := strings.Join([]string{
-		"mkdir -p /opt/quarantine-gateway /etc/quarantine-gateway",
+		"mkdir -p /opt/quarantine-gateway/scripts /etc/quarantine-gateway /usr/local/lib/quarantine",
 		"cp /tmp/quarantine-nftables.conf /opt/quarantine-gateway/nftables.conf",
 		"[[ -f /tmp/quarantine-nftables-fakenet.conf ]] && cp /tmp/quarantine-nftables-fakenet.conf /opt/quarantine-gateway/nftables-fakenet.conf || true",
 		"[[ -f /tmp/quarantine-nftables-permissive-forward.inc ]] && cp /tmp/quarantine-nftables-permissive-forward.inc /opt/quarantine-gateway/nftables-permissive-forward.inc || true",
 		"[[ -f /tmp/quarantine-nftables-permissive-nat.inc ]] && cp /tmp/quarantine-nftables-permissive-nat.inc /opt/quarantine-gateway/nftables-permissive-nat.inc || true",
+		"[[ -f /tmp/quarantine-nftables-permissive-output.inc ]] && cp /tmp/quarantine-nftables-permissive-output.inc /opt/quarantine-gateway/nftables-permissive-output.inc || true",
+		"[[ -f /tmp/nft-inject-permissive.py ]] && install -m 0755 /tmp/nft-inject-permissive.py /opt/quarantine-gateway/scripts/nft-inject-permissive.py && install -m 0755 /tmp/nft-inject-permissive.py /usr/local/lib/quarantine/nft-inject-permissive.py || true",
+		// Seed /etc only when missing so live allowlist from uploadPermissivePolicy is preserved.
+		// Always refresh output defaults into /opt; seed /etc output if absent (inject has a safe fallback).
 		"[[ -f /etc/quarantine-gateway/nftables-permissive-forward.inc ]] || { [[ -f /tmp/quarantine-nftables-permissive-forward.inc ]] && cp /tmp/quarantine-nftables-permissive-forward.inc /etc/quarantine-gateway/nftables-permissive-forward.inc; }",
 		"[[ -f /etc/quarantine-gateway/nftables-permissive-nat.inc ]] || { [[ -f /tmp/quarantine-nftables-permissive-nat.inc ]] && cp /tmp/quarantine-nftables-permissive-nat.inc /etc/quarantine-gateway/nftables-permissive-nat.inc; }",
+		"[[ -f /tmp/quarantine-nftables-permissive-output.inc ]] && { [[ -f /etc/quarantine-gateway/nftables-permissive-output.inc ]] || cp /tmp/quarantine-nftables-permissive-output.inc /etc/quarantine-gateway/nftables-permissive-output.inc; }",
 		"chmod +x /tmp/enable-agent-forward.sh",
 		fmt.Sprintf("/tmp/enable-agent-forward.sh %s %d %s %s",
 			g.GuestIP, port, g.LANGateway, g.LANCidr),

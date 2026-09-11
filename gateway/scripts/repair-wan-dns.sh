@@ -39,7 +39,7 @@ network:
       dhcp4: true
       dhcp6: false
       nameservers:
-        addresses: [10.0.2.3, 1.1.1.1, 8.8.8.8]
+        addresses: [1.1.1.1, 8.8.8.8]
 EOF
 
 chmod 600 /etc/netplan/*.yaml 2>/dev/null || true
@@ -69,12 +69,15 @@ if ! ip -4 addr show dev "$LAN_IF" | grep -q " ${LAN_IP}/"; then
 fi
 
 rm -f /etc/resolv.conf
-# Prefer public DNS — VBox NAT DNS (10.0.2.3) is often enough for ping but flaky for apt
-printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\nnameserver 10.0.2.3\n' >/etc/resolv.conf
+# Public DNS only — gateway output firewall blocks RFC1918 (including VBox 10.0.2.3).
+# Mode 644 so service users (mitm/dnsmasq helpers) can resolve.
+printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\nnameserver 1.0.0.1\n' >/etc/resolv.conf
+chmod 644 /etc/resolv.conf
 systemctl restart systemd-resolved 2>/dev/null || true
 if [[ -L /etc/resolv.conf ]] || grep -q '127.0.0.53' /etc/resolv.conf 2>/dev/null; then
   rm -f /etc/resolv.conf
-  printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\nnameserver 10.0.2.3\n' >/etc/resolv.conf
+  printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\nnameserver 1.0.0.1\n' >/etc/resolv.conf
+  chmod 644 /etc/resolv.conf
 fi
 
 # apt over IPv6 through VirtualBox NAT commonly fails with "Temporary failure resolving"
@@ -110,7 +113,7 @@ ip route
 echo "=== resolv.conf ==="
 cat /etc/resolv.conf
 echo "=== tests ==="
-ping -c 2 -W 3 10.0.2.3 || true
 getent hosts gb.archive.ubuntu.com || true
+ping -c 2 -W 3 1.1.1.1 || true
 ping -c 2 -W 3 gb.archive.ubuntu.com || true
 echo "Repair finished."

@@ -6,8 +6,11 @@ Conflicts=quarantine-mitm-explicit.service quarantine-mitm-transparent.service d
 
 [Service]
 Type=simple
+# FakeNet uses NFQUEUE + iptables divert + binds :53/:80/:443/:25.
+# Non-root+caps was unreliable (guest CONNECT hung → GUI FakeNet switch failed).
+# mitm/capture stay non-root; egress still contained by nftables output.
 WorkingDirectory=/var/log/quarantine/fakenet
-ExecStartPre=/bin/mkdir -p /var/log/quarantine/fakenet
+ExecStartPre=+/usr/bin/bash -c 'install -d -m 0755 /var/log/quarantine/fakenet /var/log/quarantine/fakenet/www /var/log/quarantine/fakenet/certs; if [[ -x /usr/local/sbin/quarantine-ensure-service-users ]]; then /usr/local/sbin/quarantine-ensure-service-users || true; fi'
 ExecStart=/opt/quarantine-gateway/venv-fakenet/bin/python -m fakenet.fakenet \
   -c /etc/quarantine-gateway/fakenet.ini \
   -n -p \
@@ -15,6 +18,7 @@ ExecStart=/opt/quarantine-gateway/venv-fakenet/bin/python -m fakenet.fakenet \
 Restart=on-failure
 RestartSec=5
 TimeoutStartSec=90
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target

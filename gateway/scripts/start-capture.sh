@@ -1,7 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 # shellcheck disable=SC1091
-[[ -f /etc/quarantine-gateway/ifaces.env ]] && source /etc/quarantine-gateway/ifaces.env
+if [[ -r /etc/quarantine-gateway/ifaces.env ]]; then
+  source /etc/quarantine-gateway/ifaces.env
+fi
 # ifaces.env uses LAN=; accept LAN_IF= too
 LAN_IF="${LAN_IF:-${LAN:-}}"
 if [[ -z "$LAN_IF" || ! -d "/sys/class/net/$LAN_IF" ]]; then
@@ -21,10 +23,14 @@ if [[ -z "$LAN_IF" ]]; then
   if [[ ${#ifs[@]} -ge 2 ]]; then LAN_IF="${ifs[1]}"; else LAN_IF="${ifs[0]:-eth1}"; fi
 fi
 OUTDIR=/var/log/quarantine/pcap
-mkdir -p "$OUTDIR"
+# Parent dirs are created as root by quarantine-ensure-service-users (ExecStartPre=+).
 STAMP=$(date -u +%Y%m%d-%H%M%S)
 PCAP="$OUTDIR/gateway-lan-$STAMP.pcap"
-echo "$PCAP" >/var/run/quarantine-capture.path
+PATHFILE="$OUTDIR/current.path"
+echo "$PCAP" >"$PATHFILE"
+if [[ -d /run/quarantine ]]; then
+  echo "$PCAP" >/run/quarantine/capture.path 2>/dev/null || true
+fi
 # Ensure path exists immediately (tcpdump also creates/truncates on -w)
 : >"$PCAP"
 echo "capturing on $LAN_IF -> $PCAP"

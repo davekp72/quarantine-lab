@@ -35,18 +35,12 @@ inject_nft_snippets() {
   local rendered="$1"
   local wan_rules="$ETC/nftables-permissive-forward.inc"
   local nat_rules="$ETC/nftables-permissive-nat.inc"
-  python3 - "$rendered" "$wan_rules" "$nat_rules" <<'PY'
-import pathlib, sys
-path, wan, nat = sys.argv[1], sys.argv[2], sys.argv[3]
-t = pathlib.Path(path).read_text()
-w = pathlib.Path(wan).read_text() if pathlib.Path(wan).is_file() else ""
-n = pathlib.Path(nat).read_text() if pathlib.Path(nat).is_file() else ""
-t = t.replace("__PERMISSIVE_WAN_RULES__\n", w if w.endswith("\n") or w == "" else w + "\n")
-t = t.replace("__PERMISSIVE_WAN_RULES__", w)
-t = t.replace("__PERMISSIVE_DNS_NAT__\n", n if n.endswith("\n") or n == "" else n + "\n")
-t = t.replace("__PERMISSIVE_DNS_NAT__", n)
-pathlib.Path(path).write_text(t)
-PY
+  local out_rules="$ETC/nftables-permissive-output.inc"
+  local injector="$OPT/scripts/nft-inject-permissive.py"
+  if [[ ! -f "$injector" ]]; then
+    injector=/usr/local/lib/quarantine/nft-inject-permissive.py
+  fi
+  python3 "$injector" "$rendered" "$wan_rules" "$nat_rules" "$out_rules"
 }
 
 apply_nft() {
@@ -90,7 +84,8 @@ ensure_fakenet_ca() {
   local www=/var/log/quarantine/fakenet/www
   local pybin=/opt/quarantine-gateway/venv-fakenet/bin/python
   local c pkg_www year
-  for c in /root/.mitmproxy/mitmproxy-ca.pem \
+  for c in /var/lib/quarantine-mitm/mitmproxy-ca.pem \
+           /root/.mitmproxy/mitmproxy-ca.pem \
            /home/quarantine/.mitmproxy/mitmproxy-ca.pem \
            /home/*/.mitmproxy/mitmproxy-ca.pem; do
     if [[ -f "$c" ]]; then
@@ -99,7 +94,7 @@ ensure_fakenet_ca() {
     fi
   done
   if [[ -z "$combined" ]]; then
-    echo "ERROR: mitmproxy CA not found under /root/.mitmproxy (run permissive mode once or gateway export-ca)." >&2
+    echo "ERROR: mitmproxy CA not found under /var/lib/quarantine-mitm (run gateway provision / export-ca)." >&2
     return 1
   fi
   mkdir -p "$ETC" /var/log/quarantine/fakenet/certs "$www"
@@ -115,6 +110,11 @@ ensure_fakenet_ca() {
     return 1
   fi
   chmod 600 "$key_out"
+  # FakeNet service user must read the CA key
+  if id quarantine-fakenet >/dev/null 2>&1; then
+    chgrp quarantine-fakenet "$key_out" 2>/dev/null || true
+    chmod 640 "$key_out"
+  fi
   chmod 644 "$cert_out"
   openssl x509 -in "$cert_out" -outform DER -out "$cer_out" 2>/dev/null || cp -f "$cert_out" "$cer_out"
   chmod 644 "$cer_out"
@@ -311,9 +311,12 @@ mode_fakenet() {
   # Drop cached FakeNet leaves (old CDP / 1970-dated / CA-as-leaf) so they are re-signed.
   rm -rf /opt/quarantine-gateway/venv-fakenet/lib/python*/site-packages/fakenet/configs/temp_certs \
     /var/log/quarantine/fakenet/certs
-  mkdir -p /var/log/quarantine/fakenet/certs
+  mkdir -p /var/log/quarantine/fakenet/certs /var/log/quarantine/fakenet/www
+  # Ensure writable for the FakeNet process (root today; safe if later dropped).
+  chmod 755 /var/log/quarantine/fakenet /var/log/quarantine/fakenet/certs /var/log/quarantine/fakenet/www
   publish_fakenet_crl
   apply_nft "$OPT/nftables-fakenet.conf" || return 1
+  systemctl daemon-reload 2>/dev/null || true
   systemctl start quarantine-fakenet || return 1
   if ! systemctl is-active --quiet quarantine-fakenet; then
     echo "quarantine-fakenet failed to start" >&2
@@ -321,7 +324,7 @@ mode_fakenet() {
     return 1
   fi
   local i
-  for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
     if dns_listener_up; then
       break
     fi
@@ -339,17 +342,18 @@ mode_fakenet() {
     echo "WARNING: FakeNet TCP/443 is not listening (HTTPS may be down)" >&2
     tail -n 30 "$LOG/fakenet/fakenet.log" >&2 || true
   fi
-  if ! ss -tlnp 2>/dev/null | grep -qE ':8080\b'; then
-    echo "WARNING: FakeNet TCP/8080 is not listening (browsers using PAC/CONNECT will fail)" >&2
-    tail -n 30 "$LOG/fakenet/fakenet.log" >&2 || true
-  fi
-  local p
-  for p in 1 2 3 4 5 6 7 8 9 10; do
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
     if ss -tlnp 2>/dev/null | grep -qE ':8080\b'; then
       break
     fi
     sleep 0.5
   done
+  if ! ss -tlnp 2>/dev/null | grep -qE ':8080\b'; then
+    echo "ERROR: FakeNet TCP/8080 is not listening (browsers using PAC/CONNECT will fail)" >&2
+    tail -n 50 "$LOG/fakenet/fakenet.log" >&2 || true
+    journalctl -u quarantine-fakenet -n 40 --no-pager >&2 || true
+    return 1
+  fi
   if ! /opt/quarantine-gateway/venv-fakenet/bin/python \
       "$OPT/fakenet/test_connect_proxy.py" "$LAN_IP" 8080; then
     echo "ERROR: browser HTTPS path failed (CONNECT+TLS via :8080). HTTP-only browsers would still work." >&2

@@ -36,7 +36,14 @@ if ($roots.Count -eq 0) {
 
 $tcp = New-Object System.Net.Sockets.TcpClient
 try {
-    $tcp.Connect($ProxyHost, $ProxyPort)
+    # Avoid hanging forever when FakeNet :8080 is down (VBox guestcontrol then times out oddly).
+    $ar = $tcp.BeginConnect($ProxyHost, $ProxyPort, $null, $null)
+    if (-not $ar.AsyncWaitHandle.WaitOne(8000, $false)) {
+        Write-KV 'connect' 'tcp-timeout'
+        try { $tcp.Close() } catch {}
+        exit 2
+    }
+    $tcp.EndConnect($ar)
 } catch {
     Write-KV 'connect' ('tcp-fail ' + $_.Exception.Message)
     exit 2

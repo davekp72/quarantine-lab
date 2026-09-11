@@ -5,23 +5,42 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=quarantine-mitm
+Group=quarantine-mitm
 Environment=QUARANTINE_ACCESS_LOG=/var/log/quarantine/proxy/access.log
 Environment=QUARANTINE_ERROR_LOG=/var/log/quarantine/proxy/errors.log
 Environment=QUARANTINE_FLOWS_JSONL=/var/log/quarantine/proxy/flows.jsonl
 Environment=QUARANTINE_PAC_PATH=/etc/quarantine-gateway/quarantine.pac
-Environment=QUARANTINE_CA_PATH=/root/.mitmproxy/mitmproxy-ca-cert.pem
-ExecStartPre=/bin/mkdir -p /var/log/quarantine/proxy /root/.mitmproxy
+Environment=QUARANTINE_CA_PATH=/var/lib/quarantine-mitm/mitmproxy-ca-cert.pem
+# '+' = root. Create users/dirs here — never mkdir as the service user.
+ExecStartPre=+/usr/local/sbin/quarantine-ensure-service-users
 ExecStart=/opt/quarantine-gateway/venv/bin/mitmdump \
   --mode regular \
   --listen-host 0.0.0.0 \
   --listen-port 8080 \
   --set block_global=false \
   --set ipv6=false \
-  --set confdir=/root/.mitmproxy \
+  --set confdir=/var/lib/quarantine-mitm \
   -s /etc/quarantine-gateway/block_private.py \
   --set hardcopy=/var/log/quarantine/proxy/flows.mitm
 Restart=on-failure
 RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+ReadWritePaths=/var/lib/quarantine-mitm /var/log/quarantine/proxy
+ReadOnlyPaths=/etc/quarantine-gateway /opt/quarantine-gateway/venv
+# :8080 does not need bind-service; keep NET_ADMIN/RAW minimal for netlink helpers.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
 
 [Install]
 WantedBy=multi-user.target

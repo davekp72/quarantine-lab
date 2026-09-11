@@ -62,21 +62,16 @@ pick_template() {
 
 inject_nft_snippets() {
   local rendered="$1"
-  local wan_rules nat_rules
+  local wan_rules nat_rules out_rules injector
   wan_rules="$(first_existing "$ETC/nftables-permissive-forward.inc" "$OPT/nftables-permissive-forward.inc" || true)"
   nat_rules="$(first_existing "$ETC/nftables-permissive-nat.inc" "$OPT/nftables-permissive-nat.inc" || true)"
-  python3 - "$rendered" "${wan_rules:-}" "${nat_rules:-}" <<'PY'
-import pathlib, sys
-path, wan, nat = sys.argv[1], sys.argv[2], sys.argv[3]
-t = pathlib.Path(path).read_text()
-w = pathlib.Path(wan).read_text() if wan and pathlib.Path(wan).is_file() else ""
-n = pathlib.Path(nat).read_text() if nat and pathlib.Path(nat).is_file() else ""
-t = t.replace("__PERMISSIVE_WAN_RULES__\n", w if w.endswith("\n") or w == "" else w + "\n")
-t = t.replace("__PERMISSIVE_WAN_RULES__", w)
-t = t.replace("__PERMISSIVE_DNS_NAT__\n", n if n.endswith("\n") or n == "" else n + "\n")
-t = t.replace("__PERMISSIVE_DNS_NAT__", n)
-pathlib.Path(path).write_text(t)
-PY
+  out_rules="$(first_existing "$ETC/nftables-permissive-output.inc" "$OPT/nftables-permissive-output.inc" || true)"
+  injector="$(first_existing "$OPT/scripts/nft-inject-permissive.py" /usr/local/lib/quarantine/nft-inject-permissive.py || true)"
+  if [[ -z "$injector" ]]; then
+    echo "nft-inject-permissive.py missing" >&2
+    return 1
+  fi
+  python3 "$injector" "$rendered" "${wan_rules:-}" "${nat_rules:-}" "${out_rules:-}"
 }
 
 TEMPLATE="$(pick_template || true)"

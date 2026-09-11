@@ -8,7 +8,13 @@ pkill -TERM -f '/usr/bin/tcpdump -i' 2>/dev/null
 sleep 0.15
 pkill -KILL -x tcpdump 2>/dev/null
 pkill -KILL -f '/usr/bin/tcpdump -i' 2>/dev/null
-if [[ -f /var/run/quarantine-capture.path ]]; then
+if [[ -f /var/log/quarantine/pcap/current.path ]]; then
+  echo "PCAP: $(cat /var/log/quarantine/pcap/current.path)"
+elif [[ -f /run/quarantine/capture.path ]]; then
+  echo "PCAP: $(cat /run/quarantine/capture.path)"
+elif [[ -f /run/quarantine-capture.path ]]; then
+  echo "PCAP: $(cat /run/quarantine-capture.path)"
+elif [[ -f /var/run/quarantine-capture.path ]]; then
   echo "PCAP: $(cat /var/run/quarantine-capture.path)"
 fi
 exit 0

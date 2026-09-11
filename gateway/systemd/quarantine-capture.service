@@ -5,9 +5,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=quarantine-capture
+Group=quarantine-capture
 EnvironmentFile=-/etc/quarantine-gateway/ifaces.env
+ExecStartPre=+/usr/local/sbin/quarantine-ensure-service-users
 ExecStart=/usr/local/sbin/quarantine-capture-start
-# ExecStop must not call systemctl stop (deadlock). Script only signals tcpdump.
 ExecStop=/usr/local/sbin/quarantine-capture-stop
 TimeoutStopSec=5
 KillMode=mixed
@@ -15,6 +17,19 @@ KillSignal=SIGTERM
 FinalKillSignal=SIGKILL
 Restart=on-failure
 RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelModules=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_PACKET
+ReadWritePaths=/var/log/quarantine/pcap /run/quarantine
+ReadOnlyPaths=/etc/quarantine-gateway /usr/local/sbin /sys/class/net
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
 
 [Install]
 WantedBy=multi-user.target

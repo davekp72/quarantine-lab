@@ -87,3 +87,29 @@ func (p PermissivePolicy) PermissiveNATRules() string {
 		"    iifname \"__LAN__\" udp dport 53 redirect to :53\n" +
 		"    iifname \"__LAN__\" tcp dport 53 redirect to :53\n"
 }
+
+// PermissiveOutputRules is injected at __PERMISSIVE_OUTPUT_RULES__.
+// Mirrors the WAN allowlist for mitmproxy upstream (CONNECT) without opening private space.
+// DNS to arbitrary public IPs is intentionally omitted — nftables pins public resolvers.
+func (p PermissivePolicy) PermissiveOutputRules() string {
+	p = p.WithDefaults()
+	var b strings.Builder
+	b.WriteString("    # Gateway-originated public upstream (mitm CONNECT / apt). Private space already dropped.\n")
+	tcp := uniqueSortedPorts(p.TCPPorts)
+	if set := nftPortSet(tcp); set != "" {
+		b.WriteString(fmt.Sprintf("    tcp dport %s accept\n", set))
+	} else {
+		b.WriteString("    tcp dport { 80, 443 } accept\n")
+	}
+	var udpOut []int
+	for _, port := range uniqueSortedPorts(p.UDPPorts) {
+		if port == 53 || port == 853 {
+			continue
+		}
+		udpOut = append(udpOut, port)
+	}
+	if set := nftPortSet(udpOut); set != "" {
+		b.WriteString(fmt.Sprintf("    udp dport %s accept\n", set))
+	}
+	return b.String()
+}

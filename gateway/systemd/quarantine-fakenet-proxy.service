@@ -10,6 +10,7 @@ EnvironmentFile=-/etc/quarantine-gateway/fakenet-proxy.env
 ExecStart=/usr/bin/python3 /usr/local/sbin/quarantine-fakenet-explicit-proxy
 Restart=on-failure
 RestartSec=2
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target

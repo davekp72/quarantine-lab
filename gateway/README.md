@@ -12,19 +12,32 @@
 #                    SSH (:22) accepted on WAN only (host NAT PF); blocked from LAN guest
 #                    permissive: RFC1918 drop, MITM :80/:443, extra ports from allowlist
 #                    FakeNet: no LAN→WAN; listeners on :53/:80/:443/:25
+#                    output (both modes): drop private/link-local/metadata; pin public DNS;
+#                    allow lab LAN replies; permissive upstream ports from allowlist (default 80/443)
 #   mitmdump :8080   explicit proxy (PAC fallback) — block_private resolves DNS
 #   mitmdump :8082   transparent MITM (stopped in FakeNet mode)
 #   FakeNet-NG       optional LAN sinkhole (switch with gateway mode)
 #   tcpdump          LAN PCAP under /var/log/quarantine/pcap (all protocols)
 #
+# Service isolation
+#   mitm + capture: quarantine-mitm / quarantine-capture (non-root + caps).
+#   FakeNet: root (NFQUEUE/iptables + privileged ports); non-root was unreliable.
+#   ExecStartPre=+quarantine-ensure-service-users prepares users/dirs/venv perms.
+#   nftables output still drops private/metadata and allowlists public upstream.
+#   mitm CA: /var/lib/quarantine-mitm
+
 # Guest Windows (Configure-QuarantineGuestNetwork.ps1 -Mode gateway):
 #   Outbound allow (normal internet). Only special block: SSH to the gateway itself.
 #   Private/host-LAN isolation is enforced on this appliance, not by guest port pinning.#
 # Host NAT port-forwards (gateway VM) bind 127.0.0.1 only (SSH :2222, agent :9443).
 #
 # Re-apply nftables after template edits (from host):
-#   Copy gateway/nftables.conf + scripts/apply-nftables-harden.sh into the gateway, then:
-#     /tmp/apply-nftables-harden.sh '<gateway-sudo-password>'
+#   Copy into the gateway /tmp:
+#     nftables.conf, nftables-fakenet.conf (optional),
+#     nftables-permissive-{forward,nat,output}.inc,
+#     scripts/nft-inject-permissive.py, scripts/enable-agent-forward.sh,
+#     scripts/apply-nftables-harden.sh
+#   Then: /tmp/apply-nftables-harden.sh '<gateway-sudo-password>'
 #   Or re-run: .\quarantine-vm.ps1 gateway provision
 #
 # Host commands (after implement)

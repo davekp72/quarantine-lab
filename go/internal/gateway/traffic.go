@@ -51,7 +51,12 @@ func (m *Manager) SetTrafficMode(mode string) (string, error) {
 	if note != "" {
 		msg += "\n" + note
 	}
-	return msg, verr
+	if verr != nil {
+		// Gateway already switched and config persisted. A failed guest probe must not
+		// undo that in the UI (alert made it look like FakeNet/permissive never applied).
+		msg += "\nWARNING: " + verr.Error()
+	}
+	return msg, nil
 }
 
 // verifyGuestHTTPS checks MITM from the lab VM when it is running.
@@ -112,7 +117,7 @@ func (m *Manager) testFakeNetGuestBrowser() error {
 		win, user, pass,
 		`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`,
 		[]string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", dest},
-		90*time.Second,
+		45*time.Second,
 	)
 	msg := strings.TrimSpace(out)
 	if err != nil {
@@ -222,6 +227,9 @@ func (m *Manager) EnsureTrafficModeScripts() error {
 		{filepath.Join(root, "nftables-fakenet.conf"), "/tmp/quarantine-nftables-fakenet.conf"},
 		{filepath.Join(root, "nftables-permissive-forward.inc"), "/tmp/quarantine-nftables-permissive-forward.inc"},
 		{filepath.Join(root, "nftables-permissive-nat.inc"), "/tmp/quarantine-nftables-permissive-nat.inc"},
+		{filepath.Join(root, "nftables-permissive-output.inc"), "/tmp/quarantine-nftables-permissive-output.inc"},
+		{filepath.Join(root, "scripts", "nft-inject-permissive.py"), "/tmp/nft-inject-permissive.py"},
+		{filepath.Join(root, "scripts", "ensure-service-users.sh"), "/tmp/quarantine-ensure-service-users.sh"},
 		{filepath.Join(root, "fakenet", "quarantine.ini"), "/tmp/quarantine-fakenet.ini"},
 		{filepath.Join(root, "fakenet", "ssl_utils_init.py"), "/tmp/quarantine-fakenet-ssl_utils.py"},
 		{filepath.Join(root, "fakenet", "patch_httplistener.py"), "/tmp/quarantine-fakenet-patch_httplistener.py"},
@@ -231,9 +239,13 @@ func (m *Manager) EnsureTrafficModeScripts() error {
 		{filepath.Join(root, "systemd", "quarantine-fakenet-proxy.service"), "/tmp/quarantine-fakenet-proxy.service"},
 		{filepath.Join(root, "systemd", "quarantine-mitm-explicit.service"), "/tmp/quarantine-mitm-explicit.service"},
 		{filepath.Join(root, "systemd", "quarantine-mitm-transparent.service"), "/tmp/quarantine-mitm-transparent.service"},
+		{filepath.Join(root, "systemd", "quarantine-capture.service"), "/tmp/quarantine-capture.service"},
 		{filepath.Join(root, "systemd", "quarantine-traffic-mode.service"), "/tmp/quarantine-traffic-mode.service"},
 		{filepath.Join(root, "scripts", "status.sh"), "/tmp/quarantine-gateway-status.sh"},
 		{filepath.Join(root, "scripts", "fakenet-explicit-proxy.py"), "/tmp/quarantine-fakenet-explicit-proxy.py"},
+		{filepath.Join(root, "scripts", "start-capture.sh"), "/tmp/quarantine-capture-start.sh"},
+		{filepath.Join(root, "scripts", "stop-capture.sh"), "/tmp/quarantine-capture-stop.sh"},
+		{filepath.Join(root, "scripts", "export-ca.sh"), "/tmp/quarantine-export-ca.sh"},
 	}
 	for _, pair := range pairs {
 		if _, err := os.Stat(pair[0]); err != nil {
@@ -244,21 +256,25 @@ func (m *Manager) EnsureTrafficModeScripts() error {
 		}
 	}
 	script := `set -e
-mkdir -p /opt/quarantine-gateway/scripts /opt/quarantine-gateway/fakenet /var/log/quarantine/fakenet /etc/quarantine-gateway
+mkdir -p /opt/quarantine-gateway/scripts /opt/quarantine-gateway/fakenet /var/log/quarantine/fakenet /etc/quarantine-gateway /usr/local/lib/quarantine
 install -m 0755 /tmp/quarantine-set-traffic-mode.sh /usr/local/sbin/quarantine-set-traffic-mode
 install -m 0755 /tmp/quarantine-install-fakenet.sh /usr/local/sbin/quarantine-install-fakenet
 install -m 0755 /tmp/quarantine-repair-wan-dns.sh /usr/local/sbin/quarantine-repair-wan-dns
 install -m 0755 /tmp/quarantine-gateway-status.sh /usr/local/sbin/quarantine-gateway-status
+install -m 0755 /tmp/quarantine-ensure-service-users.sh /usr/local/sbin/quarantine-ensure-service-users
+install -m 0755 /tmp/nft-inject-permissive.py /opt/quarantine-gateway/scripts/nft-inject-permissive.py
+install -m 0755 /tmp/nft-inject-permissive.py /usr/local/lib/quarantine/nft-inject-permissive.py
+install -m 0755 /tmp/quarantine-capture-start.sh /usr/local/sbin/quarantine-capture-start
+install -m 0755 /tmp/quarantine-capture-stop.sh /usr/local/sbin/quarantine-capture-stop
+install -m 0755 /tmp/quarantine-export-ca.sh /usr/local/sbin/quarantine-export-ca 2>/dev/null || true
 install -m 0644 /tmp/quarantine-nftables.conf /opt/quarantine-gateway/nftables.conf
 install -m 0644 /tmp/quarantine-nftables-fakenet.conf /opt/quarantine-gateway/nftables-fakenet.conf
 install -m 0644 /tmp/quarantine-nftables-permissive-forward.inc /opt/quarantine-gateway/nftables-permissive-forward.inc
 install -m 0644 /tmp/quarantine-nftables-permissive-nat.inc /opt/quarantine-gateway/nftables-permissive-nat.inc
-if [[ ! -f /etc/quarantine-gateway/nftables-permissive-forward.inc ]]; then
-  install -m 0644 /tmp/quarantine-nftables-permissive-forward.inc /etc/quarantine-gateway/nftables-permissive-forward.inc
-fi
-if [[ ! -f /etc/quarantine-gateway/nftables-permissive-nat.inc ]]; then
-  install -m 0644 /tmp/quarantine-nftables-permissive-nat.inc /etc/quarantine-gateway/nftables-permissive-nat.inc
-fi
+install -m 0644 /tmp/quarantine-nftables-permissive-output.inc /opt/quarantine-gateway/nftables-permissive-output.inc
+install -m 0644 /tmp/quarantine-nftables-permissive-forward.inc /etc/quarantine-gateway/nftables-permissive-forward.inc
+install -m 0644 /tmp/quarantine-nftables-permissive-nat.inc /etc/quarantine-gateway/nftables-permissive-nat.inc
+install -m 0644 /tmp/quarantine-nftables-permissive-output.inc /etc/quarantine-gateway/nftables-permissive-output.inc
 install -m 0644 /tmp/quarantine-fakenet.ini /opt/quarantine-gateway/fakenet/quarantine.ini
 install -m 0644 /tmp/quarantine-fakenet-ssl_utils.py /opt/quarantine-gateway/fakenet/ssl_utils_init.py
 install -m 0644 /tmp/quarantine-fakenet-patch_httplistener.py /opt/quarantine-gateway/fakenet/patch_httplistener.py
@@ -266,12 +282,15 @@ install -m 0644 /tmp/quarantine-fakenet-HTTPListener.py /opt/quarantine-gateway/
 install -m 0644 /tmp/quarantine-fakenet-test_connect_proxy.py /opt/quarantine-gateway/fakenet/test_connect_proxy.py
 cp /tmp/quarantine-install-fakenet.sh /opt/quarantine-gateway/scripts/install-fakenet.sh
 cp /tmp/quarantine-repair-wan-dns.sh /opt/quarantine-gateway/scripts/repair-wan-dns.sh
+cp /tmp/quarantine-ensure-service-users.sh /opt/quarantine-gateway/scripts/ensure-service-users.sh
 install -m 0644 /tmp/quarantine-fakenet.service /etc/systemd/system/quarantine-fakenet.service
 install -m 0644 /tmp/quarantine-fakenet-proxy.service /etc/systemd/system/quarantine-fakenet-proxy.service
 install -m 0644 /tmp/quarantine-mitm-explicit.service /etc/systemd/system/quarantine-mitm-explicit.service
 install -m 0644 /tmp/quarantine-mitm-transparent.service /etc/systemd/system/quarantine-mitm-transparent.service
+install -m 0644 /tmp/quarantine-capture.service /etc/systemd/system/quarantine-capture.service
 install -m 0755 /tmp/quarantine-fakenet-explicit-proxy.py /usr/local/sbin/quarantine-fakenet-explicit-proxy
 install -m 0644 /tmp/quarantine-traffic-mode.service /etc/systemd/system/quarantine-traffic-mode.service
+/usr/local/sbin/quarantine-ensure-service-users || true
 systemctl daemon-reload
 systemctl enable quarantine-traffic-mode >/dev/null 2>&1 || true
 `
@@ -287,6 +306,7 @@ func (m *Manager) uploadPermissivePolicy() error {
 	policyPath := filepath.Join(dir, "qlab-permissive-policy.json")
 	fwdPath := filepath.Join(dir, "qlab-nft-forward.inc")
 	natPath := filepath.Join(dir, "qlab-nft-nat.inc")
+	outPath := filepath.Join(dir, "qlab-nft-output.inc")
 	raw, err := json.MarshalIndent(pol, "", "  ")
 	if err != nil {
 		return err
@@ -300,9 +320,13 @@ func (m *Manager) uploadPermissivePolicy() error {
 	if err := os.WriteFile(natPath, []byte(pol.PermissiveNATRules()), 0o600); err != nil {
 		return err
 	}
+	if err := os.WriteFile(outPath, []byte(pol.PermissiveOutputRules()), 0o600); err != nil {
+		return err
+	}
 	defer os.Remove(policyPath)
 	defer os.Remove(fwdPath)
 	defer os.Remove(natPath)
+	defer os.Remove(outPath)
 	if err := m.linuxCopyFileTo(policyPath, "/tmp/quarantine-permissive-policy.json"); err != nil {
 		return fmt.Errorf("upload permissive policy: %w", err)
 	}
@@ -312,11 +336,15 @@ func (m *Manager) uploadPermissivePolicy() error {
 	if err := m.linuxCopyFileTo(natPath, "/tmp/quarantine-nftables-permissive-nat.inc"); err != nil {
 		return fmt.Errorf("upload nft nat snippet: %w", err)
 	}
+	if err := m.linuxCopyFileTo(outPath, "/tmp/quarantine-nftables-permissive-output.inc"); err != nil {
+		return fmt.Errorf("upload nft output snippet: %w", err)
+	}
 	script := `set -e
 mkdir -p /etc/quarantine-gateway
 install -m 0644 /tmp/quarantine-permissive-policy.json /etc/quarantine-gateway/permissive-policy.json
 install -m 0644 /tmp/quarantine-nftables-permissive-forward.inc /etc/quarantine-gateway/nftables-permissive-forward.inc
 install -m 0644 /tmp/quarantine-nftables-permissive-nat.inc /etc/quarantine-gateway/nftables-permissive-nat.inc
+install -m 0644 /tmp/quarantine-nftables-permissive-output.inc /etc/quarantine-gateway/nftables-permissive-output.inc
 `
 	_, err = m.linuxRunWithTimeout(45*time.Second, "sudo", "bash", "-c", script)
 	return err

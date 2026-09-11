@@ -6,7 +6,7 @@
   Run inside the quarantine VM as Administrator.
 
   FakeNet and permissive MITM both sign TLS with the gateway's mitmproxy CA
-  (/root/.mitmproxy on Quarantine-Gateway). Do not install the host
+  (/var/lib/quarantine-mitm on Quarantine-Gateway). Do not install the host
   (10.0.2.2) CA unless you are on the legacy host-nat path.
 
   In FakeNet mode the CA is served over HTTP:

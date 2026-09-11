@@ -40,6 +40,21 @@ func TestPermissiveExtraPort(t *testing.T) {
 	if !strings.Contains(fwd, "tcp dport { 22, 8443 } accept") {
 		t.Fatalf("expected extra TCP allow:\n%s", fwd)
 	}
+	out := p.PermissiveOutputRules()
+	if !strings.Contains(out, "tcp dport { 22, 80, 443, 8443 } accept") {
+		t.Fatalf("expected output allowlist to include extras + web:\n%s", out)
+	}
+}
+
+func TestPermissiveOutputDefaultWebOnly(t *testing.T) {
+	p := DefaultPermissivePolicy()
+	out := p.PermissiveOutputRules()
+	if !strings.Contains(out, "tcp dport { 80, 443 } accept") {
+		t.Fatalf("expected default web output:\n%s", out)
+	}
+	if strings.Contains(out, "udp dport 53 accept") {
+		t.Fatalf("output must not blanket-allow DNS to all public IPs:\n%s", out)
+	}
 }
 
 func TestPermissiveNATForceDNS(t *testing.T) {

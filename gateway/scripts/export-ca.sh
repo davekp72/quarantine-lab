@@ -3,8 +3,14 @@
 set -euo pipefail
 mkdir -p /etc/quarantine-gateway /tmp /var/log/quarantine/proxy
 
+if [[ -x /usr/local/sbin/quarantine-ensure-service-users ]]; then
+  /usr/local/sbin/quarantine-ensure-service-users || true
+fi
+
 SRC=""
 for c in \
+  /var/lib/quarantine-mitm/mitmproxy-ca-cert.pem \
+  /var/lib/quarantine-mitm/mitmproxy-ca-cert.cer \
   /etc/quarantine-gateway/mitmproxy-ca-cert.cer \
   /etc/quarantine-gateway/mitmproxy-ca-cert.pem \
   /root/.mitmproxy/mitmproxy-ca-cert.pem \
@@ -19,14 +25,17 @@ done
 if [[ -z "$SRC" ]]; then
   systemctl restart quarantine-mitm-explicit || true
   sleep 3
-  if [[ -f /root/.mitmproxy/mitmproxy-ca-cert.pem ]]; then
-    SRC=/root/.mitmproxy/mitmproxy-ca-cert.pem
-  fi
+  for c in /var/lib/quarantine-mitm/mitmproxy-ca-cert.pem /root/.mitmproxy/mitmproxy-ca-cert.pem; do
+    if [[ -f "$c" ]]; then
+      SRC="$c"
+      break
+    fi
+  done
 fi
 
 if [[ -z "$SRC" || ! -f "$SRC" ]]; then
-  echo "mitmproxy CA not found under /root/.mitmproxy or /etc/quarantine-gateway" >&2
-  ls -la /root/.mitmproxy 2>/dev/null || true
+  echo "mitmproxy CA not found under /var/lib/quarantine-mitm or /etc/quarantine-gateway" >&2
+  ls -la /var/lib/quarantine-mitm /root/.mitmproxy 2>/dev/null || true
   exit 1
 fi
 
@@ -41,7 +50,10 @@ case "$SRC" in
 esac
 
 cp -f /tmp/quarantine-ca.cer /etc/quarantine-gateway/mitmproxy-ca-cert.cer
-cp -f "$SRC" /var/log/quarantine/proxy/mitmproxy-ca-cert.pem 2>/dev/null || true
+if [[ "$SRC" == *.pem ]]; then
+  cp -f "$SRC" /etc/quarantine-gateway/mitmproxy-ca-cert.pem
+  cp -f "$SRC" /var/log/quarantine/proxy/mitmproxy-ca-cert.pem 2>/dev/null || true
+fi
 chmod 644 /tmp/quarantine-ca.cer /etc/quarantine-gateway/mitmproxy-ca-cert.cer
 # Allow guestcontrol user to copyfrom
 if id quarantine >/dev/null 2>&1; then
