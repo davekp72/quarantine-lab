@@ -5,6 +5,9 @@ echo "=== Quarantine Gateway Status ==="
 MODE=permissive
 [[ -f /etc/quarantine-gateway/traffic-mode ]] && MODE=$(tr -d '[:space:]' </etc/quarantine-gateway/traffic-mode)
 echo "traffic-mode=$MODE"
+if [[ -f /etc/quarantine-gateway/nft-emergency ]]; then
+  echo "nftables=EMERGENCY (LAN→WAN dropped; re-run gateway provision / mode)"
+fi
 echo "ip_forward=$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo ?)"
 echo -n "units: "
 systemctl is-active dnsmasq nftables quarantine-mitm-explicit quarantine-mitm-transparent quarantine-capture quarantine-fakenet quarantine-fakenet-proxy 2>/dev/null | paste -sd' ' - || true

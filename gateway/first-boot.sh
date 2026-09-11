@@ -177,7 +177,30 @@ if grep -q '__PERMISSIVE_' /etc/nftables.conf 2>/dev/null; then
   sed -i -e "s/__WAN__/${WAN_IF}/g" -e "s/__LAN__/${LAN_IF}/g" /etc/nftables.conf
 fi
 systemctl enable nftables
-nft -f /etc/nftables.conf || true
+# Fail closed: intended rules must load, else emergency (drop LAN→WAN) and abort provision.
+if ! nft -f /etc/nftables.conf; then
+  echo "ERROR: nftables failed to load intended rules — applying emergency fail-closed set" >&2
+  EMERGENCY_SRC="$OPT/nftables-emergency.conf"
+  if [[ -f "$EMERGENCY_SRC" ]]; then
+    sed -e "s/__WAN__/${WAN_IF}/g" -e "s/__LAN__/${LAN_IF}/g" -e "s|__LAN_CIDR__|${LAN_CIDR}|g" \
+      -e "s/__LAN_IP__/${LAN_IP}/g" -e "s/__GUEST_IP__/${GUEST_IP}/g" -e "s/__AGENT_PORT__/${AGENT_PORT}/g" \
+      "$EMERGENCY_SRC" >/etc/nftables.conf
+    nft -f /etc/nftables.conf || true
+  else
+    nft -f - <<'EOF' || true
+flush ruleset
+table inet filter {
+  chain input { type filter hook input priority 0; policy drop; iif "lo" accept; ct state established,related accept; }
+  chain forward { type filter hook forward priority 0; policy drop; }
+  chain output { type filter hook output priority 0; policy accept; }
+}
+EOF
+  fi
+  echo emergency >/etc/quarantine-gateway/nft-emergency
+  echo "ERROR: gateway provision aborted — containment rules could not load (emergency nftables active)." >&2
+  exit 1
+fi
+rm -f /etc/quarantine-gateway/nft-emergency 2>/dev/null || true
 
 # mitmproxy venv
 # Ubuntu 26.04 ships Python 3.14; mitmproxy 11 pins deps without cp314 wheels
@@ -196,9 +219,11 @@ test -f "$ROOT/mitm/quarantine.pac"
 test -f "$ROOT/systemd/quarantine-mitm-explicit.service"
 test -f "$ROOT/fakenet/patch_diverter_privcheck.py"
 test -f "$ROOT/scripts/ensure-service-users.sh"
+test -f "$ROOT/nftables-emergency.conf"
 cp -a "$ROOT/." "$OPT/"
 test -f "$OPT/fakenet/patch_diverter_privcheck.py"
 test -f "$OPT/systemd/quarantine-fakenet.service"
+test -f "$OPT/nftables-emergency.conf"
 
 # PAC for explicit fallback (gateway LAN IP)
 sed "s/__GATEWAY__/${LAN_IP}/g" "$OPT/mitm/quarantine.pac" >/etc/quarantine-gateway/quarantine.pac
@@ -248,7 +273,17 @@ if [[ ! -f /var/lib/quarantine-mitm/mitmproxy-ca.pem ]]; then
   /usr/local/sbin/quarantine-ensure-service-users || true
 fi
 # Apply saved traffic mode (default FakeNet). Do not fall back to open WAN.
-/usr/local/sbin/quarantine-set-traffic-mode boot || true
+if ! /usr/local/sbin/quarantine-set-traffic-mode boot; then
+  echo "ERROR: traffic-mode boot failed (not opening WAN)." >&2
+  # boot already applies emergency when forward policy is missing / load failed.
+  if [[ ! -f /etc/quarantine-gateway/nft-emergency ]] \
+    && ! nft list chain inet filter forward 2>/dev/null | grep -q 'policy drop'; then
+    /usr/local/sbin/quarantine-set-traffic-mode emergency || true
+  fi
+  echo "ERROR: gateway provision aborted — traffic mode could not be applied." >&2
+  exit 1
+fi
+rm -f /etc/quarantine-gateway/nft-emergency 2>/dev/null || true
 
 # Export CA once mitm has run
 sleep 2

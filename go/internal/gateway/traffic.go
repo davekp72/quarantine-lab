@@ -225,6 +225,7 @@ func (m *Manager) EnsureTrafficModeScripts() error {
 		{filepath.Join(root, "scripts", "repair-wan-dns.sh"), "/tmp/quarantine-repair-wan-dns.sh"},
 		{filepath.Join(root, "nftables.conf"), "/tmp/quarantine-nftables.conf"},
 		{filepath.Join(root, "nftables-fakenet.conf"), "/tmp/quarantine-nftables-fakenet.conf"},
+		{filepath.Join(root, "nftables-emergency.conf"), "/tmp/quarantine-nftables-emergency.conf"},
 		{filepath.Join(root, "nftables-permissive-forward.inc"), "/tmp/quarantine-nftables-permissive-forward.inc"},
 		{filepath.Join(root, "nftables-permissive-nat.inc"), "/tmp/quarantine-nftables-permissive-nat.inc"},
 		{filepath.Join(root, "nftables-permissive-output.inc"), "/tmp/quarantine-nftables-permissive-output.inc"},
@@ -270,6 +271,7 @@ install -m 0755 /tmp/quarantine-capture-stop.sh /usr/local/sbin/quarantine-captu
 install -m 0755 /tmp/quarantine-export-ca.sh /usr/local/sbin/quarantine-export-ca 2>/dev/null || true
 install -m 0644 /tmp/quarantine-nftables.conf /opt/quarantine-gateway/nftables.conf
 install -m 0644 /tmp/quarantine-nftables-fakenet.conf /opt/quarantine-gateway/nftables-fakenet.conf
+install -m 0644 /tmp/quarantine-nftables-emergency.conf /opt/quarantine-gateway/nftables-emergency.conf
 install -m 0644 /tmp/quarantine-nftables-permissive-forward.inc /opt/quarantine-gateway/nftables-permissive-forward.inc
 install -m 0644 /tmp/quarantine-nftables-permissive-nat.inc /opt/quarantine-gateway/nftables-permissive-nat.inc
 install -m 0644 /tmp/quarantine-nftables-permissive-output.inc /opt/quarantine-gateway/nftables-permissive-output.inc

@@ -539,6 +539,7 @@ func (m *Manager) ApplyAgentLANForward() error {
 	files := []upload{
 		{filepath.Join(root, "nftables.conf"), "/tmp/quarantine-nftables.conf", true},
 		{filepath.Join(root, "nftables-fakenet.conf"), "/tmp/quarantine-nftables-fakenet.conf", false},
+		{filepath.Join(root, "nftables-emergency.conf"), "/tmp/quarantine-nftables-emergency.conf", true},
 		{filepath.Join(root, "nftables-permissive-forward.inc"), "/tmp/quarantine-nftables-permissive-forward.inc", false},
 		{filepath.Join(root, "nftables-permissive-nat.inc"), "/tmp/quarantine-nftables-permissive-nat.inc", false},
 		{filepath.Join(root, "nftables-permissive-output.inc"), "/tmp/quarantine-nftables-permissive-output.inc", false},
@@ -560,6 +561,7 @@ func (m *Manager) ApplyAgentLANForward() error {
 		"mkdir -p /opt/quarantine-gateway/scripts /etc/quarantine-gateway /usr/local/lib/quarantine",
 		"cp /tmp/quarantine-nftables.conf /opt/quarantine-gateway/nftables.conf",
 		"[[ -f /tmp/quarantine-nftables-fakenet.conf ]] && cp /tmp/quarantine-nftables-fakenet.conf /opt/quarantine-gateway/nftables-fakenet.conf || true",
+		"[[ -f /tmp/quarantine-nftables-emergency.conf ]] && cp /tmp/quarantine-nftables-emergency.conf /opt/quarantine-gateway/nftables-emergency.conf || true",
 		"[[ -f /tmp/quarantine-nftables-permissive-forward.inc ]] && cp /tmp/quarantine-nftables-permissive-forward.inc /opt/quarantine-gateway/nftables-permissive-forward.inc || true",
 		"[[ -f /tmp/quarantine-nftables-permissive-nat.inc ]] && cp /tmp/quarantine-nftables-permissive-nat.inc /opt/quarantine-gateway/nftables-permissive-nat.inc || true",
 		"[[ -f /tmp/quarantine-nftables-permissive-output.inc ]] && cp /tmp/quarantine-nftables-permissive-output.inc /opt/quarantine-gateway/nftables-permissive-output.inc || true",

@@ -43,10 +43,50 @@ inject_nft_snippets() {
   python3 "$injector" "$rendered" "$wan_rules" "$nat_rules" "$out_rules"
 }
 
+# Fail-closed: drop LAN→WAN if the intended ruleset cannot load.
+apply_emergency_nft() {
+  local template="$OPT/nftables-emergency.conf"
+  local rendered flag
+  flag="$ETC/nft-emergency"
+  if [[ ! -f "$template" ]]; then
+    echo "ERROR: missing emergency nftables template: $template" >&2
+    # Last resort: flush forward by loading a tiny inline drop-all-forward set.
+    nft -f - <<EOF || true
+flush ruleset
+table inet filter {
+  chain input { type filter hook input priority 0; policy drop; iif "lo" accept; ct state established,related accept; }
+  chain forward { type filter hook forward priority 0; policy drop; }
+  chain output { type filter hook output priority 0; policy accept; }
+}
+EOF
+    echo emergency >"$flag" 2>/dev/null || true
+    return 1
+  fi
+  rendered=$(mktemp)
+  sed -e "s/__WAN__/${WAN_IF}/g" \
+      -e "s/__LAN__/${LAN_IF}/g" \
+      -e "s|__LAN_CIDR__|${LAN_CIDR}|g" \
+      -e "s/__LAN_IP__/${LAN_IP}/g" \
+      -e "s/__GUEST_IP__/${GUEST_IP}/g" \
+      -e "s/__AGENT_PORT__/${AGENT_PORT}/g" \
+      "$template" >"$rendered"
+  if ! nft -f "$rendered"; then
+    echo "ERROR: emergency nftables failed to load" >&2
+    rm -f "$rendered"
+    return 1
+  fi
+  cp "$rendered" /etc/nftables.conf
+  rm -f "$rendered"
+  echo emergency >"$flag"
+  echo "EMERGENCY nftables active: LAN→WAN forwarding dropped (containment fail-closed)." >&2
+  return 0
+}
+
 apply_nft() {
   local template="$1"
   if [[ ! -f "$template" ]]; then
     echo "missing nftables template: $template" >&2
+    apply_emergency_nft || true
     return 1
   fi
   local rendered
@@ -62,7 +102,12 @@ apply_nft() {
   sed -i -e "s/__WAN__/${WAN_IF}/g" -e "s/__LAN__/${LAN_IF}/g" "$rendered"
   cp "$rendered" /etc/nftables.conf
   rm -f "$rendered"
-  nft -f /etc/nftables.conf
+  if ! nft -f /etc/nftables.conf; then
+    echo "ERROR: nftables load failed for $template — applying emergency ruleset" >&2
+    apply_emergency_nft || true
+    return 1
+  fi
+  rm -f "$ETC/nft-emergency" 2>/dev/null || true
 }
 
 render_fakenet_ini() {
@@ -465,15 +510,29 @@ case "$MODE" in
   boot)
     case "$(current_mode)" in
       permissive|mitm|internet)
-        mode_permissive
+        if ! mode_permissive; then
+          echo "ERROR: permissive mode failed on boot — ensuring fail-closed forward policy." >&2
+          if [[ -f "$ETC/nft-emergency" ]] || ! nft list chain inet filter forward 2>/dev/null | grep -q 'policy drop'; then
+            apply_emergency_nft || true
+          fi
+          exit 1
+        fi
         ;;
       *)
         if ! mode_fakenet; then
-          echo "ERROR: FakeNet unavailable on boot; leaving previous nftables (not opening WAN)." >&2
+          echo "ERROR: FakeNet unavailable on boot (not opening WAN)." >&2
+          # apply_nft already installed emergency on load failure; otherwise keep
+          # the just-applied FakeNet sinkhole rules (still no LAN→WAN).
+          if [[ -f "$ETC/nft-emergency" ]] || ! nft list chain inet filter forward 2>/dev/null | grep -q 'policy drop'; then
+            apply_emergency_nft || true
+          fi
           exit 1
         fi
         ;;
     esac
+    ;;
+  emergency|fail-closed)
+    apply_emergency_nft
     ;;
   fakenet|sinkhole)
     mode_fakenet
@@ -482,7 +541,7 @@ case "$MODE" in
     mode_permissive
     ;;
   *)
-    echo "Usage: $0 permissive|fakenet|status|boot" >&2
+    echo "Usage: $0 permissive|fakenet|status|boot|emergency" >&2
     exit 2
     ;;
 esac
