@@ -13,8 +13,16 @@ export function contentEncodingOf(part) {
   return headerValue(part?.headers, 'content-encoding');
 }
 
+function bodyLooksGzip(part) {
+  const body = String(part?.body ?? '');
+  if (body.length < 2) return false;
+  // latin-1 / binary capture: char codes match wire bytes
+  return body.charCodeAt(0) === 0x1f && body.charCodeAt(1) === 0x8b;
+}
+
 export function needsHttpBodyDecode(part) {
   if (!part || part.body == null || part.body === '') return false;
+  if (bodyLooksGzip(part)) return true;
   const ce = contentEncodingOf(part).toLowerCase();
   if (!ce || ce === 'identity') return false;
   return /\b(br|brotli|gzip|x-gzip|deflate)\b/.test(ce);

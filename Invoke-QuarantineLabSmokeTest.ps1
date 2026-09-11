@@ -5,8 +5,8 @@
 
 .DESCRIPTION
   User (jkcooper) changes run via guestcontrol immediately.
-  Elevated Sysmon/USN/event exports need the SYSTEM task QuarantineLabPrivilegedExport — registered once
-  from elevated PowerShell inside the guest (cannot be done from the host).
+  Admin Sysmon/USN checks run via guestcontrol as the lab admin after one-time grant
+  (Event Log Readers + Backup Operators). The legacy SYSTEM polling task is not used.
 
   First-time admin setup (once per VM / after Clean restore):
     .\Invoke-QuarantineLabSmokeTest.ps1 -Grant
@@ -44,9 +44,7 @@ Import-Module $vmModule -Force
 Import-Module $manifestModule -Force
 
 $guestScript = Join-Path $script:QuarantineLabRoot 'guest\Invoke-QuarantineLabManifestSmokeTest.ps1'
-$adminPrivileged = Join-Path $script:QuarantineLabRoot 'guest\Invoke-QuarantineLabSmokeAdminPrivileged.ps1'
 $grantScript = Join-Path $script:QuarantineLabRoot 'guest\Grant-QuarantineGuestEventLogAccess.ps1'
-$workerScript = Join-Path $script:QuarantineLabRoot 'guest\Invoke-QuarantinePrivilegedExportWorker.ps1'
 $privModule = Join-Path $script:QuarantineLabRoot 'manifest\QuarantineGuestPriv.psm1'
 
 Initialize-QuarantineVMContext -ConfigPath $ConfigPath | Out-Null
@@ -55,7 +53,6 @@ $cfg = Get-QuarantineVMConfig -ConfigPath $ConfigPath
 $vmName = $cfg.vmName
 $guestDir = if ($cfg.guest.copyTargetDir) { [string]$cfg.guest.copyTargetDir } else { 'C:\Users\Public\Quarantine' }
 $guestRemote = Join-Path $guestDir (Split-Path -Leaf $guestScript)
-$adminPrivilegedLeaf = Split-Path -Leaf $adminPrivileged
 $grantRemote = Join-Path $guestDir (Split-Path -Leaf $grantScript)
 
 function Show-GuestOutput {
@@ -78,70 +75,67 @@ function Wait-QuarantineLabSmokeGuestReady {
             throw "VM must be running for smoke test (state: $state). Start with: .\quarantine-vm.ps1 start"
         }
         try {
-            Wait-QuarantineVMGuestReady -ConfigPath $ConfigPath -TimeoutSeconds 30
+            $null = Invoke-QuarantineVMGuestRun -ConfigPath $ConfigPath -TimeoutMs 15000 `
+                -Exe 'C:\Windows\System32\cmd.exe' -Command @('/c', 'echo', 'ready')
             return
         } catch {
-            if ($_.Exception.Message -match 'not ready|timeout') {
-                Start-Sleep -Seconds 5
-                continue
-            }
-            throw
+            Write-Host 'Guest control not ready yet...'
+            Start-Sleep -Seconds 3
         }
     }
-    throw 'Guest session did not become ready for smoke test.'
+    throw 'Guest control did not become ready within timeout.'
 }
 
 function Install-QuarantineLabGuestGrantFiles {
-    Write-Host 'Copying privilege grant scripts to guest...'
     Copy-QuarantineVMGuestFile -Path $grantScript -ConfigPath $ConfigPath -TargetDirectory $guestDir
-    if (Test-Path -LiteralPath $workerScript) {
-        Copy-QuarantineVMGuestFile -Path $workerScript -ConfigPath $ConfigPath -TargetDirectory $guestDir
-    }
     if (Test-Path -LiteralPath $privModule) {
         Copy-QuarantineVMGuestFile -Path $privModule -ConfigPath $ConfigPath -TargetDirectory $guestDir
     }
-    Copy-QuarantineVMGuestFile -Path $adminPrivileged -ConfigPath $ConfigPath -TargetDirectory $guestDir
-    Copy-QuarantineVMGuestFile -Path $guestScript -ConfigPath $ConfigPath -TargetDirectory $guestDir
+    Write-Host "Copied grant script to $grantRemote"
 }
 
 function Show-QuarantineLabGrantInstructions {
     Write-Host ''
-    Write-Host '=== One-time elevated step (inside the VM) ==='
     Write-Host 'Open the VM desktop, right-click PowerShell -> Run as administrator (quarantine account), then:'
     Write-Host ''
     Write-Host '  Set-ExecutionPolicy Bypass -Scope Process -Force'
     Write-Host "  & '$grantRemote'"
     Write-Host ''
-    Write-Host 'Expect: GRANT_OK, Registered scheduled task QuarantineLabPrivilegedExport (SYSTEM), and privileged-export-task.ok marker.'
+    Write-Host 'Expect: GRANT_OK (Event Log Readers / Backup Operators). Legacy SYSTEM export task is removed if present.'
     Write-Host 'Then re-run: .\Invoke-QuarantineLabSmokeTest.ps1'
     Write-Host ''
 }
 
-function Test-QuarantineLabPrivilegedExportTask {
-    Test-QuarantineGuestPrivilegedExportTaskReady -ConfigPath $ConfigPath
-}
-
-function Invoke-AdminSmokePrivileged {
+function Invoke-AdminSmoke {
     $resultGuest = Join-Path $guestDir "smoke-admin-$Tag.result.txt"
     $resultHost = Join-Path $env:TEMP "quarantine-smoke-admin-$Tag.result.txt"
 
     Copy-QuarantineVMGuestFile -Path $guestScript -ConfigPath $ConfigPath -TargetDirectory $guestDir
-    Copy-QuarantineVMGuestFile -Path $adminPrivileged -ConfigPath $ConfigPath -TargetDirectory $guestDir
+    if (Test-Path -LiteralPath $privModule) {
+        Copy-QuarantineVMGuestFile -Path $privModule -ConfigPath $ConfigPath -TargetDirectory $guestDir
+    }
 
-    Write-Host "=== Smoke test: Admin (tag=$Tag, SYSTEM privileged task) ==="
+    Write-Host "=== Smoke test: Admin (tag=$Tag, lab admin via guestcontrol) ==="
 
-    Invoke-QuarantineGuestPrivilegedExportFromHost -ConfigPath $ConfigPath `
-        -GuestScriptLeaf $adminPrivilegedLeaf `
-        -GuestOutFile $resultGuest `
-        -TimeoutMs 300000
+    $output = Invoke-QuarantineVMGuestRun -ConfigPath $ConfigPath -TimeoutMs 300000 `
+        -Exe 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' `
+        -Command @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $guestRemote,
+            '-Part', 'Admin', '-Tag', $Tag, '-ResultFile', $resultGuest
+        )
+    Show-GuestOutput $output
 
     Start-Sleep -Milliseconds 500
     if (Test-Path -LiteralPath $resultHost) { Remove-Item -LiteralPath $resultHost -Force -ErrorAction SilentlyContinue }
-    Copy-QuarantineVMGuestFileFrom -GuestPath $resultGuest -HostPath $resultHost -ConfigPath $ConfigPath -TimeoutMs 60000
+    try {
+        Copy-QuarantineVMGuestFileFrom -GuestPath $resultGuest -HostPath $resultHost -ConfigPath $ConfigPath -TimeoutMs 60000
+    } catch {
+        Write-Warning "Could not copy admin result: $($_.Exception.Message)"
+    }
     if (Test-Path -LiteralPath $resultHost) {
         Get-Content -LiteralPath $resultHost | ForEach-Object { Write-Host $_ }
     } else {
-        throw "Admin smoke result missing on guest: $resultGuest"
+        throw "Admin smoke result missing on guest: $resultGuest (run -Grant and elevated grant in guest if USN/Sysmon denied)"
     }
 }
 
@@ -174,23 +168,17 @@ if ($Grant) {
     return
 }
 
-$taskReady = Test-QuarantineLabPrivilegedExportTask
 $adminRan = $false
-$adminSkipped = $false
 
 if ($Part -in @('Admin', 'All')) {
-    if (-not $taskReady) {
-        Install-QuarantineLabGuestGrantFiles
-        if ($Part -eq 'Admin') {
-            Show-QuarantineLabGrantInstructions
-            throw "SYSTEM task 'QuarantineLabPrivilegedExport' is not registered. Complete the elevated guest step above, then re-run."
-        }
-        Write-Warning 'Admin smoke skipped - SYSTEM privileged task not registered yet.'
-        Show-QuarantineLabGrantInstructions
-        $adminSkipped = $true
-    } else {
-        Invoke-AdminSmokePrivileged
+    try {
+        Invoke-AdminSmoke
         $adminRan = $true
+    } catch {
+        Install-QuarantineLabGuestGrantFiles
+        Show-QuarantineLabGrantInstructions
+        if ($Part -eq 'Admin') { throw }
+        Write-Warning "Admin smoke failed: $($_.Exception.Message)"
     }
 }
 
@@ -199,10 +187,7 @@ if ($Part -in @('User', 'All')) {
 }
 
 Write-Host ''
-if ($adminSkipped) {
-    Write-Host 'User smoke completed. Admin smoke pending - run the elevated grant in the VM, then:'
-    Write-Host "  .\Invoke-QuarantineLabSmokeTest.ps1 -Part Admin -Tag $Tag"
-} elseif ($adminRan -or $Part -eq 'User') {
+if ($adminRan -or $Part -eq 'User') {
     Write-Host 'Done. Preserve evidence, then diff:'
     Write-Host "  .\quarantine-vm.ps1 preserve -SnapshotName smoke-$Tag"
     Write-Host "  .\quarantine-vm.ps1 manifest view -FromSnapshot CleanSession -ToSnapshot Evidence-smoke-$Tag -Refresh"

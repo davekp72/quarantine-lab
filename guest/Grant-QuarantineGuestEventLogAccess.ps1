@@ -2,6 +2,7 @@
 <#
 .SYNOPSIS
   One-time guest hardening: Event Log Readers + USN read privileges for the lab admin account.
+  Also removes the legacy SYSTEM privileged-export polling task if present.
   Run once from an elevated PowerShell session inside the guest (GUI).
 #>
 [CmdletBinding()]
@@ -157,51 +158,43 @@ if (-not $backupGroupOk) {
     Grant-UserPrivilegeToAccount -AccountName $LabAdmin -PrivilegeIds @('SeBackupPrivilege', 'SeRestorePrivilege', 'SeManageVolumePrivilege')
 }
 
-function Register-QuarantinePrivilegedExportTask {
+function Remove-QuarantinePrivilegedExportTask {
+    <#
+    .SYNOPSIS
+      Removes the legacy SYSTEM polling task QuarantineLabPrivilegedExport if present.
+      Collection now uses the authenticated agent (or guestcontrol as lab admin after grant).
+    #>
     $guestDir = 'C:\Users\Public\Quarantine'
-    $worker = Join-Path $guestDir 'Invoke-QuarantinePrivilegedExportWorker.ps1'
-    if (-not (Test-Path -LiteralPath $worker)) {
-        Write-Warning "Privileged export worker missing: $worker (run .\quarantine-vm.ps1 sysmon grant from host first)."
-        return $false
-    }
-
     $taskName = 'QuarantineLabPrivilegedExport'
     $marker = Join-Path $guestDir 'privileged-export-task.ok'
-    $tr = "`"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`" -NoProfile -ExecutionPolicy Bypass -File `"$worker`""
-    $args = "/Create /TN `"$taskName`" /TR `"$tr`" /SC MINUTE /MO 1 /RU SYSTEM /RL HIGHEST /F"
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = 'schtasks.exe'
-    $psi.Arguments = $args
-    $psi.UseShellExecute = $false
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $proc = [System.Diagnostics.Process]::Start($psi)
-    $stdout = $proc.StandardOutput.ReadToEnd()
-    $stderr = $proc.StandardError.ReadToEnd()
-    $proc.WaitForExit()
-    if ($proc.ExitCode -ne 0 -and $stdout -notmatch 'SUCCESS') {
-        Write-Warning "Could not register SYSTEM export task (exit $($proc.ExitCode)): $stdout $stderr"
-        return $false
+    $worker = Join-Path $guestDir 'Invoke-QuarantinePrivilegedExportWorker.ps1'
+
+    $removed = $false
+    try {
+        if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
+            schtasks.exe /Delete /TN $taskName /F 2>&1 | Out-Null
+            $removed = $true
+            Write-Host "Removed legacy scheduled task '$taskName' (SYSTEM polling job runner)."
+        }
+    } catch {
+        Write-Warning "Could not remove legacy task '$taskName': $($_.Exception.Message)"
     }
-    Write-Host "Registered scheduled task '$taskName' (SYSTEM) for USN/Sysmon export under guestcontrol."
+
+    Remove-Item -LiteralPath $marker -Force -ErrorAction SilentlyContinue
+    # Leave worker file if present but unused; delete to shrink attack surface under Public.
+    Remove-Item -LiteralPath $worker -Force -ErrorAction SilentlyContinue
+    Get-ChildItem -LiteralPath $guestDir -Filter 'privileged-job*.json' -File -ErrorAction SilentlyContinue |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $guestDir 'privileged-job.done') -Force -ErrorAction SilentlyContinue
+
+    if (-not $removed) {
+        Write-Host "Legacy SYSTEM task '$taskName' not present (OK)."
+    }
     return $true
 }
 
-$taskRegistered = Register-QuarantinePrivilegedExportTask
+$null = Remove-QuarantinePrivilegedExportTask
 $guestDir = 'C:\Users\Public\Quarantine'
-$markerPath = Join-Path $guestDir 'privileged-export-task.ok'
-if ($taskRegistered) {
-    try {
-        $null = Get-ScheduledTask -TaskName 'QuarantineLabPrivilegedExport' -ErrorAction Stop
-        Set-Content -LiteralPath $markerPath -Value (Get-Date).ToUniversalTime().ToString('o') -Encoding ASCII
-        Write-Host "Wrote privileged export marker: $markerPath"
-    } catch {
-        Remove-Item -LiteralPath $markerPath -Force -ErrorAction SilentlyContinue
-        Write-Warning "SYSTEM task registration reported success but Get-ScheduledTask failed: $($_.Exception.Message)"
-    }
-} else {
-    Remove-Item -LiteralPath $markerPath -Force -ErrorAction SilentlyContinue
-}
 
 try {
     $null = Get-WinEvent -LogName $LogName -MaxEvents 1 -ErrorAction Stop

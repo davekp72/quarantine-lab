@@ -39,7 +39,12 @@ func Decode(bodyEncoding, contentEncoding, body string) DecodeResult {
 	}
 	encs := parseContentEncodings(contentEncoding)
 	if len(encs) == 0 {
-		return textResult(raw, "")
+		// Some clients (e.g. PostHog web SDK) gzip the body but omit Content-Encoding.
+		if isGzipMagic(raw) {
+			encs = []string{"gzip"}
+		} else {
+			return textResult(raw, "")
+		}
 	}
 	decoded := raw
 	applied := make([]string, 0, len(encs))
@@ -68,6 +73,17 @@ func Decode(bodyEncoding, contentEncoding, body string) DecodeResult {
 // NeedsDecode reports whether Content-Encoding implies compression.
 func NeedsDecode(contentEncoding string) bool {
 	return len(parseContentEncodings(contentEncoding)) > 0
+}
+
+// isGzipMagic reports the RFC 1952 gzip header (1f 8b).
+func isGzipMagic(b []byte) bool {
+	return len(b) >= 2 && b[0] == 0x1f && b[1] == 0x8b
+}
+
+// BodyLooksGzip reports whether a captured body starts with gzip magic.
+func BodyLooksGzip(bodyEncoding, body string) bool {
+	raw, err := bodyToBytes(bodyEncoding, body)
+	return err == nil && isGzipMagic(raw)
 }
 
 // ContentEncodingFromHeaders picks Content-Encoding from a header map.

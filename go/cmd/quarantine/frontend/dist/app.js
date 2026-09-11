@@ -1216,6 +1216,18 @@ function renderUsn() {
   ));
 }
 
+const NETWORK_DISPLAY_LIMIT = 5000;
+
+/** Prefer newest rows when capping so the list bottom matches latest activity. */
+function networkRowsForDisplay(rows, limit = NETWORK_DISPLAY_LIMIT) {
+  const all = Array.isArray(rows) ? rows : [];
+  if (all.length <= limit) {
+    return { rows: all, offset: 0, capped: false, total: all.length };
+  }
+  const offset = all.length - limit;
+  return { rows: all.slice(offset), offset, capped: true, total: all.length };
+}
+
 function renderNetwork() {
   const panel = $('#panel-network');
   const d = activeDiff();
@@ -1225,11 +1237,15 @@ function renderNetwork() {
     return;
   }
   const reqs = net.requests || [];
+  const shown = networkRowsForDisplay(reqs);
   const windowText = net.windowFrom && net.windowTo
     ? `${net.windowFrom} → ${net.windowTo}`
     : 'snapshot capture window';
   panel.replaceChildren();
   appendMuted(panel, `${windowText} · ${reqs.length} HTTP/proxy`);
+  if (shown.capped) {
+    appendMuted(panel, `Showing latest ${shown.rows.length} of ${shown.total} (older rows omitted).`);
+  }
   if (hideNoiseEnabled()) {
     appendMuted(panel, 'Routine Microsoft / connectivity noise hidden — uncheck Hide routine noise to show all.');
   }
@@ -1247,9 +1263,9 @@ function renderNetwork() {
   list.className = 'net-req-list';
   const table = buildSafeTable(
     ['Method', 'Status', 'Host', 'URL', 'Time'],
-    reqs.slice(0, 500).map((r, i) => ({
+    shown.rows.map((r, i) => ({
       className: `net-req-row${r.hasBody ? ' has-body' : ''}`,
-      attrs: { 'data-req-idx': String(i) },
+      attrs: { 'data-req-idx': String(shown.offset + i) },
       cells: [
         r.method || '',
         r.status ?? '',
@@ -1307,11 +1323,15 @@ function renderDns() {
     return;
   }
   const dns = net.dns || [];
+  const shown = networkRowsForDisplay(dns);
   const windowText = net.windowFrom && net.windowTo
     ? `${net.windowFrom} → ${net.windowTo}`
     : 'snapshot capture window';
   panel.replaceChildren();
   appendMuted(panel, `${windowText} · ${dns.length} name lookups`);
+  if (shown.capped) {
+    appendMuted(panel, `Showing latest ${shown.rows.length} of ${shown.total} (older rows omitted).`);
+  }
   if (hideNoiseEnabled()) {
     appendMuted(panel, 'Routine Microsoft / connectivity noise hidden — uncheck Hide routine noise to show all.');
   }
@@ -1323,7 +1343,7 @@ function renderDns() {
   wrap.className = 'dns-table-wrap';
   const table = buildSafeTable(
     ['Source', 'Name', 'Resolved', 'Type', 'Time'],
-    dns.slice(0, 500).map((r) => {
+    shown.rows.map((r) => {
       const answers = Array.isArray(r.answers) ? r.answers.filter(Boolean).join(', ') : '';
       return {
         cells: [

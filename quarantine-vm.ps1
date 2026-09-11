@@ -851,20 +851,17 @@ Tip: Mark USN + payload registry baseline before making test changes:
 
             'grant' {
                 $grantScript = Join-Path $PSScriptRoot 'guest\Grant-QuarantineGuestEventLogAccess.ps1'
-                $workerScript = Join-Path $PSScriptRoot 'guest\Invoke-QuarantinePrivilegedExportWorker.ps1'
                 Copy-QuarantineVMGuestFile -Path $grantScript -ConfigPath $ConfigPath -TargetDirectory 'C:\Users\Public\Quarantine'
-                if (Test-Path -LiteralPath $workerScript) {
-                    Copy-QuarantineVMGuestFile -Path $workerScript -ConfigPath $ConfigPath -TargetDirectory 'C:\Users\Public\Quarantine'
-                }
                 Write-Host @"
 
-Copied Grant-QuarantineGuestEventLogAccess.ps1 (+ worker) to the guest.
+Copied Grant-QuarantineGuestEventLogAccess.ps1 to the guest.
 
 One-time (elevated PowerShell inside the guest GUI):
   Set-ExecutionPolicy Bypass -Scope Process -Force
   & 'C:\Users\Public\Quarantine\Grant-QuarantineGuestEventLogAccess.ps1'
 
-Expect: GRANT_OK and 'Registered scheduled task QuarantineLabPrivilegedExport (SYSTEM)'.
+Expect: GRANT_OK (Event Log Readers / Backup Operators).
+Also removes the legacy SYSTEM task QuarantineLabPrivilegedExport if still registered.
 Then snapshot Clean and re-run manifest view -Refresh.
 "@
             }

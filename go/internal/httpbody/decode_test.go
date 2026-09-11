@@ -60,3 +60,33 @@ func TestNeedsDecode(t *testing.T) {
 		t.Fatal("NeedsDecode mismatch")
 	}
 }
+
+func TestDecodeGzipSniffWithoutContentEncoding(t *testing.T) {
+	var buf bytes.Buffer
+	w := gzip.NewWriter(&buf)
+	if _, err := w.Write([]byte(`{"event":"$pageview"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw := buf.Bytes()
+	rs := make([]rune, len(raw))
+	for i, c := range raw {
+		rs[i] = rune(c)
+	}
+	body := string(rs)
+	res := Decode("latin-1", "", body)
+	if res.Error != "" {
+		t.Fatal(res.Error)
+	}
+	if res.Decompressed != "gzip" {
+		t.Fatalf("decompressed=%q", res.Decompressed)
+	}
+	if res.Body != `{"event":"$pageview"}` {
+		t.Fatalf("body=%q", res.Body)
+	}
+	if !BodyLooksGzip("latin-1", body) {
+		t.Fatal("BodyLooksGzip expected true")
+	}
+}

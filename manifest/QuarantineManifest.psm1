@@ -45,7 +45,6 @@ function Get-QuarantineVMManifestSettings {
         ServiceInstallScript = Join-Path $script:ManifestRoot 'Get-QuarantineGuestServiceInstallEvents.ps1'
         ChangedFilesScript = Join-Path $script:ManifestRoot 'Export-QuarantineGuestChangedFiles.ps1'
         PrivModule = Join-Path $script:ManifestRoot 'QuarantineGuestPriv.psm1'
-        PrivilegedWorkerScript = Join-Path $script:ProjectRoot 'guest\Invoke-QuarantinePrivilegedExportWorker.ps1'
         ElevatedRunnerScript = Join-Path $script:ProjectRoot 'guest\Invoke-QuarantineGuestElevated.ps1'
     }
 }
@@ -935,46 +934,12 @@ function Wait-QuarantineVMGuestReady {
 }
 
 function Test-QuarantineGuestPrivilegedExportTaskReady {
+    <#
+    .SYNOPSIS
+      Legacy probe — always false. The SYSTEM QuarantineLabPrivilegedExport task was removed.
+    #>
     param([string]$ConfigPath)
-
-    $settings = Get-QuarantineVMManifestSettings -ConfigPath $ConfigPath
-    $guestDir = $settings.Config.guest.copyTargetDir
-    if (-not $guestDir) { $guestDir = 'C:\Users\Public\Quarantine' }
-    $probeHost = Join-Path $script:ProjectRoot 'guest\Test-QuarantineGuestPrivilegedExportTask.ps1'
-    if (-not (Test-Path -LiteralPath $probeHost)) { return $false }
-
-    Copy-QuarantineVMGuestFile -Path $probeHost -ConfigPath $ConfigPath -TargetDirectory $guestDir -ErrorAction SilentlyContinue | Out-Null
-    $probeGuest = Join-Path $guestDir (Split-Path -Leaf $probeHost)
-
-    try {
-        $out = Invoke-QuarantineVMGuestRun -ConfigPath $ConfigPath -TimeoutMs 30000 `
-            -Exe 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' `
-            -Command @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $probeGuest)
-        return (($out | Out-String) -match 'PRIV_TASK_OK')
-    } catch {
-        if ($_.Exception.Message -match 'PRIV_TASK_OK') { return $true }
-        return $false
-    }
-}
-
-function Clear-QuarantineGuestPrivilegedJobDone {
-    param(
-        [string]$ConfigPath,
-        [Parameter(Mandatory)][string]$DoneGuest,
-        [int]$TimeoutMs = 30000
-    )
-
-    try {
-        Invoke-QuarantineVMGuestRun -ConfigPath $ConfigPath -TimeoutMs $TimeoutMs `
-            -Exe 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' `
-            -Command @(
-                '-NoProfile',
-                '-Command',
-                "Remove-Item -LiteralPath '$DoneGuest' -Force -ErrorAction SilentlyContinue"
-            ) | Out-Null
-    } catch {
-        Write-Verbose "Could not clear privileged job done file: $($_.Exception.Message)"
-    }
+    return $false
 }
 
 function Copy-QuarantineGuestPrivilegedExportDependencies {
@@ -999,9 +964,6 @@ function Copy-QuarantineGuestPrivilegedExportDependencies {
     if ($Settings.PrivModule -and (Test-Path -LiteralPath $Settings.PrivModule)) {
         Copy-QuarantineVMGuestFile -Path $Settings.PrivModule -ConfigPath $ConfigPath -TargetDirectory $GuestDir
     }
-    if ($Settings.PrivilegedWorkerScript -and (Test-Path -LiteralPath $Settings.PrivilegedWorkerScript)) {
-        Copy-QuarantineVMGuestFile -Path $Settings.PrivilegedWorkerScript -ConfigPath $ConfigPath -TargetDirectory $GuestDir
-    }
 }
 
 function Deploy-QuarantineGuestManifestScripts {
@@ -1014,47 +976,6 @@ function Deploy-QuarantineGuestManifestScripts {
     if (-not $guestDir) { $guestDir = 'C:\Users\Public\Quarantine' }
     Copy-QuarantineGuestPrivilegedExportDependencies -ConfigPath $ConfigPath -Settings $settings -GuestDir $guestDir
     Write-Host "Manifest guest scripts deployed to $guestDir"
-}
-
-function Start-QuarantineGuestPrivilegedExportTaskNow {
-    param([string]$ConfigPath)
-
-    try {
-        Invoke-QuarantineVMGuestRun -ConfigPath $ConfigPath -TimeoutMs 60000 `
-            -Exe 'C:\Windows\System32\schtasks.exe' `
-            -Command @('/Run', '/TN', 'QuarantineLabPrivilegedExport') | Out-Null
-    } catch {
-        Write-Verbose "Could not trigger privileged export task immediately: $($_.Exception.Message)"
-    }
-}
-
-function Wait-QuarantineGuestPrivilegedJobDone {
-    param(
-        [string]$ConfigPath,
-        [Parameter(Mandatory)][string]$DoneGuest,
-        [datetime]$WaitStarted,
-        [int]$TimeoutMs = 300000,
-        [string]$Label = 'privileged export'
-    )
-
-    $deadline = (Get-Date).AddMilliseconds($TimeoutMs)
-    while ((Get-Date) -lt $deadline) {
-        Start-Sleep -Milliseconds 750
-        try {
-            $hostDone = Join-Path $env:TEMP "privileged-done-$PID.txt"
-            if (Test-Path -LiteralPath $hostDone) { Remove-Item -LiteralPath $hostDone -Force -ErrorAction SilentlyContinue }
-            Copy-QuarantineVMGuestFileFrom -GuestPath $doneGuest -HostPath $hostDone -ConfigPath $ConfigPath -TimeoutMs 30000
-            if (Test-Path -LiteralPath $hostDone) {
-                $doneAt = (Get-Item -LiteralPath $hostDone).LastWriteTimeUtc
-                if ($doneAt -ge $WaitStarted.AddSeconds(-5)) {
-                    Remove-Item -LiteralPath $hostDone -Force -ErrorAction SilentlyContinue
-                    return
-                }
-                Remove-Item -LiteralPath $hostDone -Force -ErrorAction SilentlyContinue
-            }
-        } catch { }
-    }
-    throw "SYSTEM $Label timed out after ${TimeoutMs}ms."
 }
 
 function Invoke-QuarantineGuestPrivilegedExportBatchFromHost {
@@ -1075,11 +996,8 @@ function Invoke-QuarantineGuestPrivilegedExportBatchFromHost {
 
     Copy-QuarantineGuestPrivilegedExportDependencies -ConfigPath $ConfigPath -Settings $settings -GuestDir $guestDir
 
-    $taskName = 'QuarantineLabPrivilegedExport'
-    $doneGuest = Join-Path $guestDir 'privileged-job.done'
-    $taskPresent = Test-QuarantineGuestPrivilegedExportTaskReady -ConfigPath $ConfigPath
-
-    $jobSteps = @()
+    # Known export scripts via guestcontrol as lab admin (after grant).
+    # Legacy SYSTEM task that executed arbitrary scriptPath values was removed.
     $labels = New-Object System.Collections.Generic.List[string]
     foreach ($step in $Steps) {
         $leaf = [string]$step.GuestScriptLeaf
@@ -1087,33 +1005,11 @@ function Invoke-QuarantineGuestPrivilegedExportBatchFromHost {
         if ([string]::IsNullOrWhiteSpace($leaf) -or [string]::IsNullOrWhiteSpace($outFile)) {
             throw 'Each privileged batch step requires GuestScriptLeaf and GuestOutFile.'
         }
-        $scriptGuest = Join-Path $guestDir $leaf
-        $jobSteps += @{ scriptPath = $scriptGuest; outFile = $outFile }
+        if ($leaf -match '[\\/]' -or $leaf -match '\.\.') {
+            throw "Refusing non-allowlisted script leaf: $leaf"
+        }
         $labels.Add($leaf) | Out-Null
-    }
-
-    if ($taskPresent) {
-        $uploadName = "privileged-job-upload-$([guid]::NewGuid().ToString('n')).json"
-        $hostJob = Join-Path $env:TEMP $uploadName
-        (@{ steps = $jobSteps } | ConvertTo-Json -Depth 6 -Compress) | Set-Content -LiteralPath $hostJob -Encoding UTF8
-        Copy-QuarantineVMGuestFile -Path $hostJob -ConfigPath $ConfigPath -TargetDirectory $guestDir
-        Remove-Item -LiteralPath $hostJob -Force -ErrorAction SilentlyContinue
-
-        $waitStarted = (Get-Date).ToUniversalTime()
-        Clear-QuarantineGuestPrivilegedJobDone -ConfigPath $ConfigPath -DoneGuest $doneGuest
-        Start-QuarantineGuestPrivilegedExportTaskNow -ConfigPath $ConfigPath
-
-        $labelText = ($labels -join ', ')
-        Write-Verbose "Waiting for SYSTEM task '$taskName' ($($Steps.Count) step(s): $labelText)..."
-        Wait-QuarantineGuestPrivilegedJobDone -ConfigPath $ConfigPath -DoneGuest $doneGuest `
-            -WaitStarted $waitStarted -TimeoutMs $TimeoutMs -Label "privileged batch ($labelText)"
-        Write-Host "Privileged export finished (SYSTEM task, $($Steps.Count) step(s)): $labelText"
-        return
-    }
-
-    foreach ($step in $Steps) {
-        $scriptGuest = Join-Path $guestDir ([string]$step.GuestScriptLeaf)
-        $outFile = [string]$step.GuestOutFile
+        $scriptGuest = Join-Path $guestDir $leaf
         $output = Invoke-QuarantineVMGuestRun -ConfigPath $ConfigPath -TimeoutMs $TimeoutMs `
             -Exe 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' `
             -Command @(
@@ -1123,6 +1019,7 @@ function Invoke-QuarantineGuestPrivilegedExportBatchFromHost {
         if ($output) { $output | ForEach-Object { Write-Host $_ } }
     }
     Start-Sleep -Milliseconds 750
+    Write-Host "Privileged export finished (guestcontrol, $($Steps.Count) step(s)): $($labels -join ', ')"
 }
 
 function Invoke-QuarantineGuestPrivilegedExportFromHost {
@@ -1137,7 +1034,6 @@ function Invoke-QuarantineGuestPrivilegedExportFromHost {
         [pscustomobject]@{ GuestScriptLeaf = $GuestScriptLeaf; GuestOutFile = $GuestOutFile }
     )
 }
-
 function Invoke-QuarantineVMGuestManifestCapture {
     <#
     .SYNOPSIS

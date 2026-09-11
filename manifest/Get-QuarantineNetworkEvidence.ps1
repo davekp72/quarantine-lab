@@ -787,7 +787,9 @@ function Get-QuarantineNetworkEvidence {
         }
     }
 
-    if ($proxyLogDir -and (Test-Path -LiteralPath $proxyLogDir)) {
+    # When a named evidence-network package supplied HTTP, do not mix ambient host proxy
+    # logs from the long CleanSession→Evidence wall clock (prior-day sessions pollute the UI).
+    if ($packageHits -eq 0 -and $proxyLogDir -and (Test-Path -LiteralPath $proxyLogDir)) {
         $accessFiles = Get-ChildItem -LiteralPath $proxyLogDir -Recurse -Filter 'access.log' -File -ErrorAction SilentlyContinue
         foreach ($file in $accessFiles) {
             $proxyLogs += $file.FullName
@@ -825,7 +827,8 @@ function Get-QuarantineNetworkEvidence {
     }
 
     $tshark = Find-QuarantineTsharkCommand
-    if ($pcapLogDir -and (Test-Path -LiteralPath $pcapLogDir) -and $tshark) {
+    # Same rule as proxy: ambient PCAP DNS only when no snapshot network package was used.
+    if ($packageHits -eq 0 -and $pcapLogDir -and (Test-Path -LiteralPath $pcapLogDir) -and $tshark) {
         $pcapFiles = @(Get-ChildItem -LiteralPath $pcapLogDir -File -ErrorAction SilentlyContinue |
             Where-Object { $_.Extension -in @('.pcap', '.pcapng') })
         foreach ($file in $pcapFiles) {
@@ -883,6 +886,18 @@ function Get-QuarantineNetworkEvidence {
         $truncated = $true
     }
 
+    $windowFromOut = $From.ToUniversalTime().ToString('o')
+    $windowToOut = $To.ToUniversalTime().ToString('o')
+    # Prefer real traffic span from the evidence package over the CleanSession→Evidence wall clock.
+    if ($packageHits -gt 0 -and $sortedRequests.Count -gt 0) {
+        $trafficFrom = ConvertTo-QuarantineNetworkInstant -Text ([string]$sortedRequests[0].t)
+        $trafficTo = ConvertTo-QuarantineNetworkInstant -Text ([string]$sortedRequests[-1].t)
+        if ($trafficFrom -and $trafficTo) {
+            $windowFromOut = $trafficFrom.ToUniversalTime().ToString('o')
+            $windowToOut = $trafficTo.ToUniversalTime().ToString('o')
+        }
+    }
+
     $available = ($sortedDns.Count -gt 0) -or ($sortedRequests.Count -gt 0) -or ($proxyLogs.Count -gt 0) -or ($pcaps.Count -gt 0)
     $message = ''
     if (-not $available) {
@@ -904,8 +919,8 @@ function Get-QuarantineNetworkEvidence {
     return [pscustomobject]@{
         available  = $available
         message    = $message
-        windowFrom = $From.ToUniversalTime().ToString('o')
-        windowTo   = $To.ToUniversalTime().ToString('o')
+        windowFrom = $windowFromOut
+        windowTo   = $windowToOut
         sources    = [ordered]@{
             proxyLogs = @($proxyLogs)
             pcaps     = @($pcaps)
