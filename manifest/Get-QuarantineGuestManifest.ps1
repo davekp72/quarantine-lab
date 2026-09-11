@@ -580,7 +580,7 @@ function Export-EventsModeUserRegistry {
         [void]$warnings.Add('Default user NTUSER.DAT not accessible.')
     }
 
-    [void]$warnings.Add('events mode: loaded Default + current-user HKU; jkcooper HKCU merged post-capture.')
+    [void]$warnings.Add('events mode: loaded Default + current-user HKU; payload-user HKCU merged post-capture.')
     return @($warnings)
 }
 

@@ -349,7 +349,7 @@ function Test-QuarantinePreferGo {
     if ($ActionName -eq 'capture' -and $Sub -eq 'status') { return $false }
     if ($ActionName -eq 'inbox' -and $Sub -in @('push', 'clear', 'status')) { return $false }
     if ($ActionName -eq 'guest' -and $Sub -in @('test', 'ps', 'hosts')) { return $false }
-    if ($ActionName -eq 'sysmon' -and $Sub -in @('copy', 'install', 'grant')) { return $false }
+    if ($ActionName -eq 'sysmon' -and $Sub -in @('copy', 'install', 'grant', 'fetch')) { return $false }
     if ($ActionName -eq 'manifest' -and $Sub -in @('mark', 'list', 'enrich', 'probe', 'capture', 'capture-live')) { return $false }
     if ($env:QUARANTINE_FORCE_PS -eq '1') { return $false }
     $goActions = @(
@@ -831,7 +831,7 @@ Tip: Mark USN + payload registry baseline before making test changes:
 
             }
 
-            default { throw 'Usage: .\quarantine-vm.ps1 payload run|ps|copy  (runs as standard user jkcooper)' }
+            default { throw 'Usage: .\quarantine-vm.ps1 payload run|ps|copy  (runs as the payload / analyst user)' }
 
         }
 
@@ -840,6 +840,10 @@ Tip: Mark USN + payload registry baseline before making test changes:
     'sysmon' {
 
         switch ($SubAction) {
+
+            'fetch' {
+                & (Join-Path $PSScriptRoot 'scripts\Get-Sysmon.ps1') -ProjectRoot $PSScriptRoot
+            }
 
             'install' {
                 & (Join-Path $PSScriptRoot 'guest\Deploy-QuarantineSysmon.ps1') -ConfigPath $ConfigPath -ShowGuestInstructions
@@ -869,12 +873,13 @@ Then snapshot Clean and re-run manifest view -Refresh.
             default {
                 throw @'
 Usage:
+  .\quarantine-vm.ps1 sysmon fetch     Download Sysmon from Microsoft (Authenticode-verified)
   .\quarantine-vm.ps1 sysmon copy      Copy config + Sysmon64.exe to guest
   .\quarantine-vm.ps1 sysmon install   Copy files, then show one-time guest apply command
   .\quarantine-vm.ps1 sysmon grant     Copy one-time privilege grant script (run elevated in guest GUI)
 
-Place Sysmon64.exe at tools\Sysmon64.exe on the host (Sysinternals zip).
-After copy/install, apply config once in elevated guest PowerShell (see install output).
+Do not commit Sysmon64.exe. Run sysmon fetch (or Setup-Dependencies.ps1) so the host
+downloads it from Microsoft. After copy/install, apply config once in elevated guest PowerShell.
 '@
             }
 

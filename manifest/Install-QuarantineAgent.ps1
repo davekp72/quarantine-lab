@@ -234,7 +234,7 @@ $token = Resolve-Token -TokenPath $tokenPath -Explicit $Token -Config $config -S
     'C:\Users\Public\Quarantine\agent-token.txt'
 )
 $port = if ($config.PSObject.Properties['port'] -and $config.port) { [int]$config.port } else { 9443 }
-$payloadUser = if ($config.PSObject.Properties['payloadUser'] -and $config.payloadUser) { [string]$config.payloadUser } else { 'jkcooper' }
+$payloadUser = if ($config.PSObject.Properties['payloadUser'] -and $config.payloadUser) { [string]$config.payloadUser } else { 'analyst' }
 $sysmonLog = if ($config.PSObject.Properties['sysmonLog'] -and $config.sysmonLog) { [string]$config.sysmonLog } else { 'Microsoft-Windows-Sysmon/Operational' }
 
 $finalExe = Join-Path $InstallDir 'quarantine-agent.exe'

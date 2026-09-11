@@ -16,7 +16,7 @@ func TestChangedFilesKeepsSystem32DropsCache(t *testing.T) {
 	sysmon, _ := json.Marshal(map[string]any{
 		"events": []any{
 			map[string]any{"eid": float64(11), "t": "FileCreate", "target": `C:\Windows\System32\dodge.txt`},
-			map[string]any{"eid": float64(11), "t": "FileCreate", "target": `C:\Users\jkcooper\AppData\Local\Temp\noise.txt`},
+			map[string]any{"eid": float64(11), "t": "FileCreate", "target": `C:\Users\analyst\AppData\Local\Temp\noise.txt`},
 			map[string]any{"eid": float64(12), "t": "RegistryEvent", "target": `HKLM\Software\Run`},
 		},
 	})

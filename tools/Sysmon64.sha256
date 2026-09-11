@@ -1,0 +1,4 @@
+# Optional SHA-256 pin for Sysmon64.exe extracted from Microsoft's Sysmon.zip.
+# Leave this file without a digest to rely on Authenticode only.
+# After reviewing a new Microsoft release, replace the next line with:
+#   <64-char hex>

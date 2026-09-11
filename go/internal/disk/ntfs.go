@@ -31,13 +31,14 @@ func ntfsReadFile(r io.ReaderAt, guestPath string, maxBytes int64) ([]byte, int6
 		return nil, 0, err
 	}
 	size := ntfs.RangeSize(reader)
-	if size > maxBytes {
-		return nil, size, fmt.Errorf("file too large (%d bytes, max %d)", size, maxBytes)
+	readSize := size
+	if readSize > maxBytes {
+		readSize = maxBytes
 	}
-	if size <= 0 {
-		return []byte{}, 0, nil
+	if readSize <= 0 {
+		return []byte{}, size, nil
 	}
-	buf := make([]byte, size)
+	buf := make([]byte, readSize)
 	n, err := reader.ReadAt(buf, 0)
 	if err != nil && err != io.EOF {
 		return nil, size, err

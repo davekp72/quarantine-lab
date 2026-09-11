@@ -6,8 +6,18 @@ set +e
 HINT="${1:-}"
 PCAP=""
 if [ -n "$HINT" ] && [ -f "$HINT" ]; then PCAP="$HINT"; fi
-if [ -z "$PCAP" ] && [ -f /var/run/quarantine-capture.path ]; then
-  PCAP=$(cat /var/run/quarantine-capture.path 2>/dev/null)
+if [ -z "$PCAP" ]; then
+  for f in \
+    /var/log/quarantine/pcap/current.path \
+    /run/quarantine/capture.path \
+    /run/quarantine-capture.path \
+    /var/run/quarantine-capture.path
+  do
+    if [ -f "$f" ]; then
+      PCAP=$(cat "$f" 2>/dev/null || true)
+      [ -n "$PCAP" ] && break
+    fi
+  done
 fi
 if [ -z "$PCAP" ] || [ ! -f "$PCAP" ]; then
   PCAP=$(ls -1t /var/log/quarantine/pcap/*.pcap 2>/dev/null | head -1)

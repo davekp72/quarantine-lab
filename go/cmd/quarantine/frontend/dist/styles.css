@@ -100,6 +100,22 @@ button.btn-primary:hover { background: #1f3a5f; }
   border-radius: 4px;
   width: 100%;
 }
+.defaults-block label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.defaults-block input[type=text],
+.defaults-block input[type=number] {
+  background: var(--panel);
+  border: 1px solid #30363d;
+  color: var(--text);
+  padding: 6px 8px;
+  border-radius: 4px;
+  width: 100%;
+}
 .traffic-row.policy-breach td { color: #ffb4ae; }
 .traffic-row.policy-breach { background: rgba(248, 81, 73, 0.12); }
 .policy-breach-note { color: #ffb4ae; margin: 0.35rem 0; }

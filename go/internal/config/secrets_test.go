@@ -83,7 +83,7 @@ ssh_pwauth: false
 		"vmDataDir": "` + strings.ReplaceAll(dir, `\`, `\\`) + `",
 		"autounattendPath": "` + strings.ReplaceAll(filepath.Join(tmplDir, "autounattend.xml"), `\`, `\\`) + `",
 		"guest": {"username": "quarantine", "password": ""},
-		"payload": {"username": "jkcooper", "password": ""},
+		"payload": {"username": "analyst", "password": ""},
 		"network": {"mode": "gateway", "gateway": {"enabled": true, "username": "quarantine"}}
 	}`
 	if err := os.WriteFile(cfgPath, []byte(raw), 0o644); err != nil {

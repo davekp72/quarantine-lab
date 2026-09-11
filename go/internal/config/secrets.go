@@ -426,11 +426,11 @@ func (c *Config) RenderUnattend(src, dest string) error {
 	}
 	guestUser := strings.TrimSpace(c.Guest.Username)
 	if guestUser == "" {
-		guestUser = "quarantine"
+		guestUser = DefaultGuestUsername
 	}
 	payloadUser := strings.TrimSpace(c.Payload.Username)
 	if payloadUser == "" {
-		payloadUser = "jkcooper"
+		payloadUser = DefaultPayloadUsername
 	}
 	repl := map[string]string{
 		"__GUEST_USERNAME__":   xmlEscape(guestUser),

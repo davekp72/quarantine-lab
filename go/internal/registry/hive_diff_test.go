@@ -162,9 +162,9 @@ func TestBuildIndexFromLocalHivesParallel(t *testing.T) {
 }
 
 func TestBuildIndexCleanSessionTiming(t *testing.T) {
-	dir := `D:\Vbox\LabVM\logs\manifests\CleanSession-hives`
-	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
-		t.Skip("no CleanSession-hives dir")
+	dir := os.Getenv("QUARANTINE_TEST_HIVES")
+	if dir == "" {
+		t.Skip("set QUARANTINE_TEST_HIVES to a hive dump directory")
 	}
 	ents, err := os.ReadDir(dir)
 	if err != nil {
@@ -211,22 +211,12 @@ func TestBuildIndexCleanSessionTiming(t *testing.T) {
 }
 
 func TestWalkHiveSOFTWARETiming(t *testing.T) {
-	candidates := []string{
-		`D:\Vbox\LabVM\logs\manifests\CleanSession-hives\SOFTWARE`,
-		os.Getenv("QUARANTINE_SOFTWARE_HIVE"),
-	}
-	var hive string
-	for _, c := range candidates {
-		if c == "" {
-			continue
-		}
-		if st, err := os.Stat(c); err == nil && !st.IsDir() {
-			hive = c
-			break
-		}
-	}
+	hive := os.Getenv("QUARANTINE_SOFTWARE_HIVE")
 	if hive == "" {
-		t.Skip("no SOFTWARE hive on disk")
+		t.Skip("set QUARANTINE_SOFTWARE_HIVE to a SOFTWARE hive path")
+	}
+	if st, err := os.Stat(hive); err != nil || st.IsDir() {
+		t.Skip("SOFTWARE hive not found")
 	}
 	start := time.Now()
 	var records []IndexRecord

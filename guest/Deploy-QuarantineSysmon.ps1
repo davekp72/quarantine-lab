@@ -91,6 +91,17 @@ if (-not (Test-Path -LiteralPath $installScript)) {
     throw "Install script not found: $installScript"
 }
 
+$hostSysmonExeRel = if ($cfg.sysmon.PSObject.Properties['hostSysmonExe']) { [string]$cfg.sysmon.hostSysmonExe } else { 'tools\Sysmon64.exe' }
+$hostExe = if ([IO.Path]::IsPathRooted($hostSysmonExeRel)) {
+    $hostSysmonExeRel
+} else {
+    Join-Path $projectRoot ($hostSysmonExeRel -replace '\\', [IO.Path]::DirectorySeparatorChar)
+}
+if (-not (Test-Path -LiteralPath $hostExe)) {
+    Write-Host 'Sysmon64.exe not on host — downloading from Microsoft...'
+    & (Join-Path $projectRoot 'scripts\Get-Sysmon.ps1') -ProjectRoot $projectRoot
+}
+
 Wait-QuarantineGuestDeployReady -ConfigPath $ConfigPath
 
 Copy-QuarantineVMGuestFile -Path $hostConfig -ConfigPath $ConfigPath -TargetDirectory $guestDir
@@ -98,16 +109,6 @@ Copy-QuarantineVMGuestFile -Path $installScript -ConfigPath $ConfigPath -TargetD
 $fallbackConfig = Join-Path $projectRoot 'config\sysmon\quarantine-lab-fallback.xml'
 if (Test-Path -LiteralPath $fallbackConfig) {
     Copy-QuarantineVMGuestFile -Path $fallbackConfig -ConfigPath $ConfigPath -TargetDirectory $guestDir
-}
-
-$hostSysmonExeRel = if ($cfg.sysmon.PSObject.Properties['hostSysmonExe']) { [string]$cfg.sysmon.hostSysmonExe } else { '' }
-$hostExe = $null
-if ($hostSysmonExeRel) {
-    $hostExe = if ([IO.Path]::IsPathRooted($hostSysmonExeRel)) {
-        $hostSysmonExeRel
-    } else {
-        Join-Path $projectRoot ($hostSysmonExeRel -replace '\\', [IO.Path]::DirectorySeparatorChar)
-    }
 }
 
 $binaryCopied = $false
@@ -138,7 +139,7 @@ if ($SysmonHostZip) {
 }
 
 if (-not $binaryCopied) {
-    Write-Warning "Sysmon64.exe was not copied from the host. Place tools\Sysmon64.exe on the host or copy Sysmon64.exe to $guestDir in the guest."
+    Write-Warning "Sysmon64.exe was not copied from the host. Run .\scripts\Get-Sysmon.ps1 (Microsoft download) then re-run sysmon copy, or copy Sysmon64.exe to $guestDir in the guest."
 }
 
 Write-Host "Sysmon files copied to guest: $guestDir"

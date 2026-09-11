@@ -58,7 +58,7 @@ const sampleVBoxFragment = `<?xml version="1.0"?>
 </VirtualBox>`
 
 func TestParseSnapshotIndexNested(t *testing.T) {
-	idx := parseSnapshotIndex([]byte(sampleVBoxFragment), `D:\Vbox\LabVM\Quarantine-Win11`)
+	idx := parseSnapshotIndex([]byte(sampleVBoxFragment), `C:\QuarantineLab\Quarantine-Win11`)
 	ev, ok := idx["evidence-20260902-202548"]
 	if !ok {
 		t.Fatalf("missing evidence snapshot: %#v", idx)

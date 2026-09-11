@@ -124,7 +124,7 @@ func TestParsePacketsJSONEmpty(t *testing.T) {
 func TestListFlowsLivePCAP(t *testing.T) {
 	pcap := os.Getenv("QUARANTINE_TEST_PCAP")
 	if pcap == "" {
-		pcap = `D:\Vbox\LabVM\logs\manifests\Evidence-20260911-103959-network\capture.pcap`
+		t.Skip("set QUARANTINE_TEST_PCAP to a capture.pcap path")
 	}
 	if _, err := os.Stat(pcap); err != nil {
 		t.Skip("no evidence pcap")

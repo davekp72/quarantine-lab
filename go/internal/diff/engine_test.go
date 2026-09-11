@@ -51,7 +51,7 @@ func TestCompareEventsBaselineUsesChangeField(t *testing.T) {
 			{P: `C:\Windows\System32\dodge.txt`, Change: "added"},
 			{P: `C:\Windows\System32\drivers\etc\hosts`, Change: "modified"},
 			{P: `C:\Windows\System32\gone.dll`, Change: "removed"},
-			{P: `C:\Users\jkcooper\AppData\Local\Temp\noise.txt`, Change: "added"},
+			{P: `C:\Users\analyst\AppData\Local\Temp\noise.txt`, Change: "added"},
 		},
 	}
 	res, err := Compare("l.json", "r.json", left, right)
@@ -95,13 +95,16 @@ func TestCompareEventsRelabelsPresentRemovedAndDropsDeletedNoise(t *testing.T) {
 }
 
 func TestGoldenDiffIfPresent(t *testing.T) {
-	root := filepath.Join("..", "..", "..")
-	diffPath := filepath.Join(root, "..", "D:", "Vbox", "LabVM", "logs", "manifests", "diff-CleanSession-vs-Evidence-hostfile.diff.json")
-	// Also try relative from workspace manifests if synced
-	alt := filepath.Join(root, "logs", "manifests", "diff-CleanSession-vs-Evidence-hostfile.diff.json")
-	path := diffPath
-	if _, err := os.Stat(path); err != nil {
-		path = alt
+	path := os.Getenv("QUARANTINE_TEST_DIFF")
+	if path == "" {
+		root := filepath.Join("..", "..", "..")
+		alt := filepath.Join(root, "logs", "manifests", "diff-CleanSession-vs-Evidence-hostfile.diff.json")
+		if _, err := os.Stat(alt); err == nil {
+			path = alt
+		}
+	}
+	if path == "" {
+		t.Skip("set QUARANTINE_TEST_DIFF or place a golden diff under logs/manifests")
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Skip("golden diff not available")

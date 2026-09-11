@@ -1,0 +1,12 @@
+title = "gitleaks"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Example configs, templates, and hashed Python pins"
+paths = [
+  '''config/quarantine-vm\.example\.json''',
+  '''templates/''',
+  '''gateway/python/''',
+]

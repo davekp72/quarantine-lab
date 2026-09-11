@@ -26,10 +26,13 @@ RestrictSUIDSGID=true
 LockPersonality=true
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_PACKET
-ReadWritePaths=/var/log/quarantine/pcap /run/quarantine
+# /run so the legacy /run/quarantine-capture.path marker is writable (ProtectSystem=strict).
+ReadWritePaths=/var/log/quarantine/pcap /run/quarantine /run
 ReadOnlyPaths=/etc/quarantine-gateway /usr/local/sbin /sys/class/net
 CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
 AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+# Distro tcpdump profile only allows -w under /tmp and /var/log/tcpdump.
+AppArmorProfile=unconfined
 
 [Install]
 WantedBy=multi-user.target

@@ -85,3 +85,9 @@ export function CheckHostPublicIPWails() {
 export function ShouldWarnPublicIPBeforeLaunchWails() {
   return window.go.app.App.ShouldWarnPublicIPBeforeLaunchWails();
 }
+export function UISettingsWails() {
+  return window.go.app.App.UISettingsWails();
+}
+export function SetUISettingsWails(filePreviewMaxKb, hideRoutineNoise, refreshOnCompare, warnPublicIP, homeIspPatterns) {
+  return window.go.app.App.SetUISettingsWails(filePreviewMaxKb, hideRoutineNoise, refreshOnCompare, warnPublicIP, homeIspPatterns);
+}

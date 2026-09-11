@@ -1,14 +1,14 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Harden guest quarantine networking gaps: default gateway, jkcooper WinINET proxy, WinHTTP proxy.
+  Harden guest quarantine networking gaps: default gateway, payload-user WinINET proxy, WinHTTP proxy.
 .DESCRIPTION
   Run as Administrator inside the guest (UAC elevate in the VM GUI if needed).
   Does not rely on host-driven privilege escalation.
 
   Fixes:
     - Missing default gateway (10.66.0.1)
-    - Payload user (jkcooper) HKCU ProxyEnable=0
+    - Payload user HKCU ProxyEnable=0
     - WinHTTP left on "Direct access"
     - Over-broad "Quarantine Allow Gateway Any" (allows SSH to gateway)
 
@@ -29,7 +29,7 @@ param(
     [string]$PrefixLength = '24',
 
     # Also patch this user's loaded hive / NTUSER.DAT (payload account).
-    [string]$PayloadUser = 'jkcooper'
+    [string]$PayloadUser = 'analyst'
 )
 
 Set-StrictMode -Version Latest
@@ -85,7 +85,7 @@ function Set-PayloadUserWinInetProxy {
     $inetRel = 'Software\Microsoft\Windows\CurrentVersion\Internet Settings'
     $patched = $false
 
-    # Currently loaded profile (jkcooper logged in).
+    # Currently loaded profile (payload user logged in).
     foreach ($hive in @(Get-ChildItem 'Registry::HKEY_USERS' -ErrorAction SilentlyContinue)) {
         $sid = $hive.PSChildName
         if ($sid -notmatch '^S-1-5-21-' -or $sid -match '_Classes$') { continue }
@@ -220,7 +220,7 @@ Set-WinInetProxyAtPath -RootPath 'HKCU:\Software\Microsoft\Windows\CurrentVersio
     -ProxyServer $ProxyServer -PacUrl $PacUrl -ProxyOverride $ProxyOverride
 Write-Host '  HKLM + current-user WinINET proxy set'
 
-# --- Payload user (jkcooper) ---
+# --- Payload user ---
 Set-PayloadUserWinInetProxy -UserName $PayloadUser -ProxyServer $ProxyServer -PacUrl $PacUrl -ProxyOverride $ProxyOverride
 
 # --- WinHTTP (services / some system components) ---

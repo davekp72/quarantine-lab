@@ -494,7 +494,7 @@ function Get-QuarantineManifestCompareWarnings {
     $toSysmon = if ($Right.PSObject.Properties['sysmon']) { $Right.sysmon } else { $null }
     if (-not $toSysmon -or $toSysmon.available -eq $false) {
         $msg = if ($toSysmon -and $toSysmon.message) { [string]$toSysmon.message } else { 'Sysmon not captured in To manifest.' }
-        [void]$warnings.Add("To Sysmon: $msg Place Sysmon64.exe in tools\ and re-capture, or run .\quarantine-vm.ps1 sysmon install.")
+        [void]$warnings.Add("To Sysmon: $msg Download Sysmon with .\scripts\Get-Sysmon.ps1 (or .\quarantine-vm.ps1 sysmon fetch), then re-capture, or run .\quarantine-vm.ps1 sysmon install.")
     }
 
     return @($warnings)

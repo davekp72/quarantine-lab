@@ -152,42 +152,74 @@ func (s *Service) LoadSidecar(snapshotName, suffix string) (map[string]any, erro
 
 // FileContentFromSidecar returns captured file bytes from changed-files sidecar when available.
 func (s *Service) FileContentFromSidecar(snapshotName, guestPath string) ([]byte, bool) {
-	snap := s.Cfg.ResolveSnapshotName(snapshotName)
-	sc, err := s.LoadSidecar(snap, "-changed-files.json")
-	if err != nil {
+	entry, ok := s.FileSidecarEntry(snapshotName, guestPath)
+	if !ok {
 		return nil, false
 	}
-	files, _ := sc["files"].([]any)
-	want := strings.ToLower(filepath.Clean(guestPath))
-	for _, item := range files {
-		m, ok := item.(map[string]any)
-		if !ok {
-			continue
+	return FileSidecarContent(entry)
+}
+
+// FileSidecarContent returns captured bytes from a changed-files sidecar row.
+func FileSidecarContent(entry map[string]any) ([]byte, bool) {
+	if entry == nil {
+		return nil, false
+	}
+	d, _ := entry["d"].(string)
+	switch strings.ToLower(stringField(entry, "c")) {
+	case "base64":
+		if d == "" {
+			return nil, false
 		}
-		p, _ := m["p"].(string)
-		if p == "" {
-			p, _ = m["path"].(string)
+		raw, err := base64.StdEncoding.DecodeString(d)
+		if err != nil {
+			return nil, false
 		}
-		if strings.ToLower(filepath.Clean(p)) != want {
-			continue
-		}
-		if d, ok := m["d"].(string); ok && d != "" {
-			return []byte(d), true
-		}
-		if c, _ := m["c"].(string); c == "text" {
-			if d, ok := m["d"].(string); ok {
-				return []byte(d), true
-			}
-		}
-		if c, _ := m["c"].(string); c == "base64" {
-			if d, ok := m["d"].(string); ok && d != "" {
-				if raw, err := base64.StdEncoding.DecodeString(d); err == nil {
-					return raw, true
-				}
-			}
-		}
+		return raw, true
+	case "text":
+		return []byte(d), true
+	case "too_large", "access_denied":
+		return nil, false
+	}
+	if d != "" {
+		return []byte(d), true
 	}
 	return nil, false
+}
+
+// FileSidecarSize returns the guest file size recorded on a changed-files sidecar row.
+func FileSidecarSize(entry map[string]any) int64 {
+	if entry == nil {
+		return 0
+	}
+	for _, key := range []string{"s", "size"} {
+		if n := jsonInt64(entry[key]); n > 0 {
+			return n
+		}
+	}
+	return 0
+}
+
+func stringField(m map[string]any, key string) string {
+	if v, ok := m[key].(string); ok {
+		return v
+	}
+	return ""
+}
+
+func jsonInt64(v any) int64 {
+	switch n := v.(type) {
+	case float64:
+		return int64(n)
+	case int64:
+		return n
+	case int:
+		return int64(n)
+	case json.Number:
+		i, _ := n.Int64()
+		return i
+	default:
+		return 0
+	}
 }
 
 // FileCreateMeta holds Sysmon FileCreate context for a guest path.

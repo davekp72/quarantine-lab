@@ -1,9 +1,37 @@
+# Local lab config and secrets
+config/quarantine-vm.json
+**/secrets/
+network/proxy/mitmproxy-ca-cert.cer
+manifest/viewer/session.html
+
+# Virtual disks / ISOs / Python venv
 .venv/
 isos/*.iso
 vms/
 *.vdi
 *.vmdk
-config/quarantine-vm.json
-network/proxy/mitmproxy-ca-cert.cer
-**/secrets/
-manifest/viewer/session.html
+*.vhd
+*.vhdx
+
+# Compiled binaries — keep source on main; publish via GitHub Releases
+*.exe
+dist/
+go/cmd/quarantine/build/bin/
+
+# Python bytecode
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# Sysmon (download from Microsoft; do not commit binaries)
+tools/Sysmon.zip
+tools/Sysmon.exe
+tools/Sysmon64.exe
+tools/Eula.txt
+tools/Sysmon.version
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+*.swp
+go/cmd/quarantine/frontend/package.json.md5

@@ -605,16 +605,25 @@ func (m *Manager) EnableMode() error {
 	return m.AttachLabGuest()
 }
 
+// capturePathReadShell reads the guest PCAP path from every marker the start script writes.
+const capturePathReadShell = `path=""
+for f in /var/log/quarantine/pcap/current.path /run/quarantine/capture.path /run/quarantine-capture.path /var/run/quarantine-capture.path; do
+  if [ -f "$f" ]; then path=$(cat "$f" 2>/dev/null || true); [ -n "$path" ] && break; fi
+done
+`
+
 // EnsureCaptureScripts installs/updates tcpdump start/stop/sync helpers + unit on the gateway.
 func (m *Manager) EnsureCaptureScripts() error {
 	startHost := filepath.Join(m.scriptsHostDir(), "scripts", "start-capture.sh")
 	stopHost := filepath.Join(m.scriptsHostDir(), "scripts", "stop-capture.sh")
 	syncHost := filepath.Join(m.scriptsHostDir(), "scripts", "sync-capture-stop.sh")
+	usersHost := filepath.Join(m.scriptsHostDir(), "scripts", "ensure-service-users.sh")
 	unitHost := filepath.Join(m.scriptsHostDir(), "systemd", "quarantine-capture.service")
 	for _, pair := range [][2]string{
 		{startHost, "/tmp/quarantine-capture-start.sh"},
 		{stopHost, "/tmp/quarantine-capture-stop.sh"},
 		{syncHost, "/tmp/quarantine-capture-sync.sh"},
+		{usersHost, "/tmp/quarantine-ensure-service-users.sh"},
 		{unitHost, "/tmp/quarantine-capture.service"},
 	} {
 		if err := m.linuxCopyFileTo(pair[0], pair[1]); err != nil {
@@ -625,6 +634,7 @@ func (m *Manager) EnsureCaptureScripts() error {
 		"install -m 0755 /tmp/quarantine-capture-start.sh /usr/local/sbin/quarantine-capture-start; "+
 			"install -m 0755 /tmp/quarantine-capture-stop.sh /usr/local/sbin/quarantine-capture-stop; "+
 			"install -m 0755 /tmp/quarantine-capture-sync.sh /usr/local/sbin/quarantine-capture-sync; "+
+			"install -m 0755 /tmp/quarantine-ensure-service-users.sh /usr/local/sbin/quarantine-ensure-service-users; "+
 			"install -m 0644 /tmp/quarantine-capture.service /etc/systemd/system/quarantine-capture.service; "+
 			"mkdir -p /var/log/quarantine/pcap; "+
 			"if [[ -x /usr/local/sbin/quarantine-ensure-service-users ]]; then /usr/local/sbin/quarantine-ensure-service-users || true; fi; "+
@@ -703,18 +713,17 @@ func (m *Manager) StartCapture() (string, error) {
 	_ = m.EnsureCaptureScripts()
 	_ = m.EnsureMitmFlowCapture()
 	_ = m.SyncGuestClock()
-	if _, err := m.linuxRunWithTimeout(30*time.Second, "sudo", "systemctl", "reset-failed", "quarantine-capture"); err != nil {
-		_ = err
-	}
+	// Stop a crash-looping unit so the next start picks up the refreshed unit/scripts.
+	_, _ = m.linuxRunWithTimeout(30*time.Second, "sudo", "systemctl", "stop", "quarantine-capture")
+	_, _ = m.linuxRunWithTimeout(30*time.Second, "sudo", "systemctl", "reset-failed", "quarantine-capture")
 	if _, err := m.linuxRunWithTimeout(30*time.Second, "sudo", "systemctl", "start", "quarantine-capture"); err != nil {
 		return "", err
 	}
 	var pathOut string
-	poll := `active=$(systemctl is-active quarantine-capture 2>/dev/null || true)
-path=$(cat /var/run/quarantine-capture.path 2>/dev/null || true)
+	poll := capturePathReadShell + `active=$(systemctl is-active quarantine-capture 2>/dev/null || true)
 if [ "$active" = active ] && [ -n "$path" ] && [ -f "$path" ]; then printf '%s\n' "$path"; exit 0; fi
 exit 1`
-	for i := 0; i < 15; i++ {
+	for i := 0; i < 20; i++ {
 		time.Sleep(300 * time.Millisecond)
 		out, err := m.linuxRunWithTimeout(20*time.Second, "sudo", "bash", "-c", poll)
 		pathOut = strings.TrimSpace(out)
@@ -722,8 +731,9 @@ exit 1`
 			return pathOut, nil
 		}
 	}
-	journal, _ := m.linuxRunWithTimeout(30*time.Second, "sudo", "journalctl", "-u", "quarantine-capture", "-n", "20", "--no-pager")
-	return "", fmt.Errorf("capture service did not stay up / pcap missing (path=%q). journal:\n%s", pathOut, strings.TrimSpace(journal))
+	journal, _ := m.linuxRunWithTimeout(30*time.Second, "sudo", "journalctl", "-u", "quarantine-capture", "-n", "40", "--no-pager")
+	status, _ := m.linuxRunWithTimeout(20*time.Second, "sudo", "systemctl", "status", "quarantine-capture", "--no-pager", "-l")
+	return "", fmt.Errorf("capture service did not stay up / pcap missing (path=%q). status:\n%s\njournal:\n%s", pathOut, strings.TrimSpace(status), strings.TrimSpace(journal))
 }
 
 // StopCapture stops capture and pulls the session PCAP (+ proxy logs) to the host.
@@ -801,7 +811,7 @@ func (m *Manager) StopCapture(pcapGuestPath string) (PullResult, error) {
 		cleanup += " " + shellSingleQuote("/tmp/"+base)
 	}
 	if copied > 0 || proxyOK {
-		cleanup += "; rm -f /var/log/quarantine/pcap/*.pcap /var/run/quarantine-capture.path"
+		cleanup += "; rm -f /var/log/quarantine/pcap/*.pcap /var/log/quarantine/pcap/current.path /run/quarantine/capture.path /run/quarantine-capture.path /var/run/quarantine-capture.path"
 		cleanup += "; truncate -s 0 /var/log/quarantine/proxy/access.log /var/log/quarantine/proxy/errors.log /var/log/quarantine/proxy/access-transparent.log /var/log/quarantine/proxy/flows.jsonl /var/log/quarantine/proxy/flows-transparent.jsonl 2>/dev/null"
 		cleanup += "; truncate -s 0 /var/log/quarantine/proxy/flows.mitm /var/log/quarantine/proxy/flows-transparent.mitm 2>/dev/null"
 	}
@@ -865,9 +875,9 @@ func (m *Manager) CleanPcaps(opts CleanPcapsOpts) (string, error) {
 PCAP_DIR=/var/log/quarantine/pcap
 PROXY_DIR=/var/log/quarantine/proxy
 ACTIVE=""
-if [ -f /var/run/quarantine-capture.path ]; then
-  ACTIVE=$(cat /var/run/quarantine-capture.path 2>/dev/null || true)
-fi
+for f in /var/log/quarantine/pcap/current.path /run/quarantine/capture.path /run/quarantine-capture.path /var/run/quarantine-capture.path; do
+  if [ -f "$f" ]; then ACTIVE=$(cat "$f" 2>/dev/null || true); [ -n "$ACTIVE" ] && break; fi
+done
 CUTOFF=%d
 DRY=%s
 PROXY=%s

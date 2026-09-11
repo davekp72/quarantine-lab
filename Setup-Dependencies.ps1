@@ -20,7 +20,7 @@ $ErrorActionPreference = 'Stop'
 
 $Root = $PSScriptRoot
 $IsoDir = Join-Path $Root 'isos'
-$VmDataDir = 'D:\Vbox\LabVM'
+$VmDataDir = 'C:\QuarantineLab'
 $ConfigPath = Join-Path $Root 'config\quarantine-vm.json'
 $Autounattend = Join-Path $Root 'templates\autounattend.xml'
 
@@ -37,8 +37,7 @@ function Get-VBoxManagePath {
 
     $candidates = @(
         "${env:ProgramFiles}\Oracle\VirtualBox\VBoxManage.exe",
-        "${env:ProgramFiles(x86)}\Oracle\VirtualBox\VBoxManage.exe",
-        'D:\Program Files\Oracle\VirtualBox\VBoxManage.exe'
+        "${env:ProgramFiles(x86)}\Oracle\VirtualBox\VBoxManage.exe"
     )
     foreach ($path in $candidates) {
         if (Test-Path -LiteralPath $path) { return $path }
@@ -105,12 +104,12 @@ function Write-QuarantineConfig {
                 listenHost   = '0.0.0.0'
                 listenPort   = 8080
                 pacPort      = 8081
-                logDir       = 'D:\Vbox\LabVM\logs\proxy'
+                logDir       = 'C:\QuarantineLab\logs\proxy'
             }
             capture          = [ordered]@{
                 enabled      = $true
                 mode         = 'gateway'
-                logDir       = 'D:\Vbox\LabVM\logs\pcap'
+                logDir       = 'C:\QuarantineLab\logs\pcap'
                 interface    = 'gateway-lan'
                 guestIp      = '10.66.0.15'
             }
@@ -123,9 +122,9 @@ function Write-QuarantineConfig {
                 intnetName   = 'quarantine-net'
                 uplink       = 'nat'
                 trafficMode  = 'fakenet'
-                passwordFile = 'D:\Vbox\LabVM\secrets\gateway-password.txt'
-                sshPrivateKey = 'D:\Vbox\LabVM\secrets\gateway-id_ed25519'
-                sshPublicKey  = 'D:\Vbox\LabVM\secrets\gateway-id_ed25519.pub'
+                passwordFile = 'C:\QuarantineLab\secrets\gateway-password.txt'
+                sshPrivateKey = 'C:\QuarantineLab\secrets\gateway-id_ed25519'
+                sshPublicKey  = 'C:\QuarantineLab\secrets\gateway-id_ed25519.pub'
                 permissive   = [ordered]@{
                     tcpPorts           = @(80, 443)
                     udpPorts           = @()
@@ -143,20 +142,41 @@ function Write-QuarantineConfig {
             disableSharedFolders = $true
         }
         inbox                = [ordered]@{
-            hostPath          = 'D:\Vbox\LabVM\quarantine-inbox'
+            hostPath          = 'C:\QuarantineLab\quarantine-inbox'
             shareName         = 'quarantine-in'
             readOnly          = $true
             requireNetworkOff = $false
-            logDir            = 'D:\Vbox\LabVM\logs\inbox'
+            logDir            = 'C:\QuarantineLab\logs\inbox'
         }
         guest                = [ordered]@{
             username      = 'quarantine'
             password      = ''
-            passwordFile  = 'D:\Vbox\LabVM\secrets\guest-password.txt'
+            passwordFile  = 'C:\QuarantineLab\secrets\guest-password.txt'
             domain        = ''
             defaultExe    = 'C:\Windows\System32\cmd.exe'
             copyTargetDir = 'C:\Users\Public\Quarantine'
             timeoutMs     = 60000
+        }
+        payload              = [ordered]@{
+            username      = 'analyst'
+            password      = ''
+            passwordFile  = 'C:\QuarantineLab\secrets\payload-password.txt'
+            domain        = ''
+            defaultExe    = 'C:\Windows\System32\cmd.exe'
+            copyTargetDir = 'C:\Users\Public\Quarantine'
+            timeoutMs     = 120000
+        }
+        sysmon               = [ordered]@{
+            hostConfigPath  = 'config\sysmon\quarantine-lab.xml'
+            hostSysmonExe   = 'tools\Sysmon64.exe'
+            guestDir        = 'C:\Users\Public\Quarantine\sysmon'
+            guestConfigName = 'quarantine-lab.xml'
+            guestSysmonExe  = 'C:\Users\Public\Quarantine\sysmon\Sysmon64.exe'
+            eventLog        = 'Microsoft-Windows-Sysmon/Operational'
+        }
+        ui                   = [ordered]@{
+            warnPublicIpBeforeLaunch = $true
+            homeIspPatterns          = @()
         }
         cleanSnapshotName    = 'Clean'
         firmware             = 'efi'
@@ -276,7 +296,7 @@ function Test-QuarantineNetworkTools {
         $issues += 'tshark/Wireshark: NOT FOUND (optional) — needed for packet capture'
     }
 
-    foreach ($dir in @('D:\Vbox\LabVM\logs\proxy', 'D:\Vbox\LabVM\logs\pcap')) {
+    foreach ($dir in @('C:\QuarantineLab\logs\proxy', 'C:\QuarantineLab\logs\pcap')) {
         if (-not (Test-Path -LiteralPath $dir)) {
             New-Item -ItemType Directory -Path $dir -Force | Out-Null
         }
@@ -331,6 +351,13 @@ Write-Step 'Dependency check'
 $issues = Test-DependencyStatus -VBoxPath $vboxPath -Config $config
 $issues += Test-QuarantineNetworkTools -ProjectRoot $Root
 Initialize-VirtualBoxHostNetwork -VBoxPath $vboxPath
+
+Write-Step 'Sysmon (download from Microsoft; not redistributed)'
+try {
+    & (Join-Path $Root 'scripts\Get-Sysmon.ps1') -ProjectRoot $Root
+} catch {
+    $issues += "Sysmon: $($_.Exception.Message)"
+}
 
 if ($issues -match 'ISO: MISSING') {
     Write-Step 'Windows ISO required'

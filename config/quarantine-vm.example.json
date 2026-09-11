@@ -5,7 +5,7 @@
   "memoryMb": 4096,
   "cpuCount": 2,
   "diskSizeGb": 80,
-  "vmDataDir": "D:\\Vbox\\LabVM",
+  "vmDataDir": "C:\\QuarantineLab",
   "diskPath": "",
   "windowsIsoPath": "isos",
   "autounattendPath": "",
@@ -21,12 +21,12 @@
       "listenHost": "0.0.0.0",
       "listenPort": 8080,
       "pacPort": 8081,
-      "logDir": "D:\\Vbox\\LabVM\\logs\\proxy"
+      "logDir": "C:\\QuarantineLab\\logs\\proxy"
     },
     "capture": {
       "enabled": true,
       "mode": "gateway",
-      "logDir": "D:\\Vbox\\LabVM\\logs\\pcap",
+      "logDir": "C:\\QuarantineLab\\logs\\pcap",
       "interface": "gateway-lan",
       "guestIp": "10.66.0.15"
     },
@@ -39,9 +39,9 @@
       "intnetName": "quarantine-net",
       "uplink": "nat",
       "username": "quarantine",
-      "passwordFile": "D:\\Vbox\\LabVM\\secrets\\gateway-password.txt",
-      "sshPrivateKey": "D:\\Vbox\\LabVM\\secrets\\gateway-id_ed25519",
-      "sshPublicKey": "D:\\Vbox\\LabVM\\secrets\\gateway-id_ed25519.pub",
+      "passwordFile": "C:\\QuarantineLab\\secrets\\gateway-password.txt",
+      "sshPrivateKey": "C:\\QuarantineLab\\secrets\\gateway-id_ed25519",
+      "sshPublicKey": "C:\\QuarantineLab\\secrets\\gateway-id_ed25519.pub",
       "sshHostPort": 2222,
       "memoryMb": 1024,
       "cpuCount": 1,
@@ -76,16 +76,16 @@
         }
     },
   "inbox": {
-    "hostPath": "D:\\Vbox\\LabVM\\quarantine-inbox",
+    "hostPath": "C:\\QuarantineLab\\quarantine-inbox",
     "shareName": "quarantine-in",
     "readOnly": true,
     "requireNetworkOff": false,
-    "logDir": "D:\\Vbox\\LabVM\\logs\\inbox"
+    "logDir": "C:\\QuarantineLab\\logs\\inbox"
   },
   "guest": {
     "username": "quarantine",
     "password": "",
-    "passwordFile": "D:\\Vbox\\LabVM\\secrets\\guest-password.txt",
+    "passwordFile": "C:\\QuarantineLab\\secrets\\guest-password.txt",
     "domain": "",
     "defaultExe": "C:\\Windows\\System32\\cmd.exe",
     "copyTargetDir": "C:\\Users\\Public\\Quarantine",
@@ -93,9 +93,9 @@
     "role": "Lab admin account (local Administrators)"
   },
   "payload": {
-    "username": "jkcooper",
+    "username": "analyst",
     "password": "",
-    "passwordFile": "D:\\Vbox\\LabVM\\secrets\\payload-password.txt",
+    "passwordFile": "C:\\QuarantineLab\\secrets\\payload-password.txt",
     "domain": "",
     "defaultExe": "C:\\Windows\\System32\\cmd.exe",
     "copyTargetDir": "C:\\Users\\Public\\Quarantine",
@@ -113,7 +113,7 @@
   "cleanSnapshotName": "Clean",
   "firmware": "efi",
   "manifest": {
-    "logDir": "D:\\Vbox\\LabVM\\logs\\manifests",
+    "logDir": "C:\\QuarantineLab\\logs\\manifests",
     "scanMode": "events",
     "registryEngine": "hive",
     "registryDiskFlatten": false,
@@ -125,12 +125,15 @@
     "enabled": true,
     "host": "127.0.0.1",
     "port": 9443,
-    "tokenFile": "D:\\Vbox\\LabVM\\secrets\\agent-token.txt",
+    "tokenFile": "C:\\QuarantineLab\\secrets\\agent-token.txt",
     "natRuleName": "quarantine-agent",
     "installPath": "C:\\Users\\Public\\Quarantine\\agent-staging\\quarantine-agent.exe"
   },
   "ui": {
     "warnPublicIpBeforeLaunch": true,
-    "homeIspPatterns": ["Community Fibre"]
+    "homeIspPatterns": [],
+    "filePreviewMaxKb": 512,
+    "hideRoutineNoise": true,
+    "refreshOnCompare": true
   }
 }

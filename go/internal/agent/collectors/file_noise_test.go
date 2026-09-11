@@ -14,24 +14,24 @@ func TestClassifyFileNoise(t *testing.T) {
 		{`C:\Windows\System32\evil.dll`, "evil.dll", ""},
 		{`C:\Windows\SystemTemp\drop.exe`, "drop.exe", ""},
 		{`C:\Windows\SystemTemp\abcdefg.dll`, "abcdefg.dll", ""},
-		{`C:\Users\jkcooper\AppData\Local\Temp\drop.exe`, "drop.exe", ""},
-		{`C:\Users\jkcooper\AppData\Local\Temp\foo.txt`, "foo.txt", "temp"},
+		{`C:\Users\analyst\AppData\Local\Temp\drop.exe`, "drop.exe", ""},
+		{`C:\Users\analyst\AppData\Local\Temp\foo.txt`, "foo.txt", "temp"},
 		{`C:\Windows\Prefetch\NOTEPAD.EXE-123.pf`, "NOTEPAD.EXE-123.pf", "os_telemetry"},
 		{`C:\Users\Public\Quarantine\hives\SOFTWARE`, "SOFTWARE", "capture"},
 		{`C:\ProgramData\QuarantineLab\hives\SOFTWARE`, "SOFTWARE", "capture"},
 		{`C:\Program Files\QuarantineLab\quarantine-agent.exe`, "quarantine-agent.exe", "capture"},
 		{`C:\Users\Public\Quarantine\hklm-registry-cli\hklm-HKLM_Software.reg`, "hklm-HKLM_Software.reg", "capture"},
 		{`C:\Windows\System32\config\systemprofile\AppData\Local\x.dat`, "x.dat", "os_telemetry"},
-		{`C:\Users\jkcooper\AppData\Local\Microsoft\Windows\INetCache\foo`, "foo", "os_telemetry"},
-		{`C:\Users\jkcooper\AppData\Roaming\Microsoft\Windows\Recent\System32.lnk`, "System32.lnk", "os_telemetry"},
+		{`C:\Users\analyst\AppData\Local\Microsoft\Windows\INetCache\foo`, "foo", "os_telemetry"},
+		{`C:\Users\analyst\AppData\Roaming\Microsoft\Windows\Recent\System32.lnk`, "System32.lnk", "os_telemetry"},
 		{`C:\$Extend\$Deleted\00020000000408F673F5ACE4`, "00020000000408F673F5ACE4", "ntfs"},
 		{`C:\Windows\ServiceState\WinHttpAutoProxySvc\Data\1616699711.cache`, "1616699711.cache", "os_telemetry"},
 		{`C:\Windows\SystemTemp\__PSScriptPolicyTest_t2xeymyi.jvb.ps1`, "__PSScriptPolicyTest_t2xeymyi.jvb.ps1", "temp"},
 		{`C:\Windows\SystemTemp\50ylbunx\50ylbunx.dll`, "50ylbunx.dll", "temp"},
 		{`C:\Windows\SystemTemp\50ylbunx`, "50ylbunx", "temp"},
 		{"dvhh5xui.0.cs", "dvhh5xui.0.cs", "temp"},
-		{`C:\Users\jkcooper\AppData\Local\Microsoft\OneDrive\26.153.0809.0004\FileSync.dll`, "FileSync.dll", "onedrive_client"},
-		{`C:\Users\jkcooper\OneDrive\Documents\notes.txt`, "notes.txt", ""},
+		{`C:\Users\analyst\AppData\Local\Microsoft\OneDrive\26.153.0809.0004\FileSync.dll`, "FileSync.dll", "onedrive_client"},
+		{`C:\Users\analyst\OneDrive\Documents\notes.txt`, "notes.txt", ""},
 		{"", "NTUSER.DAT", "os_telemetry"},
 		{"", "hosts", ""},
 		{"", "Report.wer.tmp", "os_telemetry"},
@@ -45,7 +45,7 @@ func TestClassifyFileNoise(t *testing.T) {
 }
 
 func TestFilePrioritySystem32First(t *testing.T) {
-	if FilePriority(`C:\Windows\System32\dodge.txt`) >= FilePriority(`C:\Users\jkcooper\Downloads\a.txt`) {
+	if FilePriority(`C:\Windows\System32\dodge.txt`) >= FilePriority(`C:\Users\analyst\Downloads\a.txt`) {
 		t.Fatal("System32 should outrank user downloads")
 	}
 }
@@ -66,7 +66,7 @@ func TestParseUsnValueHex(t *testing.T) {
 func TestFinalizeUSNEventsDropsOldAndNoise(t *testing.T) {
 	events := []map[string]any{
 		{"usn": "0x0000000016800000", "fileName": "old.txt", "reason": []string{"file_create"}, "path": `C:\Windows\System32\old.txt`},
-		{"usn": "0x0000000018c78b10", "fileName": "NTUSER.DAT", "reason": []string{"data_overwrite"}, "path": `C:\Users\jkcooper\NTUSER.DAT`},
+		{"usn": "0x0000000018c78b10", "fileName": "NTUSER.DAT", "reason": []string{"data_overwrite"}, "path": `C:\Users\analyst\NTUSER.DAT`},
 		{"usn": "0x0000000018c78b20", "fileName": "dodge.txt", "reason": []string{"file_create"}, "path": `C:\Windows\System32\dodge.txt`},
 		{"usn": "0x0000000018c78b30", "fileName": "cache", "reason": []string{"close"}, "reasonCode": "0x80000000", "path": `C:\tmp\cache`},
 		{"usn": "0x0000000018c78b40", "fileName": "hosts", "reason": []string{"data_overwrite"}, "path": `C:\Windows\System32\drivers\etc\hosts`},

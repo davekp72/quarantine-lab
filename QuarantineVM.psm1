@@ -44,7 +44,7 @@ function Get-QuarantineVMDataDir {
         return $Config.vmDataDir
     }
 
-    return 'D:\Vbox\LabVM'
+    return 'C:\QuarantineLab'
 }
 
 function Get-QuarantineVMFolder {
@@ -180,8 +180,7 @@ function Get-VBoxManagePath {
 
     $candidates = @(
         "${env:ProgramFiles}\Oracle\VirtualBox\VBoxManage.exe",
-        "${env:ProgramFiles(x86)}\Oracle\VirtualBox\VBoxManage.exe",
-        'D:\Program Files\Oracle\VirtualBox\VBoxManage.exe'
+        "${env:ProgramFiles(x86)}\Oracle\VirtualBox\VBoxManage.exe"
     )
 
     foreach ($path in $candidates) {
@@ -454,8 +453,7 @@ function Get-VBoxGuestAdditionsIsoPath {
     }
     $roots += @(
         "${env:ProgramFiles}\Oracle\VirtualBox",
-        "${env:ProgramFiles(x86)}\Oracle\VirtualBox",
-        'D:\Program Files\Oracle\VirtualBox'
+        "${env:ProgramFiles(x86)}\Oracle\VirtualBox"
     )
 
     foreach ($root in ($roots | Select-Object -Unique)) {
@@ -3351,7 +3349,7 @@ Windows install workflow:
 function Move-QuarantineVMDisk {
     <#
     .SYNOPSIS
-      Move the VM disk to vmDataDir (D:\Vbox\LabVM by default) and reattach it.
+      Move the VM disk to vmDataDir (C:\QuarantineLab by default) and reattach it.
     #>
     [CmdletBinding(SupportsShouldProcess)]
     param(

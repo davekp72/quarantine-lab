@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go/go.mod
+          cache-dependency-path: go/go.sum
+
+      - name: Build Windows binaries
+        shell: pwsh
+        working-directory: go
+        run: |
+          $out = Join-Path $env:GITHUB_WORKSPACE 'dist-release'
+          New-Item -ItemType Directory -Path $out -Force | Out-Null
+          go build -trimpath -ldflags="-s -w" -o (Join-Path $out 'quarantine.exe') ./cmd/quarantine
+          go build -trimpath -ldflags="-s -w" -o (Join-Path $out 'quarantine-agent.exe') ./cmd/quarantine-agent
+          Get-ChildItem $out | Format-Table Name, Length
+
+      - name: Checksums
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:GITHUB_WORKSPACE 'dist-release'
+          $sum = Join-Path $out 'checksums.txt'
+          Get-ChildItem $out -File | ForEach-Object {
+            $h = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "{0}  {1}" -f $h, $_.Name
+          } | Set-Content -LiteralPath $sum -Encoding ascii
+          Get-Content $sum
+
+      - name: SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          artifact-name: sbom.spdx.json
+          output-file: dist-release/sbom.spdx.json
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Sign checksums
+        shell: pwsh
+        env:
+          COSIGN_EXPERIMENTAL: '1'
+        run: |
+          $sum = Join-Path $env:GITHUB_WORKSPACE 'dist-release\checksums.txt'
+          cosign sign-blob --yes $sum --output-signature "$sum.sig" --output-certificate "$sum.pem"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist-release/quarantine.exe
+            dist-release/quarantine-agent.exe
+            dist-release/checksums.txt
+            dist-release/checksums.txt.sig
+            dist-release/checksums.txt.pem
+            dist-release/sbom.spdx.json

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	agenttypes "github.com/quarantine-lab/quarantine/internal/agent/types"
 	"github.com/quarantine-lab/quarantine/internal/applog"
@@ -269,37 +270,51 @@ func (a *App) VMStatus(ctx context.Context) (any, error) {
 	return a.VM.Status(ctx)
 }
 
+func (a *App) filePreviewMaxBytes() int64 {
+	if a == nil || a.Cfg == nil {
+		return int64(config.DefaultFilePreviewMaxKB) * 1024
+	}
+	return a.Cfg.FilePreviewMaxBytes()
+}
+
 // ReadSnapshotFile reads file content from sidecar capture or snapshot disk.
 func (a *App) ReadSnapshotFile(snapshotName, guestPath string) (map[string]any, error) {
-	if data, ok := a.Evidence.FileContentFromSidecar(snapshotName, guestPath); ok {
-		return map[string]any{
-			"path":    guestPath,
-			"size":    len(data),
-			"content": string(data),
-			"base64":  false,
-			"source":  "sidecar",
-		}, nil
-	}
-	if entry, ok := a.Evidence.FileSidecarEntry(snapshotName, guestPath); ok && !evidence.FileCapturedInSidecar(entry) {
-		return unavailableFilePreview(a.Evidence, snapshotName, guestPath, "events_only"), nil
+	max := a.filePreviewMaxBytes()
+	if a.Evidence != nil {
+		if entry, ok := a.Evidence.FileSidecarEntry(snapshotName, guestPath); ok {
+			if data, ok := evidence.FileSidecarContent(entry); ok {
+				return filePreviewResult(guestPath, data, evidence.FileSidecarSize(entry), "sidecar", max), nil
+			}
+			if size := evidence.FileSidecarSize(entry); size > max {
+				return tooLargeFilePreview(guestPath, size, max), nil
+			}
+			if !evidence.FileCapturedInSidecar(entry) {
+				return unavailableFilePreview(a.Evidence, snapshotName, guestPath, "events_only"), nil
+			}
+		}
 	}
 	if a.Disk == nil {
 		return nil, fmt.Errorf("disk reader unavailable")
 	}
-	data, info, err := a.Disk.ReadFile(snapshotName, guestPath, 512*1024)
+	data, info, err := a.Disk.ReadFile(snapshotName, guestPath, max)
 	if err != nil {
 		if isDiskFileNotFound(err) {
 			return unavailableFilePreview(a.Evidence, snapshotName, guestPath, "deleted_before_snapshot"), nil
 		}
+		if isDiskFileTooLarge(err) {
+			size := int64(0)
+			if info != nil {
+				size = info.Size
+			}
+			return tooLargeFilePreview(guestPath, size, max), nil
+		}
 		return nil, err
 	}
-	return map[string]any{
-		"path":    info.Path,
-		"size":    info.Size,
-		"content": string(data),
-		"base64":  false,
-		"source":  "disk",
-	}, nil
+	full := int64(len(data))
+	if info != nil && info.Size > 0 {
+		full = info.Size
+	}
+	return filePreviewResult(guestPath, data, full, "disk", max), nil
 }
 
 func isDiskFileNotFound(err error) bool {
@@ -309,8 +324,124 @@ func isDiskFileNotFound(err error) bool {
 	return strings.Contains(strings.ToLower(err.Error()), "not found")
 }
 
+func isDiskFileTooLarge(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "file too large")
+}
+
+func filePreviewResult(guestPath string, data []byte, fullSize int64, source string, max int64) map[string]any {
+	if max <= 0 {
+		max = int64(config.DefaultFilePreviewMaxKB) * 1024
+	}
+	if fullSize <= 0 {
+		fullSize = int64(len(data))
+	}
+	truncated := fullSize > int64(len(data))
+	if int64(len(data)) > max {
+		data = data[:max]
+		truncated = true
+	}
+	text := decodePreviewBytes(data)
+	if truncated {
+		text = fmt.Sprintf("Showing first %s of %s.\n\n%s", formatByteSize(int64(len(data))), formatByteSize(fullSize), text)
+	}
+	return map[string]any{
+		"path":      guestPath,
+		"size":      fullSize,
+		"content":   text,
+		"truncated": truncated,
+		"base64":    false,
+		"source":    source,
+	}
+}
+
+func tooLargeFilePreview(guestPath string, size, max int64) map[string]any {
+	sizeBit := fmt.Sprintf("file exceeds the %s preview limit", formatByteSize(max))
+	if size > 0 {
+		sizeBit = fmt.Sprintf("file is %s (limit %s)", formatByteSize(size), formatByteSize(max))
+	}
+	msg := fmt.Sprintf("Preview skipped — %s.\n\nPath: %s", sizeBit, guestPath)
+	return map[string]any{
+		"path":        guestPath,
+		"size":        size,
+		"content":     msg,
+		"unavailable": true,
+		"reason":      "too_large",
+	}
+}
+
+func formatByteSize(n int64) string {
+	if n < 1024 {
+		return fmt.Sprintf("%d bytes", n)
+	}
+	if n < 1024*1024 {
+		return fmt.Sprintf("%.1f KiB", float64(n)/1024)
+	}
+	return fmt.Sprintf("%.1f MiB", float64(n)/(1024*1024))
+}
+
+func decodePreviewBytes(data []byte) string {
+	if len(data) >= 2 {
+		switch {
+		case data[0] == 0xFF && data[1] == 0xFE:
+			return utf16LEString(data[2:])
+		case data[0] == 0xFE && data[1] == 0xFF:
+			return utf16BEString(data[2:])
+		}
+	}
+	if looksLikeUTF16LE(data) {
+		return utf16LEString(data)
+	}
+	return string(data)
+}
+
+func looksLikeUTF16LE(data []byte) bool {
+	n := len(data)
+	if n < 8 {
+		return false
+	}
+	if n > 256 {
+		n = 256
+	}
+	zeros := 0
+	pairs := n / 2
+	for i := 1; i < pairs*2; i += 2 {
+		if data[i] == 0 {
+			zeros++
+		}
+	}
+	return zeros*4 >= pairs*3
+}
+
+func utf16LEString(b []byte) string {
+	if len(b)%2 == 1 {
+		b = b[:len(b)-1]
+	}
+	u := make([]uint16, len(b)/2)
+	for i := range u {
+		u[i] = uint16(b[i*2]) | uint16(b[i*2+1])<<8
+	}
+	return string(utf16.Decode(u))
+}
+
+func utf16BEString(b []byte) string {
+	if len(b)%2 == 1 {
+		b = b[:len(b)-1]
+	}
+	u := make([]uint16, len(b)/2)
+	for i := range u {
+		u[i] = uint16(b[i*2+1]) | uint16(b[i*2])<<8
+	}
+	return string(utf16.Decode(u))
+}
+
 func unavailableFilePreview(svc *evidence.Service, snapshotName, guestPath, reason string) map[string]any {
-	meta := svc.FileCreateMetaFromSysmon(snapshotName, guestPath)
+	var meta *evidence.FileCreateMeta
+	if svc != nil {
+		meta = svc.FileCreateMetaFromSysmon(snapshotName, guestPath)
+	}
 	msg := fmt.Sprintf(
 		"Content unavailable — this file was seen during the session but is not on the evidence snapshot disk.\n\n"+
 			"Typical cause: a short-lived temp file (e.g. PowerShell __PSScriptPolicyTest_*) created during capture and deleted before the snapshot was taken.\n\n"+
@@ -466,6 +597,9 @@ func (a *App) FileTreeFromDiff(diffJSON string) (any, error) {
 			continue
 		}
 		meta := map[string]any{"change": "added"}
+		if f.Size > 0 {
+			meta["size"] = f.Size
+		}
 		if diff.IsEphemeralTempPath(f.Path) {
 			meta["previewUnavailable"] = true
 		}
@@ -475,13 +609,23 @@ func (a *App) FileTreeFromDiff(diffJSON string) (any, error) {
 		if diff.ShouldHideUSNLeafFile(f) {
 			continue
 		}
-		addPath(f.Path, map[string]any{"change": "removed"})
+		meta := map[string]any{"change": "removed"}
+		if f.Size > 0 {
+			meta["size"] = f.Size
+		}
+		addPath(f.Path, meta)
 	}
 	for _, f := range d.Files.Modified {
 		if diff.ShouldHideUSNLeafFile(f.After) || diff.ShouldHideUSNLeafFile(f.Before) {
 			continue
 		}
-		addPath(f.Path, map[string]any{"change": "modified"})
+		meta := map[string]any{"change": "modified"}
+		if f.After.Size > 0 {
+			meta["size"] = f.After.Size
+		} else if f.Before.Size > 0 {
+			meta["size"] = f.Before.Size
+		}
+		addPath(f.Path, meta)
 	}
 	return root, nil
 }

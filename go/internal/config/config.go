@@ -36,17 +36,41 @@ type Config struct {
 	UI               UIConfig        `json:"ui"`
 }
 
-// UIConfig controls desktop UI behaviour.
+// UIConfig controls desktop UI behaviour (editable from the Defaults sidebar).
 type UIConfig struct {
 	// WarnPublicIPBeforeLaunch shows host public IP/ISP before Launch (default true).
 	WarnPublicIPBeforeLaunch *bool `json:"warnPublicIpBeforeLaunch"`
 	// HomeISPPatterns are case-insensitive substrings of the public ISP/org that
 	// count as home (non-VPN) egress. Shown in red in the launch prompt.
-	// Omitted/null defaults to ["Community Fibre"]. An empty list means nothing is home.
+	// Omitted/null defaults to no home ISP (nothing highlighted). An empty list
+	// also means nothing is treated as home. Set substrings of your ISP/org to
+	// flag non-VPN egress in the launch prompt.
 	HomeISPPatterns []string `json:"homeIspPatterns"`
+	// FilePreviewMaxKB is the Files-tab content preview cap (default 512).
+	FilePreviewMaxKB int `json:"filePreviewMaxKb"`
+	// HideRoutineNoise is the default for the compare-bar checkbox (default true).
+	HideRoutineNoise *bool `json:"hideRoutineNoise"`
+	// RefreshOnCompare is the default for the compare-bar Refresh checkbox (default true).
+	RefreshOnCompare *bool `json:"refreshOnCompare"`
 }
 
-var defaultHomeISPPatterns = []string{"Community Fibre"}
+const (
+	DefaultFilePreviewMaxKB  = 512
+	minFilePreviewMaxKB      = 64
+	maxFilePreviewMaxKB      = 16384
+	DefaultGuestUsername     = "quarantine"
+	DefaultPayloadUsername   = "analyst"
+)
+
+// defaultHomeISPPatterns is empty: operators opt in with ui.homeIspPatterns.
+var defaultHomeISPPatterns = []string{}
+
+func boolPtrOr(p *bool, def bool) bool {
+	if p == nil {
+		return def
+	}
+	return *p
+}
 
 // WarnPublicIPBeforeLaunchEnabled is true unless explicitly disabled in config.
 func (c *Config) WarnPublicIPBeforeLaunchEnabled() bool {
@@ -65,6 +89,70 @@ func (c *Config) HomeISPPatterns() []string {
 		return out
 	}
 	return c.UI.HomeISPPatterns
+}
+
+// HideRoutineNoiseEnabled is true unless explicitly disabled in config.
+func (c *Config) HideRoutineNoiseEnabled() bool {
+	if c == nil {
+		return true
+	}
+	return boolPtrOr(c.UI.HideRoutineNoise, true)
+}
+
+// RefreshOnCompareEnabled is true unless explicitly disabled in config.
+func (c *Config) RefreshOnCompareEnabled() bool {
+	if c == nil {
+		return true
+	}
+	return boolPtrOr(c.UI.RefreshOnCompare, true)
+}
+
+// FilePreviewMaxKBResolved returns the Files-tab preview cap in KiB.
+func (c *Config) FilePreviewMaxKBResolved() int {
+	if c == nil || c.UI.FilePreviewMaxKB <= 0 {
+		return DefaultFilePreviewMaxKB
+	}
+	return clampFilePreviewMaxKB(c.UI.FilePreviewMaxKB)
+}
+
+// FilePreviewMaxBytes is FilePreviewMaxKBResolved in bytes.
+func (c *Config) FilePreviewMaxBytes() int64 {
+	return int64(c.FilePreviewMaxKBResolved()) * 1024
+}
+
+func clampFilePreviewMaxKB(n int) int {
+	if n < minFilePreviewMaxKB {
+		return minFilePreviewMaxKB
+	}
+	if n > maxFilePreviewMaxKB {
+		return maxFilePreviewMaxKB
+	}
+	return n
+}
+
+// ParseHomeISPPatterns splits a comma/newline list into trimmed non-empty patterns.
+func ParseHomeISPPatterns(s string) []string {
+	fields := strings.FieldsFunc(s, func(r rune) bool {
+		return r == ',' || r == '\n' || r == '\r' || r == ';'
+	})
+	out := make([]string, 0, len(fields))
+	seen := map[string]bool{}
+	for _, f := range fields {
+		f = strings.TrimSpace(f)
+		if f == "" {
+			continue
+		}
+		key := strings.ToLower(f)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, f)
+	}
+	if out == nil {
+		return []string{}
+	}
+	return out
 }
 
 // IsHomeISP reports whether any ISP/org string matches a configured home pattern.
@@ -336,7 +424,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("vmName is required in config")
 	}
 	if cfg.VMDataDir == "" {
-		cfg.VMDataDir = `D:\Vbox\LabVM`
+		cfg.VMDataDir = `C:\QuarantineLab`
 	}
 	if cfg.CleanSnapshot == "" {
 		cfg.CleanSnapshot = "Clean"
@@ -443,6 +531,41 @@ func (c *Config) AgentToken() (string, error) {
 		return "", fmt.Errorf("agent token file is empty")
 	}
 	return tok, nil
+}
+
+// PersistUI writes desktop Defaults into the on-disk config without rewriting secrets.
+func (c *Config) PersistUI(cfgPath string) error {
+	if c == nil {
+		return fmt.Errorf("nil config")
+	}
+	path := strings.TrimSpace(cfgPath)
+	if path == "" {
+		return fmt.Errorf("empty config path")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	raw = bytes.TrimPrefix(raw, []byte{0xEF, 0xBB, 0xBF})
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return err
+	}
+	ui, _ := doc["ui"].(map[string]any)
+	if ui == nil {
+		ui = map[string]any{}
+		doc["ui"] = ui
+	}
+	ui["filePreviewMaxKb"] = c.FilePreviewMaxKBResolved()
+	ui["hideRoutineNoise"] = c.HideRoutineNoiseEnabled()
+	ui["refreshOnCompare"] = c.RefreshOnCompareEnabled()
+	ui["warnPublicIpBeforeLaunch"] = c.WarnPublicIPBeforeLaunchEnabled()
+	ui["homeIspPatterns"] = c.HomeISPPatterns()
+	out, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(out, '\n'), 0o644)
 }
 
 // AgentHostBinary resolves path to quarantine-agent.exe on the host.

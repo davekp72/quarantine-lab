@@ -69,7 +69,7 @@
 #      .\quarantine-vm.ps1 gateway provision
 #      (provision installs the host SSH key, disables password SSH, removes NOPASSWD:ALL)
 #   SSH after provision:
-#      ssh -i D:\Vbox\LabVM\secrets\gateway-id_ed25519 -p 2222 quarantine@127.0.0.1
+#      ssh -i C:\QuarantineLab\secrets\gateway-id_ed25519 -p 2222 quarantine@127.0.0.1
 #
 # first-boot notes (Ubuntu 24+/26+)
 #   - Disables systemd-resolved stub listener so dnsmasq can bind :53 on 10.66.0.1

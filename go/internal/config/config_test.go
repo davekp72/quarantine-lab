@@ -104,17 +104,88 @@ func TestNormalizeTrafficMode(t *testing.T) {
 	}
 }
 
+func TestFilePreviewMaxKB(t *testing.T) {
+	var nilCfg *Config
+	if nilCfg.FilePreviewMaxKBResolved() != DefaultFilePreviewMaxKB {
+		t.Fatal("nil default")
+	}
+	c := &Config{UI: UIConfig{FilePreviewMaxKB: 1024}}
+	if c.FilePreviewMaxBytes() != 1024*1024 {
+		t.Fatalf("bytes=%d", c.FilePreviewMaxBytes())
+	}
+	c.UI.FilePreviewMaxKB = 1
+	if c.FilePreviewMaxKBResolved() != 64 {
+		t.Fatalf("min clamp: %d", c.FilePreviewMaxKBResolved())
+	}
+	c.UI.FilePreviewMaxKB = 999999
+	if c.FilePreviewMaxKBResolved() != 16384 {
+		t.Fatalf("max clamp: %d", c.FilePreviewMaxKBResolved())
+	}
+}
+
+func TestParseHomeISPPatterns(t *testing.T) {
+	got := ParseHomeISPPatterns("Example Home ISP, Mullvad\nBT")
+	if len(got) != 3 {
+		t.Fatalf("%v", got)
+	}
+	if len(ParseHomeISPPatterns("  , \n")) != 0 {
+		t.Fatal("empty should be empty slice")
+	}
+}
+
+func TestPersistUI(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cfg.json")
+	raw := `{"vmName":"TestVM","vmDataDir":"` + strings.ReplaceAll(dir, `\`, `\\`) + `","ui":{"warnPublicIpBeforeLaunch":true},"keep":1}`
+	if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	off := false
+	c := &Config{UI: UIConfig{
+		FilePreviewMaxKB:         1024,
+		HideRoutineNoise:         &off,
+		WarnPublicIPBeforeLaunch: &off,
+		HomeISPPatterns:          []string{"Virgin Media"},
+	}}
+	if err := c.PersistUI(path); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.UI.FilePreviewMaxKB != 1024 {
+		t.Fatalf("preview=%d", loaded.UI.FilePreviewMaxKB)
+	}
+	if loaded.HideRoutineNoiseEnabled() {
+		t.Fatal("hide noise should be false")
+	}
+	if loaded.WarnPublicIPBeforeLaunchEnabled() {
+		t.Fatal("warn IP should be false")
+	}
+	if !loaded.IsHomeISP("Virgin Media") {
+		t.Fatal("expected Virgin Media")
+	}
+	onDisk, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(onDisk), `"keep"`) {
+		t.Fatalf("persist must keep unrelated keys: %s", onDisk)
+	}
+}
+
 func TestIsHomeISP(t *testing.T) {
 	var nilCfg *Config
-	if !nilCfg.IsHomeISP("AS123 Community Fibre Limited") {
-		t.Fatal("default should treat Community Fibre as home")
+	if nilCfg.IsHomeISP("AS123 Example Home ISP Limited") {
+		t.Fatal("default should not treat any ISP as home")
 	}
 	if nilCfg.IsHomeISP("Mullvad VPN") {
 		t.Fatal("default should not treat other providers as home")
 	}
 
 	empty := &Config{UI: UIConfig{HomeISPPatterns: []string{}}}
-	if empty.IsHomeISP("Community Fibre") {
+	if empty.IsHomeISP("Example Home ISP") {
 		t.Fatal("empty homeIspPatterns should match nothing")
 	}
 
@@ -122,8 +193,8 @@ func TestIsHomeISP(t *testing.T) {
 	if !custom.IsHomeISP("Virgin Media") {
 		t.Fatal("expected Virgin Media match")
 	}
-	if custom.IsHomeISP("Community Fibre") {
-		t.Fatal("Community Fibre should not match a custom list without it")
+	if custom.IsHomeISP("Example Home ISP") {
+		t.Fatal("unlisted ISP should not match a custom list")
 	}
 }
 

@@ -56,7 +56,7 @@ if (Test-Path -LiteralPath $hintsPath) {
     }
 }
 if (-not $LabAdmin) { $LabAdmin = $env:USERNAME }
-if (-not $PayloadUser) { $PayloadUser = 'jkcooper' }
+if (-not $PayloadUser) { $PayloadUser = 'analyst' }
 
 $ran = New-Object System.Collections.Generic.List[string]
 $skipped = New-Object System.Collections.Generic.List[string]
@@ -133,7 +133,7 @@ $sysmonExe = Join-Path $PublicDir 'sysmon\Sysmon64.exe'
 if (Test-Path -LiteralPath $sysmonExe) {
     Invoke-ProvScript -Leaf 'Install-QuarantineSysmon.ps1' -SubDir 'sysmon'
 } else {
-    Write-Prov 'SKIP Sysmon (Sysmon64.exe not staged — place tools\Sysmon64.exe on the host and re-run guest provision)' 'DarkYellow'
+    Write-Prov 'SKIP Sysmon (Sysmon64.exe not staged — run .\scripts\Get-Sysmon.ps1 on the host and re-run guest provision)' 'DarkYellow'
     [void]$skipped.Add('Install-QuarantineSysmon.ps1')
 }
 

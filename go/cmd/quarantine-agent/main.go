@@ -45,7 +45,7 @@ func runInstall(args []string) {
 	fs := flag.NewFlagSet("install", flag.ExitOnError)
 	token := fs.String("token", "", "Bearer token (generated if empty)")
 	port := fs.Int("port", 9443, "Listen port")
-	payloadUser := fs.String("payload-user", "jkcooper", "Payload/test user for HKCU capture")
+	payloadUser := fs.String("payload-user", "analyst", "Payload/test user for HKCU capture")
 	sysmonLog := fs.String("sysmon-log", `Microsoft-Windows-Sysmon/Operational`, "Sysmon event log name")
 	_ = fs.Parse(args)
 
@@ -69,7 +69,7 @@ func runInstall(args []string) {
 func runAgent(asService bool) {
 	cfg, err := agentsvc.LoadConfig()
 	if err != nil {
-		cfg = types.AgentConfig{Port: 9443, TokenFile: agentsvc.DefaultTokenPath(), PayloadUser: "jkcooper"}
+		cfg = types.AgentConfig{Port: 9443, TokenFile: agentsvc.DefaultTokenPath(), PayloadUser: "analyst"}
 	}
 	token, err := agentsvc.LoadToken(cfg.TokenFile)
 	if err != nil {
@@ -96,7 +96,7 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `Quarantine Lab VM Agent
 
 Usage:
-  quarantine-agent install [--token=...] [--port=9443] [--payload-user=jkcooper]
+  quarantine-agent install [--token=...] [--port=9443] [--payload-user=analyst]
   quarantine-agent uninstall
   quarantine-agent run          (service entry or console)
   quarantine-agent debug        (console)

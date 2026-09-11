@@ -52,7 +52,8 @@ if (-not (Test-Path -LiteralPath $SysmonExe)) {
     throw @"
 Sysmon executable not found: $SysmonExe
 
-Copy Sysmon64.exe from Sysinternals to:
+On the host run .\scripts\Get-Sysmon.ps1 (downloads Sysmon from Microsoft), then
+re-run guest provision / sysmon copy so Sysmon64.exe is staged at:
   C:\Users\Public\Quarantine\sysmon\Sysmon64.exe
 "@
 }

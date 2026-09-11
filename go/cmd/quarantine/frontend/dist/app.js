@@ -16,6 +16,14 @@ let snapshotNames = [];
 let logDrawerOpen = false;
 let fileChangeTab = 'added';
 let regChangeTab = 'added';
+let FILE_PREVIEW_MAX_BYTES = 512 * 1024;
+
+function formatByteSize(n) {
+  n = Number(n) || 0;
+  if (n < 1024) return `${n} bytes`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MiB`;
+}
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -331,7 +339,7 @@ async function refreshStatus() {
       const usn = st.agentVersion >= '1.0.2'
         ? `, USN ${st.agentUSN === 'true' ? 'on' : 'off'}`
         : '';
-      const payload = st.agentPayloadSession === 'true' ? '' : ' (jkcooper not logged in — HKCU diff empty)';
+      const payload = st.agentPayloadSession === 'true' ? '' : ' (payload user not logged in — HKCU diff empty)';
       agentEl.textContent = `Agent OK — Sysmon ${st.agentSysmon === 'true' ? 'on' : 'off'}${usn}${payload}`;
     } else {
       agentEl.textContent = st.agentError || 'Agent not installed';
@@ -679,6 +687,65 @@ function showTab(name) {
   }
 }
 
+function applyUISettings(st, applySession) {
+  if (!st) return;
+  const kb = Number(st.filePreviewMaxKb) || 512;
+  FILE_PREVIEW_MAX_BYTES = Number(st.filePreviewMaxBytes) || kb * 1024;
+  const previewEl = $('#ui-preview-max-kb');
+  if (previewEl) previewEl.value = String(kb);
+  const hide = st.hideRoutineNoise !== false;
+  const refresh = st.refreshOnCompare !== false;
+  const warn = st.warnPublicIpBeforeLaunch !== false;
+  const hideEl = $('#ui-hide-noise');
+  if (hideEl) hideEl.checked = hide;
+  const refEl = $('#ui-refresh-compare');
+  if (refEl) refEl.checked = refresh;
+  const warnEl = $('#ui-warn-ip');
+  if (warnEl) warnEl.checked = warn;
+  const ispEl = $('#ui-home-isp');
+  if (ispEl) ispEl.value = st.homeIspPatternsText || (st.homeIspPatterns || []).join(', ');
+  if (applySession) {
+    const barHide = $('#hideNoise');
+    if (barHide) barHide.checked = hide;
+    const barRefresh = $('#refresh');
+    if (barRefresh) barRefresh.checked = refresh;
+  }
+}
+
+async function loadUISettings() {
+  const api = await backend();
+  if (!api?.UISettingsWails) return;
+  applyUISettings(await api.UISettingsWails(), true);
+}
+
+async function saveUISettings() {
+  const api = await backend();
+  const msg = $('#ui-save-msg');
+  if (!api?.SetUISettingsWails) {
+    if (msg) msg.textContent = 'Restart the UI after this update (SetUISettingsWails missing).';
+    return;
+  }
+  const kb = Number($('#ui-preview-max-kb')?.value) || 512;
+  const btn = $('#btn-ui-save');
+  setBusy(btn, true, 'Saving…');
+  try {
+    const st = await api.SetUISettingsWails(
+      kb,
+      !!$('#ui-hide-noise')?.checked,
+      !!$('#ui-refresh-compare')?.checked,
+      !!$('#ui-warn-ip')?.checked,
+      $('#ui-home-isp')?.value || '',
+    );
+    applyUISettings(st, true);
+    if (msg) msg.textContent = 'Saved';
+    if (diffData) await rerenderDiff();
+  } catch (e) {
+    if (msg) msg.textContent = String(e);
+  } finally {
+    setBusy(btn, false, 'Save defaults');
+  }
+}
+
 function hideNoiseEnabled() {
   return $('#hideNoise')?.checked !== false;
 }
@@ -989,19 +1056,24 @@ async function renderFileTree() {
   const tree = api?.BuildFileTreeWails ? await api.BuildFileTreeWails(json) : buildFileTreeLocal(filtered);
   renderTreeNode(tree, host, async (node) => {
     if (!node.path || (node.children && Object.keys(node.children).length)) return;
-    $('#file-preview').textContent = 'Loading...';
+    const preview = $('#file-preview');
+    const knownSize = Number(node.size) || 0;
+    if (knownSize > FILE_PREVIEW_MAX_BYTES) {
+      preview.classList.add('preview-unavailable');
+      preview.textContent = `Preview skipped — file is ${formatByteSize(knownSize)} (limit ${formatByteSize(FILE_PREVIEW_MAX_BYTES)}).\n\nPath: ${node.path}`;
+      return;
+    }
+    preview.textContent = 'Loading...';
     toSnapshot = diffData.meta?.toSnapshot || $('#to-snap').value;
     try {
       if (api?.ReadSnapshotFileWails) {
         const res = await api.ReadSnapshotFileWails(toSnapshot, node.path);
-        const preview = $('#file-preview');
         preview.classList.toggle('preview-unavailable', !!res.unavailable);
         preview.textContent = res.content || '(empty)';
       } else {
-        $('#file-preview').textContent = node.path;
+        preview.textContent = node.path;
       }
     } catch (e) {
-      const preview = $('#file-preview');
       preview.classList.remove('preview-unavailable');
       preview.textContent = String(e);
     }
@@ -1028,6 +1100,7 @@ function buildFileTreeLocal(diff) {
       node = node.children[part];
       if (i === parts.length - 1) {
         node.change = change;
+        if (file?.size) node.size = file.size;
         if (change === 'added' && isEphemeralTempPath(path)) node.previewUnavailable = true;
       }
     }
@@ -1059,7 +1132,7 @@ async function renderRegistryTree() {
   if (!tree) {
     const src = d.meta?.registryDiffSource || '';
     if (src !== 'hive-index' && (d.meta?.toUserRegistryCount ?? d.meta?.fromUserRegistryCount) === 0) {
-      host.innerHTML = '<p class="muted">No HKCU registry in manifests — log in as payload user (jkcooper) before capture for user registry diffs.</p>';
+      host.innerHTML = '<p class="muted">No HKCU registry in manifests — log in as the payload user before capture for user registry diffs.</p>';
     } else {
       host.textContent = 'No registry tree';
     }
@@ -1637,6 +1710,10 @@ document.querySelectorAll('.reg-tabs button[data-reg-tab]').forEach((b) => {
 });
 $('#btn-compare').addEventListener('click', () => compare().catch((e) => alert(e)));
 $('#hideNoise').addEventListener('change', () => rerenderDiff().catch((e) => alert(e)));
+$('#btn-ui-save')?.addEventListener('click', () => saveUISettings().catch((e) => {
+  const el = $('#ui-save-msg');
+  if (el) el.textContent = String(e);
+}));
 $('#btn-refresh-snaps').addEventListener('click', () => loadSnapshots($('#from-snap').value, $('#to-snap').value).catch(alert));
 $('#btn-launch-snap').addEventListener('click', () => launchSnapshot());
 $('#btn-take-snap').addEventListener('click', () => takeSnapshot());
@@ -1694,6 +1771,7 @@ EventsOn('applog', (entry) => {
 (async () => {
   // Load panels independently so one slow/hung call cannot leave the whole UI on "Loading…".
   const results = await Promise.allSettled([
+    loadUISettings(),
     refreshStatus(),
     refreshGatewayStatus(),
     refreshCaptureStatus(),

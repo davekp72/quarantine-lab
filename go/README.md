@@ -4,6 +4,8 @@ Go + Wails rewrite of the quarantine VirtualBox lab tooling.
 
 ## Build
 
+Keep compiled `.exe` files out of git; publish them from GitHub Releases (`docs/RELEASING.md`).
+
 ```powershell
 cd go
 go build -o quarantine.exe ./cmd/quarantine

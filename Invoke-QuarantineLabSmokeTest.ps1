@@ -4,7 +4,7 @@
   Copy and run the manifest smoke test on the quarantine VM (admin + payload user).
 
 .DESCRIPTION
-  User (jkcooper) changes run via guestcontrol immediately.
+  User (payload account) changes run via guestcontrol immediately.
   Admin Sysmon/USN checks run via guestcontrol as the lab admin after one-time grant
   (Event Log Readers + Backup Operators). The legacy SYSTEM polling task is not used.
 

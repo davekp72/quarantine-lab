@@ -68,6 +68,22 @@
           </div>
         </div>
       </section>
+
+      <section class="side-block defaults-block">
+        <h2>Defaults</h2>
+        <p class="muted snap-hint">Runtime GUI settings. Saved to config and applied immediately.</p>
+        <label>File preview max (KiB)
+          <input id="ui-preview-max-kb" type="number" min="64" max="16384" step="64" value="512" />
+        </label>
+        <label class="check"><input type="checkbox" id="ui-hide-noise" checked /> Hide routine noise</label>
+        <label class="check"><input type="checkbox" id="ui-refresh-compare" checked /> Refresh on Compare</label>
+        <label class="check"><input type="checkbox" id="ui-warn-ip" checked /> Warn on launch if home ISP</label>
+        <label>Home ISP match
+          <input id="ui-home-isp" type="text" spellcheck="false" placeholder="Your home ISP name" />
+        </label>
+        <button id="btn-ui-save" type="button">Save defaults</button>
+        <p id="ui-save-msg" class="muted action-msg"></p>
+      </section>
     </aside>
 
     <div class="main-col">

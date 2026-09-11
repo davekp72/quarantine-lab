@@ -8,7 +8,7 @@ import (
 func TestVDIPayloadOffset(t *testing.T) {
 	path := os.Getenv("QUARANTINE_TEST_VDI")
 	if path == "" {
-		path = `C:\Users\dange\AppData\Local\Temp\quarantine-lab\disks\0f7e0ff7-8ac3-4297-ac5f-7f6b72e2103d.raw`
+		t.Skip("set QUARANTINE_TEST_VDI to a raw disk image for this test")
 	}
 	f, err := os.Open(path)
 	if err != nil {

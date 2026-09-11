@@ -102,7 +102,7 @@ Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet
 Write-Host '  WinHTTP proxy set'
 
 # Patch payload / other interactive user hives so standard users get PAC (not only Admin HKCU)
-$payloadUser = 'jkcooper'
+$payloadUser = 'analyst'
 $configPayload = Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'config\quarantine-vm.json'
 if (Test-Path -LiteralPath $configPayload) {
     try {

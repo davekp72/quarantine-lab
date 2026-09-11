@@ -164,7 +164,8 @@ func (r *Reader) ListDirectory(snapshotName, guestPath string) ([]FileInfo, erro
 }
 
 // ReadFile reads file bytes from snapshot disk using go-ntfs when available.
-// If maxBytes <= 0, allows up to 512 MiB (for hive extraction).
+// If maxBytes <= 0, allows up to 512 MiB (for hive extraction). Files larger
+// than maxBytes return the first maxBytes and the full size on FileInfo.
 func (r *Reader) ReadFile(snapshotName, guestPath string, maxBytes int64) ([]byte, *FileInfo, error) {
 	guestPath = normalizeGuestPath(guestPath)
 	vdi, err := r.EnsureFlattened(snapshotName)

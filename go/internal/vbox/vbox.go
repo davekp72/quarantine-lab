@@ -29,7 +29,7 @@ func NewClient(configuredPath string) (*Client, error) {
 	}
 	candidates := []string{
 		filepath.Join(os.Getenv("ProgramFiles"), "Oracle", "VirtualBox", "VBoxManage.exe"),
-		`D:\Program Files\Oracle\VirtualBox\VBoxManage.exe`,
+		filepath.Join(os.Getenv("ProgramFiles(x86)"), "Oracle", "VirtualBox", "VBoxManage.exe"),
 	}
 	for _, c := range candidates {
 		if _, err := os.Stat(c); err == nil {

@@ -8,10 +8,10 @@ import (
 
 func TestFriendlySIDLabel(t *testing.T) {
 	names := map[string]string{
-		"S-1-5-21-2173276180-4090869881-14400703-1003": "jkcooper",
+		"S-1-5-21-1-2-3-1003": "analyst",
 	}
-	got := FriendlySIDLabel("S-1-5-21-2173276180-4090869881-14400703-1003", names)
-	if got != "jkcooper" {
+	got := FriendlySIDLabel("S-1-5-21-1-2-3-1003", names)
+	if got != "analyst" {
 		t.Fatalf("got %q", got)
 	}
 	if FriendlySIDLabel("S-1-5-18", nil) != "SYSTEM" {
@@ -24,7 +24,7 @@ func TestBuildTreeSIDLabel(t *testing.T) {
 		{K: `HKU:\S-1-5-21-1-2-3-1003\Software\Test`, N: "Foo", V: "1", T: "REG_SZ"},
 	}
 	tree := BuildTree(entries, map[string]string{
-		"S-1-5-21-1-2-3-1003": "jkcooper",
+		"S-1-5-21-1-2-3-1003": "analyst",
 	})
 	hku := tree.Children["HKU:"]
 	if hku == nil {
@@ -34,8 +34,8 @@ func TestBuildTreeSIDLabel(t *testing.T) {
 	if sid == nil {
 		t.Fatal("missing SID child")
 	}
-	if sid.Label != "jkcooper" {
-		t.Fatalf("label=%q want jkcooper", sid.Label)
+	if sid.Label != "analyst" {
+		t.Fatalf("label=%q want analyst", sid.Label)
 	}
 	if sid.Name != "S-1-5-21-1-2-3-1003" {
 		t.Fatalf("name should remain SID, got %q", sid.Name)

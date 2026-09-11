@@ -160,4 +160,14 @@ fi
 # ifaces.env readable by capture
 chmod 644 /etc/quarantine-gateway/ifaces.env 2>/dev/null || true
 
+# Ubuntu's usr.bin.tcpdump profile only allows writes under /tmp and /var/log/tcpdump,
+# not /var/log/quarantine/pcap. Unload it so tcpdump -w succeeds as quarantine-capture.
+if [[ -f /etc/apparmor.d/usr.bin.tcpdump ]]; then
+  install -d /etc/apparmor.d/disable
+  ln -sfn /etc/apparmor.d/usr.bin.tcpdump /etc/apparmor.d/disable/usr.bin.tcpdump
+  if command -v apparmor_parser >/dev/null 2>&1; then
+    apparmor_parser -R /etc/apparmor.d/usr.bin.tcpdump 2>/dev/null || true
+  fi
+fi
+
 echo "service-users ok mitm=$MITM_HOME fakenet=$FAKENET_HOME capture=$CAPTURE_HOME"
