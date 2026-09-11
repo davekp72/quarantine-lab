@@ -1,6 +1,6 @@
 # Quarantine Lab
 
-Warning this has been built by an amateur using AI tools. It will have bugs. Although I know a little about network security, I am very much an amateur. Use at your own risk
+### Warning: This has been built by an amateur using AI tools. It will have bugs. Use at your own risk
 
 An isolated **VirtualBox Windows lab** for opening suspicious email, malware
 samples, and other quarantine work. This reduces risk; it **cannot guarantee
