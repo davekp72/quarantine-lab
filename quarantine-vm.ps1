@@ -1053,9 +1053,9 @@ Guest Additions (host-to-guest paste):
 
 Network (internet-only quarantine vs offline):
 
-  network gateway      Linux gateway VM (routing + capture + transparent TLS MITM)
+  network gateway      Linux gateway VM (default analysis path; FakeNet or allowlisted internet)
 
-  network quarantine   NAT + host mitmproxy logging (legacy)
+  network quarantine   Alias for gateway (host-NAT mitm is retired)
 
   network offline      Internal network only (alias for intnet)
 

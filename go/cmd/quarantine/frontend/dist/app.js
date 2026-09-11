@@ -132,6 +132,48 @@ async function refreshCaptureStatus() {
   }
 }
 
+function parsePortList(s) {
+  return String(s || '')
+    .split(/[,\s]+/)
+    .map((x) => Number(x))
+    .filter((n) => Number.isInteger(n) && n > 0 && n < 65536);
+}
+
+function fillPermissivePolicyForm(pol) {
+  if (!pol) return;
+  const tcp = $('#gw-tcp-ports');
+  const udp = $('#gw-udp-ports');
+  const dns = $('#gw-force-dns');
+  const icmp = $('#gw-allow-icmp');
+  if (tcp && Array.isArray(pol.tcpPorts)) tcp.value = pol.tcpPorts.join(', ');
+  if (udp && Array.isArray(pol.udpPorts)) udp.value = pol.udpPorts.join(', ');
+  if (dns) dns.checked = pol.forceDnsToGateway !== false;
+  if (icmp) icmp.checked = pol.allowIcmp !== false;
+}
+
+async function savePermissivePolicy() {
+  const api = await backend();
+  if (!api?.SetPermissivePolicyWails) {
+    alert('Restart the UI after this update (SetPermissivePolicyWails missing).');
+    return;
+  }
+  const tcp = parsePortList($('#gw-tcp-ports')?.value);
+  const udp = parsePortList($('#gw-udp-ports')?.value);
+  const forceDns = !!$('#gw-force-dns')?.checked;
+  const allowIcmp = !!$('#gw-allow-icmp')?.checked;
+  const btn = $('#btn-gw-policy');
+  setBusy(btn, true, 'Saving…');
+  try {
+    const st = await api.SetPermissivePolicyWails(tcp, udp, forceDns, allowIcmp);
+    fillPermissivePolicyForm(st?.permissive);
+    const el = $('#snap-action-msg');
+    if (el) el.textContent = (st?.message || 'Allowlist saved').split('\n')[0];
+    await refreshGatewayStatus();
+  } finally {
+    setBusy(btn, false, 'Save allowlist');
+  }
+}
+
 async function refreshGatewayStatus() {
   const api = await backend();
   const statusEl = $('#gateway-status');
@@ -147,7 +189,7 @@ async function refreshGatewayStatus() {
     const st = await api.GatewayStatusWails();
     const vmState = (st.vmState || '').toLowerCase();
     const mode = (st.mode || '').toLowerCase();
-    const traffic = (st.trafficMode || 'permissive').toLowerCase();
+    const traffic = (st.trafficMode || 'fakenet').toLowerCase();
     const active = mode === 'gateway' && vmState === 'running';
     statusEl.className = 'capture-status ' + (active ? 'running' : vmState === 'running' ? 'stopped' : 'disabled');
     statusEl.textContent = active ? 'Active' : (vmState === 'running' ? 'Running (idle)' : (vmState || 'Off'));
@@ -163,11 +205,12 @@ async function refreshGatewayStatus() {
     if (trafficEl) {
       trafficEl.textContent = traffic === 'fakenet'
         ? 'Traffic: FakeNet sinkhole (no real internet)'
-        : 'Traffic: Permissive (internet + MITM)';
+        : 'Traffic: Permissive (allowlisted internet + MITM)';
     }
+    fillPermissivePolicyForm(st.permissive);
     const permBtn = $('#btn-gw-permissive');
     const fakeBtn = $('#btn-gw-fakenet');
-    if (permBtn) permBtn.classList.toggle('btn-primary', traffic !== 'fakenet');
+    if (permBtn) permBtn.classList.toggle('btn-primary', traffic === 'permissive');
     if (fakeBtn) fakeBtn.classList.toggle('btn-primary', traffic === 'fakenet');
     const canSwitch = vmState === 'running';
     if (permBtn) permBtn.disabled = !canSwitch;
@@ -188,9 +231,17 @@ async function setGatewayTrafficMode(mode) {
   if (mode === 'fakenet') {
     const ok = confirm(
       'Switch gateway to FakeNet sinkhole?\n\n' +
-      'The lab guest will lose real internet. FakeNet-NG answers DNS/HTTP/SMTP locally.\n' +
-      'Private-net isolation stays. LAN PCAP still records.\n\n' +
-      'OK = sinkhole   Cancel = stay permissive'
+      'The lab guest will lose real internet. FakeNet answers DNS/HTTP/SMTP locally and PCAP still records.\n\n' +
+      'OK = sinkhole   Cancel = stay as-is'
+    );
+    if (!ok) return;
+  }
+  if (mode === 'permissive') {
+    const ok = confirm(
+      'Switch gateway to Permissive (real Internet)?\n\n' +
+      'This is uncontained WAN for allowlisted ports. HTTP(S) is MITM’d; other listed ports go to the public internet.\n' +
+      'Use a VPN. PCAP on the LAN still records every frame, including dropped attempts.\n\n' +
+      'OK = open allowlisted internet   Cancel = stay FakeNet'
     );
     if (!ok) return;
   }
@@ -1611,6 +1662,7 @@ $('#btn-capture-stop')?.addEventListener('click', () => stopCapture());
 $('#btn-capture-refresh')?.addEventListener('click', () => refreshCaptureStatus().catch(alert));
 $('#btn-gw-permissive')?.addEventListener('click', () => setGatewayTrafficMode('permissive').catch(alert));
 $('#btn-gw-fakenet')?.addEventListener('click', () => setGatewayTrafficMode('fakenet').catch(alert));
+$('#btn-gw-policy')?.addEventListener('click', () => savePermissivePolicy().catch(alert));
 $('#btn-load-file').addEventListener('click', async () => {
   const path = prompt('Diff JSON path');
   if (!path) return;

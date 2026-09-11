@@ -73,6 +73,12 @@ export function GatewayTrafficModeWails() {
 export function SetGatewayTrafficModeWails(mode) {
   return window.go.app.App.SetGatewayTrafficModeWails(mode);
 }
+export function PermissivePolicyWails() {
+  return window.go.app.App.PermissivePolicyWails();
+}
+export function SetPermissivePolicyWails(tcpPorts, udpPorts, forceDNS, allowICMP) {
+  return window.go.app.App.SetPermissivePolicyWails(tcpPorts, udpPorts, forceDNS, allowICMP);
+}
 export function CheckHostPublicIPWails() {
   return window.go.app.App.CheckHostPublicIPWails();
 }

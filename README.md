@@ -245,28 +245,31 @@ List everything:
 
 | Mode | Use when |
 |------|----------|
-| `network offline` | Default isolation — no internet |
-| `network gateway` | Lab guest on intnet via Linux gateway |
-| `network quarantine` | Legacy host mitmproxy (no gateway VM) |
-| `network nat` | Temporary raw internet (Windows setup only) |
+| `network gateway` | Default analysis path — lab guest on intnet via Linux gateway |
+| `network offline` | Isolation (intnet, no WAN through the gateway) |
+| `network none` / `hostonly` | No sample egress / host-only |
 
-### Gateway traffic: permissive vs FakeNet
+`network quarantine` and `network nat` now enable **gateway** (host-NAT mitm is retired).
 
-Both keep LAN PCAP and block private/host LAN. The lab guest IP/DNS does not change.
+### Gateway traffic: FakeNet vs permissive
+
+Both keep **full-frame LAN PCAP** (every protocol, including dropped WAN attempts). The guest IP/DNS does not change.
 
 | Mode | What the guest sees |
 |------|---------------------|
-| **Permissive** (default) | Real internet. HTTP/HTTPS MITM. Other ports forwarded. |
-| **FakeNet** | No WAN. FakeNet-NG answers DNS/HTTP/SMTP/etc. locally (sinkhole). |
+| **FakeNet** (default) | No WAN. FakeNet-NG answers DNS/HTTP/SMTP/etc. locally and holes the rest. |
+| **Permissive** | Allowlisted real internet. TCP 80/443 MITM. Extra TCP/UDP ports you list go to WAN. DNS forced to the gateway unless you turn that off. Attempts outside the allowlist are dropped, still in PCAP, and highlighted in Traffic. |
+
+Edit the allowlist in the UI (**Permissive allowlist**) or in `network.gateway.permissive` (`tcpPorts`, `udpPorts`, `forceDnsToGateway`, `allowIcmp`). Default ports are standard web: TCP 80 and 443.
 
 ```powershell
 .\quarantine-vm.ps1 gateway provision          # once (installs FakeNet on the appliance)
 .\quarantine-vm.ps1 gateway mode               # show
-.\quarantine-vm.ps1 gateway mode fakenet       # sinkhole
-.\quarantine-vm.ps1 gateway mode permissive    # internet + MITM
+.\quarantine-vm.ps1 gateway mode fakenet       # sinkhole (default)
+.\quarantine-vm.ps1 gateway mode permissive    # allowlisted internet + MITM
 ```
 
-The desktop UI Gateway panel has the same **Permissive** / **FakeNet** buttons. FakeNet HTTPS is signed with the **same mitmproxy CA** the guest already trusts for permissive MITM. Certificate pinning can still fail. Use permissive when you need real upstream sites.
+The desktop UI Gateway panel has the same **FakeNet** / **Permissive** buttons (confirms before opening WAN). FakeNet HTTPS is signed with the **same mitmproxy CA** the guest already trusts. Certificate pinning can still fail. Use permissive when you need real upstream sites.
 
 Gateway session sketch:
 
@@ -379,7 +382,9 @@ Important fields:
 | `cleanSnapshotName` | Disk baseline name (default `Clean`) |
 | `manifest.sessionBaselineSnapshot` | Live clean name (default `CleanSession`) |
 | `guest` / `payload` | Admin vs sample-user credentials |
-| `network.mode` | `offline`, `gateway`, … |
+| `network.mode` | Always `gateway` for analysis (Linux VM). Host-NAT mitm is retired. `intnet` remains for offline isolation. |
+| `network.gateway.trafficMode` | Default `fakenet`. `permissive` is allowlisted real internet. |
+| `network.gateway.permissive` | WAN allowlist: `tcpPorts` (default 80,443), `udpPorts`, `forceDnsToGateway`, `allowIcmp`. |
 | `isolation.stealth` | Fingerprint softening |
 
 Full example: [`config/quarantine-vm.example.json`](config/quarantine-vm.example.json).  

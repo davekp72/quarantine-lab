@@ -7,7 +7,7 @@ import {
 import { isTrafficFlowNoise } from './noise.js';
 
 let cache = { snapshot: '', data: null, error: '', loading: false };
-let filters = { proto: '', transport: '', q: '' };
+let filters = { proto: '', transport: '', q: '', breaches: false };
 let selectedId = '';
 let payloadMode = 'ascii';
 
@@ -39,6 +39,7 @@ function protoClass(proto) {
 function flowMatches(flow, f) {
   if (f.proto && String(flow.protocol || '').toUpperCase() !== f.proto.toUpperCase()) return false;
   if (f.transport && String(flow.transport || '').toLowerCase() !== f.transport) return false;
+  if (f.breaches && !flow.policyBreach) return false;
   const q = String(f.q || '').trim().toLowerCase();
   if (!q) return true;
   const hay = [
@@ -107,10 +108,14 @@ export async function renderTraffic(panel, { snapshot, hideNoise, backend }) {
   const visible = flows.filter((f) => flowMatches(f, filters));
   const protos = [...new Set(flows.map((f) => f.protocol).filter(Boolean))].sort();
 
+  const breachN = Number(data.breaches || 0);
   panel.replaceChildren();
   appendMuted(panel, `${data.message || ''} · HTTP/S excluded`.trim());
   if (hideNoise) {
     appendMuted(panel, 'Routine ARP / IGMP / SSDP / lab-agent noise hidden.');
+  }
+  if (breachN) {
+    appendMuted(panel, `${breachN} conversation(s) attempted a destination/port outside the permissive allowlist (still in PCAP).`);
   }
 
   const bar = document.createElement('div');
@@ -136,6 +141,18 @@ export async function renderTraffic(panel, { snapshot, hideNoise, backend }) {
   });
   hostLabel.appendChild(hostInput);
   bar.appendChild(hostLabel);
+  const breachLabel = document.createElement('label');
+  breachLabel.className = 'check';
+  const breachBox = document.createElement('input');
+  breachBox.type = 'checkbox';
+  breachBox.checked = !!filters.breaches;
+  breachBox.addEventListener('change', () => {
+    filters.breaches = breachBox.checked;
+    renderTraffic(panel, { snapshot, hideNoise, backend });
+  });
+  breachLabel.appendChild(breachBox);
+  breachLabel.appendChild(document.createTextNode(' Policy breaches only'));
+  bar.appendChild(breachLabel);
   panel.appendChild(bar);
   if (prevQ) {
     hostInput.focus();
@@ -156,14 +173,14 @@ export async function renderTraffic(panel, { snapshot, hideNoise, backend }) {
   const table = buildSafeTable(
     ['Proto', 'Transport', 'Endpoints', 'Pkts', 'Info', 'Time'],
     visible.map((f) => ({
-      className: `net-req-row traffic-row${f.id === selectedId ? ' selected' : ''}${f.hasPayload ? ' has-body' : ''}`,
+      className: `net-req-row traffic-row${f.id === selectedId ? ' selected' : ''}${f.hasPayload ? ' has-body' : ''}${f.policyBreach ? ' policy-breach' : ''}`,
       attrs: { 'data-flow-id': f.id },
       cells: [
         { text: f.protocol || '', className: `proto-badge ${protoClass(f.protocol)}` },
         (f.transport || '').toUpperCase(),
         { text: endpoint(f), title: (f.names || []).join(', ') },
         f.packets ?? '',
-        { text: truncate(f.info || (f.names || []).join(', '), 72), title: f.info || '' },
+        { text: truncate((f.policyBreach ? '[breach] ' : '') + (f.policyReason || f.info || (f.names || []).join(', ')), 72), title: f.policyReason || f.info || '' },
         f.last || f.first || '',
       ],
     })),
@@ -225,6 +242,12 @@ function renderInspect(detail, flow, res) {
   title.appendChild(badge);
   title.appendChild(document.createTextNode(`  ${endpoint(flow)}  ·  ${flow.packets || 0} pkts  ·  ${flow.bytes || 0} B`));
   meta.appendChild(title);
+  if (flow.policyBreach) {
+    const b = document.createElement('p');
+    b.className = 'policy-breach-note';
+    b.textContent = 'Policy breach: ' + (flow.policyReason || 'destination/port outside the permissive allowlist');
+    meta.appendChild(b);
+  }
   if (flow.names?.length) {
     const n = document.createElement('p');
     n.className = 'muted';

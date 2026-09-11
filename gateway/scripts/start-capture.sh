@@ -28,5 +28,5 @@ echo "$PCAP" >/var/run/quarantine-capture.path
 # Ensure path exists immediately (tcpdump also creates/truncates on -w)
 : >"$PCAP"
 echo "capturing on $LAN_IF -> $PCAP"
-# Capture all LAN frames (guest↔gateway): DNS, ICMP, TCP, UDP
+# Full-frame LAN capture (guest↔gateway): DNS, ICMP, TCP, UDP, dropped WAN attempts, FakeNet.
 exec /usr/bin/tcpdump -i "$LAN_IF" -n -s 0 -U -w "$PCAP"

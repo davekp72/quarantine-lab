@@ -9,7 +9,7 @@
   Modes:
     gateway (default) — Linux gateway on intnet (static 10.66.0.15, GW/DNS 10.66.0.1).
                          Host reaches the guest agent via the gateway (no lab NAT NIC).
-    host-nat          — legacy VirtualBox NAT + host mitmproxy at 10.0.2.2 (prefer gateway).
+    host-nat          — retired. Do not use; always configure gateway.
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File .\Configure-QuarantineGuestNetwork.ps1 -Mode gateway
@@ -30,6 +30,9 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if ($Mode -eq 'host-nat') {
+    throw 'host-nat mitm is retired. Use -Mode gateway.'
+}
 
 function Test-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()

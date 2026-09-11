@@ -27,8 +27,26 @@ current_mode() {
   if [[ -f "$MODE_FILE" ]]; then
     tr -d '[:space:]' <"$MODE_FILE" | tr '[:upper:]' '[:lower:]'
   else
-    echo permissive
+    echo fakenet
   fi
+}
+
+inject_nft_snippets() {
+  local rendered="$1"
+  local wan_rules="$ETC/nftables-permissive-forward.inc"
+  local nat_rules="$ETC/nftables-permissive-nat.inc"
+  python3 - "$rendered" "$wan_rules" "$nat_rules" <<'PY'
+import pathlib, sys
+path, wan, nat = sys.argv[1], sys.argv[2], sys.argv[3]
+t = pathlib.Path(path).read_text()
+w = pathlib.Path(wan).read_text() if pathlib.Path(wan).is_file() else ""
+n = pathlib.Path(nat).read_text() if pathlib.Path(nat).is_file() else ""
+t = t.replace("__PERMISSIVE_WAN_RULES__\n", w if w.endswith("\n") or w == "" else w + "\n")
+t = t.replace("__PERMISSIVE_WAN_RULES__", w)
+t = t.replace("__PERMISSIVE_DNS_NAT__\n", n if n.endswith("\n") or n == "" else n + "\n")
+t = t.replace("__PERMISSIVE_DNS_NAT__", n)
+pathlib.Path(path).write_text(t)
+PY
 }
 
 apply_nft() {
@@ -37,13 +55,19 @@ apply_nft() {
     echo "missing nftables template: $template" >&2
     return 1
   fi
+  local rendered
+  rendered=$(mktemp)
   sed -e "s/__WAN__/${WAN_IF}/g" \
       -e "s/__LAN__/${LAN_IF}/g" \
       -e "s|__LAN_CIDR__|${LAN_CIDR}|g" \
       -e "s/__LAN_IP__/${LAN_IP}/g" \
       -e "s/__GUEST_IP__/${GUEST_IP}/g" \
       -e "s/__AGENT_PORT__/${AGENT_PORT}/g" \
-      "$template" >/etc/nftables.conf
+      "$template" >"$rendered"
+  inject_nft_snippets "$rendered"
+  sed -i -e "s/__WAN__/${WAN_IF}/g" -e "s/__LAN__/${LAN_IF}/g" "$rendered"
+  cp "$rendered" /etc/nftables.conf
+  rm -f "$rendered"
   nft -f /etc/nftables.conf
 }
 
@@ -391,7 +415,7 @@ mode_permissive() {
   http_code="$(curl -4 --noproxy '*' -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 12 http://neverssl.com/online/ 2>/dev/null || true)"
   echo "gateway-upstream http://neverssl.com/online/ -> ${http_code:-fail}"
   echo permissive >"$MODE_FILE"
-  echo "traffic-mode=permissive (internet + MITM + PCAP)"
+  echo "traffic-mode=permissive (allowlisted internet + MITM + PCAP)"
   echo "Guest browser PAC/CONNECT: mitmproxy ${LAN_IP}:8080"
   echo "Guest curl/direct :80/:443: redirected to mitmproxy ${LAN_IP}:8082"
 }
@@ -411,13 +435,15 @@ case "$MODE" in
     ;;
   boot)
     case "$(current_mode)" in
-      fakenet)
+      permissive|mitm|internet)
+        mode_permissive
+        ;;
+      *)
         if ! mode_fakenet; then
-          echo "FakeNet unavailable on boot; falling back to permissive" >&2
-          mode_permissive
+          echo "ERROR: FakeNet unavailable on boot; leaving previous nftables (not opening WAN)." >&2
+          exit 1
         fi
         ;;
-      *) mode_permissive ;;
     esac
     ;;
   fakenet|sinkhole)

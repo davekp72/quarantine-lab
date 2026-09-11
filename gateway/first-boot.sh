@@ -150,12 +150,37 @@ if ! ip -4 addr show dev "$LAN_IF" | grep -q " ${LAN_IP}/"; then
 fi
 systemctl restart dnsmasq || true
 
-# nftables — substitute interface names
+# nftables — closed FakeNet ruleset until traffic-mode boot (default sinkhole).
+# Seed default permissive snippets so later switches do not leave placeholders.
+mkdir -p /etc/quarantine-gateway
+if [[ -f "$OPT/nftables-permissive-forward.inc" ]]; then
+  install -m 0644 "$OPT/nftables-permissive-forward.inc" /etc/quarantine-gateway/nftables-permissive-forward.inc
+fi
+if [[ -f "$OPT/nftables-permissive-nat.inc" ]]; then
+  install -m 0644 "$OPT/nftables-permissive-nat.inc" /etc/quarantine-gateway/nftables-permissive-nat.inc
+fi
+NFT_SRC="$OPT/nftables-fakenet.conf"
+[[ -f "$NFT_SRC" ]] || NFT_SRC="$OPT/nftables.conf"
 sed -e "s/__WAN__/${WAN_IF}/g" -e "s/__LAN__/${LAN_IF}/g" -e "s|__LAN_CIDR__|${LAN_CIDR}|g" \
   -e "s/__LAN_IP__/${LAN_IP}/g" -e "s/__GUEST_IP__/${GUEST_IP}/g" -e "s/__AGENT_PORT__/${AGENT_PORT}/g" \
-  "$OPT/nftables.conf" >/etc/nftables.conf
+  "$NFT_SRC" >/etc/nftables.conf
+if grep -q '__PERMISSIVE_' /etc/nftables.conf 2>/dev/null; then
+  python3 - /etc/nftables.conf /etc/quarantine-gateway/nftables-permissive-forward.inc /etc/quarantine-gateway/nftables-permissive-nat.inc <<'PY'
+import pathlib, sys
+path, wan, nat = sys.argv[1], sys.argv[2], sys.argv[3]
+t = pathlib.Path(path).read_text()
+w = pathlib.Path(wan).read_text() if pathlib.Path(wan).is_file() else ""
+n = pathlib.Path(nat).read_text() if pathlib.Path(nat).is_file() else ""
+t = t.replace("__PERMISSIVE_WAN_RULES__\n", w if w.endswith("\n") or w == "" else w + "\n")
+t = t.replace("__PERMISSIVE_WAN_RULES__", w)
+t = t.replace("__PERMISSIVE_DNS_NAT__\n", n if n.endswith("\n") or n == "" else n + "\n")
+t = t.replace("__PERMISSIVE_DNS_NAT__", n)
+pathlib.Path(path).write_text(t)
+PY
+  sed -i -e "s/__WAN__/${WAN_IF}/g" -e "s/__LAN__/${LAN_IF}/g" /etc/nftables.conf
+fi
 systemctl enable nftables
-systemctl restart nftables
+nft -f /etc/nftables.conf || true
 
 # mitmproxy venv
 # Ubuntu 26.04 ships Python 3.14; mitmproxy 11 pins deps without cp314 wheels
@@ -201,12 +226,16 @@ if ! /usr/local/sbin/quarantine-install-fakenet; then
   echo "WARNING: FakeNet-NG install failed — 'gateway mode fakenet' unavailable until provision succeeds with working WAN DNS."
 fi
 
-[[ -f /etc/quarantine-gateway/traffic-mode ]] || echo permissive >/etc/quarantine-gateway/traffic-mode
+[[ -f /etc/quarantine-gateway/traffic-mode ]] || echo fakenet >/etc/quarantine-gateway/traffic-mode
 
 systemctl daemon-reload
 systemctl enable quarantine-traffic-mode
-# Apply saved traffic mode (default permissive). FakeNet stays stopped unless selected.
-# boot enables mitm+dnsmasq in permissive, or FakeNet in sinkhole mode.
+# Seed mitmproxy CA so FakeNet can reuse it without opening WAN first.
+if [[ ! -f /root/.mitmproxy/mitmproxy-ca.pem ]]; then
+  timeout 12 mitmdump --listen-host 127.0.0.1 --listen-port 18080 >/tmp/mitm-ca-seed.log 2>&1 || true
+  pkill -f 'mitmdump --listen-host 127.0.0.1 --listen-port 18080' 2>/dev/null || true
+fi
+# Apply saved traffic mode (default FakeNet). Do not fall back to open WAN.
 /usr/local/sbin/quarantine-set-traffic-mode boot || true
 
 # Export CA once mitm has run

@@ -34,6 +34,9 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if ($Mode -eq 'host-nat') {
+    throw 'host-nat mitm is retired. Use -Mode gateway.'
+}
 
 function Test-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()

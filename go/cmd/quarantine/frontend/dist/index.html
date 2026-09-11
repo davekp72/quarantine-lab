@@ -19,10 +19,22 @@
         <p id="gateway-detail" class="muted capture-detail"></p>
         <p id="gateway-traffic" class="muted capture-detail">Traffic: —</p>
         <div class="btn-row">
+          <button id="btn-gw-fakenet" type="button" class="btn-primary">FakeNet</button>
           <button id="btn-gw-permissive" type="button">Permissive</button>
-          <button id="btn-gw-fakenet" type="button">FakeNet</button>
         </div>
-        <p class="muted snap-hint">Permissive = real internet + MITM. FakeNet = local sinkhole (no WAN).</p>
+        <p class="muted snap-hint">FakeNet = sinkhole all traffic (default). Permissive = real internet, allowlisted ports + MITM on 80/443. LAN PCAP always records.</p>
+        <details id="gw-policy" class="gw-policy">
+          <summary>Permissive allowlist</summary>
+          <label>TCP ports
+            <input id="gw-tcp-ports" type="text" value="80, 443" spellcheck="false" />
+          </label>
+          <label>UDP ports
+            <input id="gw-udp-ports" type="text" value="" spellcheck="false" placeholder="none (DNS via gateway)" />
+          </label>
+          <label class="check"><input type="checkbox" id="gw-force-dns" checked /> Force DNS to gateway</label>
+          <label class="check"><input type="checkbox" id="gw-allow-icmp" checked /> Allow ICMP</label>
+          <button id="btn-gw-policy" type="button">Save allowlist</button>
+        </details>
       </section>
 
       <section class="side-block">

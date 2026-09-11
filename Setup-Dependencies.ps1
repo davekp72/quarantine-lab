@@ -95,11 +95,11 @@ function Write-QuarantineConfig {
         autounattendPath     = $Autounattend
         vboxManagePath       = $VBoxPath
         network              = [ordered]@{
-            mode             = 'intnet'
+            mode             = 'gateway'
             hostOnlyAdapter  = 'VirtualBox Host-Only Ethernet Adapter'
             intnetName       = 'quarantine-net'
-            guestGateway     = '10.0.2.2'
-            guestDns         = '10.0.2.3'
+            guestGateway     = '10.66.0.1'
+            guestDns         = '10.66.0.1'
             proxy            = [ordered]@{
                 enabled      = $true
                 listenHost   = '0.0.0.0'
@@ -109,9 +109,26 @@ function Write-QuarantineConfig {
             }
             capture          = [ordered]@{
                 enabled      = $true
+                mode         = 'gateway'
                 logDir       = 'D:\Vbox\LabVM\logs\pcap'
-                interface    = 'auto'
-                guestIp      = '10.0.2.15'
+                interface    = 'gateway-lan'
+                guestIp      = '10.66.0.15'
+            }
+            gateway          = [ordered]@{
+                enabled      = $true
+                vmName       = 'Quarantine-Gateway'
+                lanCidr      = '10.66.0.0/24'
+                lanGateway   = '10.66.0.1'
+                guestIp      = '10.66.0.15'
+                intnetName   = 'quarantine-net'
+                uplink       = 'nat'
+                trafficMode  = 'fakenet'
+                permissive   = [ordered]@{
+                    tcpPorts           = @(80, 443)
+                    udpPorts           = @()
+                    forceDnsToGateway  = $true
+                    allowIcmp          = $true
+                }
             }
         }
         isolation            = [ordered]@{

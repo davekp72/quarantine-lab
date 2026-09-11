@@ -63,8 +63,9 @@ func (c *Client) Run(ctx context.Context, args ...string) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	argLine := FormatArgs(args)
 	if c.OnLog != nil {
-		c.OnLog("cmd", "VBoxManage "+strings.Join(args, " "))
+		c.OnLog("cmd", "VBoxManage "+argLine)
 	}
 
 	vboxDir := c.installDir()
@@ -74,7 +75,7 @@ func (c *Client) Run(ctx context.Context, args ...string) (string, error) {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
-				return out, fmt.Errorf("VBoxManage %s: %w", strings.Join(args, " "), ctx.Err())
+				return out, fmt.Errorf("VBoxManage %s: %w", argLine, ctx.Err())
 			case <-time.After(time.Duration(attempt) * 200 * time.Millisecond):
 			}
 		}
@@ -92,7 +93,7 @@ func (c *Client) Run(ctx context.Context, args ...string) (string, error) {
 		out = strings.TrimSpace(stdout.String())
 		if err == nil {
 			if c.OnLog != nil && out != "" {
-				c.OnLog("debug", out)
+				c.OnLog("debug", RedactSecrets(out))
 			}
 			return out, nil
 		}
@@ -101,7 +102,8 @@ func (c *Client) Run(ctx context.Context, args ...string) (string, error) {
 		if msg == "" {
 			msg = out
 		}
-		lastErr = fmt.Errorf("VBoxManage %s: %w: %s", strings.Join(args, " "), err, msg)
+		msg = RedactSecrets(msg)
+		lastErr = fmt.Errorf("VBoxManage %s: %w: %s", argLine, err, msg)
 		if !isTransientVBoxExit(err) && !isTransientVBoxExit(lastErr) {
 			if c.OnLog != nil {
 				c.OnLog("error", msg)
@@ -342,28 +344,34 @@ func (c *Client) ShowMediumInfo(uuidOrPath string) (string, error) {
 
 // GuestControlRun runs a program in the guest.
 func (c *Client) GuestControlRun(vmName, username, password, exe string, args []string, timeout time.Duration) (string, error) {
-	guestArgs := []string{
-		"guestcontrol", vmName, "run",
-		"--username=" + username,
-		"--password=" + password,
+	auth, cleanup, err := AuthFlags(username, password)
+	if err != nil {
+		return "", err
+	}
+	defer cleanup()
+	guestArgs := []string{"guestcontrol", vmName, "run"}
+	guestArgs = append(guestArgs, auth...)
+	guestArgs = append(guestArgs,
 		"--exe", exe,
 		"--timeout", fmt.Sprintf("%d", int(timeout.Milliseconds())),
 		"--wait-stdout", "--wait-stderr",
 		"--",
-	}
+	)
 	guestArgs = append(guestArgs, args...)
 	return c.RunWithTimeout(timeout+30*time.Second, guestArgs...)
 }
 
 // GuestControlMkdir creates a directory in the guest (parents allowed).
 func (c *Client) GuestControlMkdir(vmName, username, password, guestDir string, timeout time.Duration) error {
-	_, err := c.RunWithTimeout(timeout+30*time.Second,
-		"guestcontrol", vmName, "mkdir",
-		"--username="+username,
-		"--password="+password,
-		"--parents",
-		guestDir,
-	)
+	auth, cleanup, err := AuthFlags(username, password)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	args := []string{"guestcontrol", vmName, "mkdir"}
+	args = append(args, auth...)
+	args = append(args, "--parents", guestDir)
+	_, err = c.RunWithTimeout(timeout+30*time.Second, args...)
 	return err
 }
 
@@ -379,13 +387,15 @@ func (c *Client) GuestControlCopyTo(vmName, username, password, hostPath, guestD
 		parent = dest[:i]
 	}
 	_ = c.GuestControlMkdir(vmName, username, password, parent, timeout)
-	_, err := c.RunWithTimeout(timeout+30*time.Second,
-		"guestcontrol", vmName, "copyto",
-		"--username="+username,
-		"--password="+password,
-		"--target-directory="+dest,
-		hostPath,
-	)
+	auth, cleanup, err := AuthFlags(username, password)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	args := []string{"guestcontrol", vmName, "copyto"}
+	args = append(args, auth...)
+	args = append(args, "--target-directory="+dest, hostPath)
+	_, err = c.RunWithTimeout(timeout+30*time.Second, args...)
 	return err
 }
 
@@ -399,13 +409,15 @@ func (c *Client) GuestControlCopyFrom(vmName, username, password, guestPath, hos
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}
-	_, err := c.RunWithTimeout(timeout+30*time.Second,
-		"guestcontrol", vmName, "copyfrom",
-		"--username="+username,
-		"--password="+password,
-		"--target-directory="+dest,
-		guestPath,
-	)
+	auth, cleanup, err := AuthFlags(username, password)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	args := []string{"guestcontrol", vmName, "copyfrom"}
+	args = append(args, auth...)
+	args = append(args, "--target-directory="+dest, guestPath)
+	_, err = c.RunWithTimeout(timeout+30*time.Second, args...)
 	return err
 }
 

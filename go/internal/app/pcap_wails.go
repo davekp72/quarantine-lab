@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -70,19 +71,71 @@ func (a *App) ListPcapFlowsWails(snapshotName string) (map[string]any, error) {
 			"flows":     []any{},
 		}, nil
 	}
+	pol, lan, gw, guest, trafficMode := a.policyForSnapshot(snapshotName)
+	if strings.EqualFold(trafficMode, "permissive") {
+		pcapinspect.AnnotatePolicyBreaches(flows, pol, lan, gw, guest)
+	}
+	breachN := 0
+	for _, f := range flows {
+		if f.PolicyBreach {
+			breachN++
+		}
+	}
 	protos := map[string]int{}
 	for _, f := range flows {
 		protos[f.Protocol]++
 	}
+	msg := fmt.Sprintf("%d non-HTTP/S conversation(s) via tshark", len(flows))
+	if strings.EqualFold(trafficMode, "permissive") {
+		msg += fmt.Sprintf(" · %d policy breach(es)", breachN)
+	} else {
+		msg += " · FakeNet (all traffic sinkholed / captured)"
+	}
 	return map[string]any{
-		"available": true,
-		"pcap":      pcap,
-		"snapshot":  config.SafeSnapshotFileName(snapshotName),
-		"message":   fmt.Sprintf("%d non-HTTP/S conversation(s) via tshark", len(flows)),
-		"exclude":   pcapinspect.ExcludeHTTPFilter,
-		"protocols": protos,
-		"flows":     flows,
+		"available":   true,
+		"pcap":        pcap,
+		"snapshot":    config.SafeSnapshotFileName(snapshotName),
+		"message":     msg,
+		"exclude":     pcapinspect.ExcludeHTTPFilter,
+		"protocols":   protos,
+		"flows":       flows,
+		"trafficMode": trafficMode,
+		"breaches":    breachN,
+		"permissive":  pol,
 	}, nil
+}
+
+func (a *App) policyForSnapshot(snapshot string) (config.PermissivePolicy, string, string, string, string) {
+	g := a.Cfg.Network.Gateway.WithDefaults(a.Cfg.Network.IntnetName)
+	pol := g.Permissive
+	mode := a.configuredTrafficMode()
+	path := filepath.Join(a.evidenceNetworkDir(snapshot), "permissive-policy.json")
+	raw, err := os.ReadFile(path)
+	if err == nil {
+		var doc struct {
+			TrafficMode string                  `json:"trafficMode"`
+			Permissive  config.PermissivePolicy `json:"permissive"`
+			LANCidr     string                  `json:"lanCidr"`
+			LANGateway  string                  `json:"lanGateway"`
+			GuestIP     string                  `json:"guestIp"`
+		}
+		if json.Unmarshal(raw, &doc) == nil {
+			if doc.TrafficMode != "" {
+				mode = doc.TrafficMode
+			}
+			pol = doc.Permissive.WithDefaults()
+			if doc.LANCidr != "" {
+				g.LANCidr = doc.LANCidr
+			}
+			if doc.LANGateway != "" {
+				g.LANGateway = doc.LANGateway
+			}
+			if doc.GuestIP != "" {
+				g.GuestIP = doc.GuestIP
+			}
+		}
+	}
+	return pol, g.LANCidr, g.LANGateway, g.GuestIP, mode
 }
 
 // InspectPcapFlowWails returns payload / dissection for one conversation.

@@ -34,14 +34,60 @@ func TestSafeSnapshotFileName(t *testing.T) {
 	}
 }
 
+func TestLoadRemapsHostNatNotIntnet(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cfg.json")
+	raw := `{
+		"vmName": "TestVM",
+		"vmDataDir": "D:\\Vbox\\LabVM",
+		"network": {"mode": "host-nat", "gateway": {"enabled": false}}
+	}`
+	if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Network.Mode != "gateway" {
+		t.Fatalf("host-nat: mode=%q", cfg.Network.Mode)
+	}
+	if !cfg.Network.Gateway.Enabled {
+		t.Fatal("host-nat should enable gateway")
+	}
+	if cfg.Network.Gateway.TrafficMode != "fakenet" {
+		t.Fatalf("trafficMode=%q", cfg.Network.Gateway.TrafficMode)
+	}
+
+	raw = `{
+		"vmName": "TestVM",
+		"vmDataDir": "D:\\Vbox\\LabVM",
+		"network": {"mode": "intnet", "gateway": {"enabled": false}}
+	}`
+	if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Network.Mode != "intnet" {
+		t.Fatalf("intnet should stay offline isolation, got %q", cfg.Network.Mode)
+	}
+}
+
 func TestNormalizeTrafficMode(t *testing.T) {
 	got, err := NormalizeTrafficMode("")
-	if err != nil || got != "permissive" {
+	if err != nil || got != "fakenet" {
 		t.Fatalf("empty: got %q %v", got, err)
 	}
 	got, err = NormalizeTrafficMode("FakeNet")
 	if err != nil || got != "fakenet" {
 		t.Fatalf("fakenet: got %q %v", got, err)
+	}
+	got, err = NormalizeTrafficMode("permissive")
+	if err != nil || got != "permissive" {
+		t.Fatalf("permissive: got %q %v", got, err)
 	}
 	if _, err := NormalizeTrafficMode("nope"); err == nil {
 		t.Fatal("expected error")

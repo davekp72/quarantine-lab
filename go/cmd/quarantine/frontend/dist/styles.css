@@ -81,7 +81,28 @@ button.btn-primary:hover { background: #1f3a5f; }
   font-size: 0.75rem;
   min-height: 1.1em;
 }
-.take-form { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+.gw-policy {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.gw-policy summary { cursor: pointer; margin-bottom: 6px; }
+.gw-policy label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.gw-policy input[type=text] {
+  background: var(--panel);
+  border: 1px solid #30363d;
+  color: var(--text);
+  padding: 6px 8px;
+  border-radius: 4px;
+  width: 100%;
+}
+.traffic-row.policy-breach td { color: #ffb4ae; }
+.traffic-row.policy-breach { background: rgba(248, 81, 73, 0.12); }
+.policy-breach-note { color: #ffb4ae; margin: 0.35rem 0; }
 .snap-list {
   list-style: none;
   margin: 0;

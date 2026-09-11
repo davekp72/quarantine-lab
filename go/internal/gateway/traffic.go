@@ -24,6 +24,9 @@ func (m *Manager) SetTrafficMode(mode string) (string, error) {
 	if err := m.EnsureTrafficModeScripts(); err != nil {
 		return "", err
 	}
+	if err := m.uploadPermissivePolicy(); err != nil {
+		return "", err
+	}
 	if norm == "fakenet" {
 		if err := m.EnsureFakeNetInstalled(); err != nil {
 			return "", err
@@ -36,7 +39,7 @@ func (m *Manager) SetTrafficMode(mode string) (string, error) {
 		return msg, fmt.Errorf("set traffic mode %s: %w (%s)", norm, err, msg)
 	}
 	m.Cfg.Network.Gateway.TrafficMode = norm
-	if persistErr := m.persistTrafficMode(norm); persistErr != nil && msg != "" {
+	if persistErr := m.persistGatewaySettings(); persistErr != nil && msg != "" {
 		msg += "\n(config persist: " + persistErr.Error() + ")"
 	} else if persistErr != nil {
 		msg = persistErr.Error()
@@ -44,36 +47,55 @@ func (m *Manager) SetTrafficMode(mode string) (string, error) {
 	if msg == "" {
 		msg = "traffic-mode=" + norm
 	}
-	if norm == "fakenet" {
+	note, verr := m.verifyGuestHTTPS(norm)
+	if note != "" {
+		msg += "\n" + note
+	}
+	return msg, verr
+}
+
+// verifyGuestHTTPS checks MITM from the lab VM when it is running.
+// A powered-off guest must not fail a successful gateway switch.
+func (m *Manager) verifyGuestHTTPS(mode string) (string, error) {
+	running, state, err := m.windowsGuestState()
+	if err != nil {
+		return "Windows guest HTTPS check skipped: " + err.Error(), nil
+	}
+	if !running {
+		return "Windows guest HTTPS check skipped (lab VM is " + state + ")", nil
+	}
+	switch mode {
+	case "fakenet":
 		if gerr := m.testFakeNetGuestBrowser(); gerr != nil {
-			return msg, fmt.Errorf("Windows guest HTTPS (Chrome path): %w", gerr)
+			return "", fmt.Errorf("Windows guest HTTPS (Chrome path): %w", gerr)
 		}
-		msg += "\nWindows guest CONNECT+TLS: ok"
-	}
-	if norm == "permissive" {
+		return "Windows guest CONNECT+TLS: ok", nil
+	case "permissive":
 		if gerr := m.testPermissiveGuestHttps(); gerr != nil {
-			return msg, fmt.Errorf("Windows guest HTTPS (curl transparent MITM): %w", gerr)
+			return "", fmt.Errorf("Windows guest HTTPS (curl transparent MITM): %w", gerr)
 		}
-		msg += "\nWindows guest curl --noproxy MITM: ok"
+		return "Windows guest curl --noproxy MITM: ok", nil
 	}
-	return msg, nil
+	return "", nil
+}
+
+func (m *Manager) windowsGuestState() (running bool, state string, err error) {
+	win := strings.TrimSpace(m.Cfg.VMName)
+	if win == "" {
+		return false, "", fmt.Errorf("config vmName is empty")
+	}
+	state, err = m.VBox.VMState(win)
+	if err != nil {
+		return false, "", fmt.Errorf("Windows VM %q: %w", win, err)
+	}
+	return strings.EqualFold(state, "running"), state, nil
 }
 
 // testFakeNetGuestBrowser runs CONNECT+TLS inside the Windows VM (same path as Edge/Chrome).
 func (m *Manager) testFakeNetGuestBrowser() error {
 	win := strings.TrimSpace(m.Cfg.VMName)
-	if win == "" {
-		return fmt.Errorf("config vmName is empty")
-	}
-	state, err := m.VBox.VMState(win)
-	if err != nil {
-		return fmt.Errorf("Windows VM %q: %w", win, err)
-	}
-	if !strings.EqualFold(state, "running") {
-		return fmt.Errorf("Windows VM %q is %s (start it to verify browser HTTPS)", win, state)
-	}
 	script := filepath.Join(m.ProjectRoot, "network", "guest", "Test-FakeNetBrowserHttps.ps1")
-	script, err = filepath.Abs(script)
+	script, err := filepath.Abs(script)
 	if err != nil {
 		return fmt.Errorf("guest HTTPS test path: %w", err)
 	}
@@ -104,18 +126,8 @@ func (m *Manager) testFakeNetGuestBrowser() error {
 
 func (m *Manager) testPermissiveGuestHttps() error {
 	win := strings.TrimSpace(m.Cfg.VMName)
-	if win == "" {
-		return fmt.Errorf("config vmName is empty")
-	}
-	state, err := m.VBox.VMState(win)
-	if err != nil {
-		return fmt.Errorf("Windows VM %q: %w", win, err)
-	}
-	if !strings.EqualFold(state, "running") {
-		return fmt.Errorf("Windows VM %q is %s (start it to verify curl HTTPS)", win, state)
-	}
 	script := filepath.Join(m.ProjectRoot, "network", "guest", "Test-PermissiveHttps.ps1")
-	script, err = filepath.Abs(script)
+	script, err := filepath.Abs(script)
 	if err != nil {
 		return fmt.Errorf("guest HTTPS test path: %w", err)
 	}
@@ -208,6 +220,8 @@ func (m *Manager) EnsureTrafficModeScripts() error {
 		{filepath.Join(root, "scripts", "repair-wan-dns.sh"), "/tmp/quarantine-repair-wan-dns.sh"},
 		{filepath.Join(root, "nftables.conf"), "/tmp/quarantine-nftables.conf"},
 		{filepath.Join(root, "nftables-fakenet.conf"), "/tmp/quarantine-nftables-fakenet.conf"},
+		{filepath.Join(root, "nftables-permissive-forward.inc"), "/tmp/quarantine-nftables-permissive-forward.inc"},
+		{filepath.Join(root, "nftables-permissive-nat.inc"), "/tmp/quarantine-nftables-permissive-nat.inc"},
 		{filepath.Join(root, "fakenet", "quarantine.ini"), "/tmp/quarantine-fakenet.ini"},
 		{filepath.Join(root, "fakenet", "ssl_utils_init.py"), "/tmp/quarantine-fakenet-ssl_utils.py"},
 		{filepath.Join(root, "fakenet", "patch_httplistener.py"), "/tmp/quarantine-fakenet-patch_httplistener.py"},
@@ -237,6 +251,14 @@ install -m 0755 /tmp/quarantine-repair-wan-dns.sh /usr/local/sbin/quarantine-rep
 install -m 0755 /tmp/quarantine-gateway-status.sh /usr/local/sbin/quarantine-gateway-status
 install -m 0644 /tmp/quarantine-nftables.conf /opt/quarantine-gateway/nftables.conf
 install -m 0644 /tmp/quarantine-nftables-fakenet.conf /opt/quarantine-gateway/nftables-fakenet.conf
+install -m 0644 /tmp/quarantine-nftables-permissive-forward.inc /opt/quarantine-gateway/nftables-permissive-forward.inc
+install -m 0644 /tmp/quarantine-nftables-permissive-nat.inc /opt/quarantine-gateway/nftables-permissive-nat.inc
+if [[ ! -f /etc/quarantine-gateway/nftables-permissive-forward.inc ]]; then
+  install -m 0644 /tmp/quarantine-nftables-permissive-forward.inc /etc/quarantine-gateway/nftables-permissive-forward.inc
+fi
+if [[ ! -f /etc/quarantine-gateway/nftables-permissive-nat.inc ]]; then
+  install -m 0644 /tmp/quarantine-nftables-permissive-nat.inc /etc/quarantine-gateway/nftables-permissive-nat.inc
+fi
 install -m 0644 /tmp/quarantine-fakenet.ini /opt/quarantine-gateway/fakenet/quarantine.ini
 install -m 0644 /tmp/quarantine-fakenet-ssl_utils.py /opt/quarantine-gateway/fakenet/ssl_utils_init.py
 install -m 0644 /tmp/quarantine-fakenet-patch_httplistener.py /opt/quarantine-gateway/fakenet/patch_httplistener.py
@@ -257,7 +279,50 @@ systemctl enable quarantine-traffic-mode >/dev/null 2>&1 || true
 	return err
 }
 
-func (m *Manager) persistTrafficMode(mode string) error {
+func (m *Manager) uploadPermissivePolicy() error {
+	g := m.gw()
+	pol := g.Permissive.WithDefaults()
+	m.Cfg.Network.Gateway.Permissive = pol
+	dir := os.TempDir()
+	policyPath := filepath.Join(dir, "qlab-permissive-policy.json")
+	fwdPath := filepath.Join(dir, "qlab-nft-forward.inc")
+	natPath := filepath.Join(dir, "qlab-nft-nat.inc")
+	raw, err := json.MarshalIndent(pol, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(policyPath, append(raw, '\n'), 0o600); err != nil {
+		return err
+	}
+	if err := os.WriteFile(fwdPath, []byte(pol.PermissiveForwardRules()), 0o600); err != nil {
+		return err
+	}
+	if err := os.WriteFile(natPath, []byte(pol.PermissiveNATRules()), 0o600); err != nil {
+		return err
+	}
+	defer os.Remove(policyPath)
+	defer os.Remove(fwdPath)
+	defer os.Remove(natPath)
+	if err := m.linuxCopyFileTo(policyPath, "/tmp/quarantine-permissive-policy.json"); err != nil {
+		return fmt.Errorf("upload permissive policy: %w", err)
+	}
+	if err := m.linuxCopyFileTo(fwdPath, "/tmp/quarantine-nftables-permissive-forward.inc"); err != nil {
+		return fmt.Errorf("upload nft forward snippet: %w", err)
+	}
+	if err := m.linuxCopyFileTo(natPath, "/tmp/quarantine-nftables-permissive-nat.inc"); err != nil {
+		return fmt.Errorf("upload nft nat snippet: %w", err)
+	}
+	script := `set -e
+mkdir -p /etc/quarantine-gateway
+install -m 0644 /tmp/quarantine-permissive-policy.json /etc/quarantine-gateway/permissive-policy.json
+install -m 0644 /tmp/quarantine-nftables-permissive-forward.inc /etc/quarantine-gateway/nftables-permissive-forward.inc
+install -m 0644 /tmp/quarantine-nftables-permissive-nat.inc /etc/quarantine-gateway/nftables-permissive-nat.inc
+`
+	_, err = m.linuxRunWithTimeout(45*time.Second, "sudo", "bash", "-c", script)
+	return err
+}
+
+func (m *Manager) persistGatewaySettings() error {
 	path := strings.TrimSpace(m.CfgPath)
 	if path == "" {
 		return nil
@@ -281,10 +346,41 @@ func (m *Manager) persistTrafficMode(mode string) error {
 		gwObj = map[string]any{}
 		netObj["gateway"] = gwObj
 	}
-	gwObj["trafficMode"] = mode
+	g := m.gw()
+	gwObj["trafficMode"] = g.TrafficMode
+	gwObj["permissive"] = g.Permissive.WithDefaults()
+	gwObj["enabled"] = true
+	netObj["mode"] = "gateway"
 	out, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(path, append(out, '\n'), 0o644)
+}
+
+// ApplyPermissivePolicy uploads nft snippets and reapplies permissive mode when it is active.
+func (m *Manager) ApplyPermissivePolicy() (string, error) {
+	m.Cfg.Network.Gateway.Permissive = m.gw().Permissive.WithDefaults()
+	if err := m.persistGatewaySettings(); err != nil {
+		return "", err
+	}
+	if err := m.Start(); err != nil {
+		return "saved locally", fmt.Errorf("saved allowlist; gateway not reachable: %w", err)
+	}
+	if err := m.EnsureTrafficModeScripts(); err != nil {
+		return "", err
+	}
+	if err := m.uploadPermissivePolicy(); err != nil {
+		return "", err
+	}
+	mode := m.gw().TrafficMode
+	if mode != "permissive" {
+		return "saved (active after next Permissive switch; current mode=" + mode + ")", nil
+	}
+	out, err := m.linuxRunWithTimeout(3*time.Minute, "sudo", "/usr/local/sbin/quarantine-set-traffic-mode", "permissive")
+	msg := strings.TrimSpace(out)
+	if err != nil {
+		return msg, fmt.Errorf("apply permissive policy: %w (%s)", err, msg)
+	}
+	return msg, nil
 }

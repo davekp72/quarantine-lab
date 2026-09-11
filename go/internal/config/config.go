@@ -126,8 +126,58 @@ type GatewayConfig struct {
 	MemoryMB    int    `json:"memoryMb"`
 	CPUCount    int    `json:"cpuCount"`
 	DiskSizeGB  int    `json:"diskSizeGb"`
-	// TrafficMode is "permissive" (internet + MITM) or "fakenet" (LAN sinkhole).
+	// TrafficMode is "permissive" (allowlisted internet + MITM) or "fakenet" (LAN sinkhole).
 	TrafficMode string `json:"trafficMode"`
+	// Permissive is the WAN allowlist used only in permissive mode.
+	Permissive PermissivePolicy `json:"permissive"`
+}
+
+// PermissivePolicy is the LAN→WAN allowlist for real-internet mode.
+// TCP 80/443 are always MITM'd (never forwarded raw). Extra ports go to WAN.
+type PermissivePolicy struct {
+	TCPPorts          []int `json:"tcpPorts"`
+	UDPPorts          []int `json:"udpPorts"`
+	ForceDNSToGateway *bool `json:"forceDnsToGateway"`
+	AllowICMP         *bool `json:"allowIcmp"`
+}
+
+// DefaultPermissivePolicy is standard web + DNS via the gateway + ICMP ping.
+func DefaultPermissivePolicy() PermissivePolicy {
+	dns := true
+	icmp := true
+	return PermissivePolicy{
+		TCPPorts:          []int{80, 443},
+		UDPPorts:          []int{},
+		ForceDNSToGateway: &dns,
+		AllowICMP:         &icmp,
+	}
+}
+
+func boolOr(p *bool, def bool) bool {
+	if p == nil {
+		return def
+	}
+	return *p
+}
+
+func (p PermissivePolicy) ForceDNS() bool { return boolOr(p.ForceDNSToGateway, true) }
+func (p PermissivePolicy) ICMP() bool     { return boolOr(p.AllowICMP, true) }
+
+func (p PermissivePolicy) WithDefaults() PermissivePolicy {
+	d := DefaultPermissivePolicy()
+	if p.TCPPorts == nil {
+		p.TCPPorts = d.TCPPorts
+	}
+	if p.UDPPorts == nil {
+		p.UDPPorts = d.UDPPorts
+	}
+	if p.ForceDNSToGateway == nil {
+		p.ForceDNSToGateway = d.ForceDNSToGateway
+	}
+	if p.AllowICMP == nil {
+		p.AllowICMP = d.AllowICMP
+	}
+	return p
 }
 
 // WithDefaults fills gateway fields from intnet name when empty.
@@ -173,19 +223,21 @@ func (g GatewayConfig) WithDefaults(intnetFallback string) GatewayConfig {
 	}
 	tm, _ := NormalizeTrafficMode(g.TrafficMode)
 	if tm == "" {
-		tm = "permissive"
+		tm = "fakenet"
 	}
 	g.TrafficMode = tm
+	g.Permissive = g.Permissive.WithDefaults()
 	return g
 }
 
 // NormalizeTrafficMode maps CLI/UI aliases to permissive or fakenet.
+// Empty defaults to FakeNet (contained).
 func NormalizeTrafficMode(s string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "", "permissive", "mitm", "internet":
-		return "permissive", nil
-	case "fakenet", "sinkhole":
+	case "", "fakenet", "sinkhole":
 		return "fakenet", nil
+	case "permissive", "mitm", "internet":
+		return "permissive", nil
 	default:
 		return "", fmt.Errorf("unknown traffic mode %q (use permissive or fakenet)", s)
 	}
@@ -315,11 +367,24 @@ func Load(path string) (*Config, error) {
 	if cfg.Agent.InstallPath == "" {
 		cfg.Agent.InstallPath = cfg.AgentGuestInstallPath()
 	}
+	mode := strings.ToLower(strings.TrimSpace(cfg.Network.Mode))
+	if mode == "" || mode == "host-nat" || mode == "quarantine" {
+		cfg.Network.Mode = "gateway"
+		cfg.Network.Gateway.Enabled = true
+	}
+	if strings.TrimSpace(cfg.Network.Capture.Mode) == "" ||
+		strings.EqualFold(cfg.Network.Capture.Mode, "guest-nic") ||
+		strings.EqualFold(cfg.Network.Capture.Mode, "vbox-nictrace") {
+		if cfg.Network.Gateway.Enabled || strings.EqualFold(cfg.Network.Mode, "gateway") {
+			cfg.Network.Capture.Mode = "gateway"
+		}
+	}
 	if tm, err := NormalizeTrafficMode(cfg.Network.Gateway.TrafficMode); err == nil {
 		cfg.Network.Gateway.TrafficMode = tm
 	} else {
-		cfg.Network.Gateway.TrafficMode = "permissive"
+		cfg.Network.Gateway.TrafficMode = "fakenet"
 	}
+	cfg.Network.Gateway.Permissive = cfg.Network.Gateway.Permissive.WithDefaults()
 	return &cfg, nil
 }
 
@@ -399,9 +464,17 @@ func (c *Config) DataDir() string {
 	return c.VMDataDir
 }
 
-// IsGatewayMode reports whether network.mode is the Linux gateway path.
+// IsGatewayMode reports whether the Linux gateway path is in use.
+// Host-NAT mitm is retired; gateway.enabled or mode=gateway both count.
 func (c *Config) IsGatewayMode() bool {
-	return strings.EqualFold(strings.TrimSpace(c.Network.Mode), "gateway")
+	if c == nil {
+		return true
+	}
+	if c.Network.Gateway.Enabled {
+		return true
+	}
+	mode := strings.ToLower(strings.TrimSpace(c.Network.Mode))
+	return mode == "" || mode == "gateway"
 }
 
 // VMFolder returns {vmDataDir}/{vmName}.

@@ -195,37 +195,89 @@ func (m *Manager) linuxRun(exe string, args ...string) (string, error) {
 func (m *Manager) linuxRunWithTimeout(timeout time.Duration, exe string, args ...string) (string, error) {
 	user, pass := m.creds()
 	// VBox guestcontrol requires an absolute --exe path; bare "sudo" fails with
-	// "No such file or directory". Run via /bin/bash and feed sudo -S the password.
+	// "No such file or directory". Run via /bin/bash and feed sudo -S from a
+	// staged guest password file (never embed the password in argv / logs).
 	parts := args
 	if exe != "sudo" && exe != "/usr/bin/sudo" && exe != "/bin/sudo" {
 		parts = append([]string{exe}, args...)
 	}
-	// Prefer: sudo -S bash -c 'full command' (avoids awkward multi-argv quoting).
+	guestPw, cleanup, err := m.stageSudoPasswordFile()
+	if err != nil {
+		return "", err
+	}
+	defer cleanup()
+
 	var remote string
 	if len(parts) >= 3 && parts[0] == "bash" && (parts[1] == "-lc" || parts[1] == "-c") {
-		remote = fmt.Sprintf("printf '%%s\\n' %s | sudo -S -p '' bash -c %s",
-			shellSingleQuote(pass), shellSingleQuote(parts[2]))
+		remote = fmt.Sprintf("sudo -S -p '' bash -c %s < %s",
+			shellSingleQuote(parts[2]), shellSingleQuote(guestPw))
 	} else {
 		quoted := make([]string, 0, len(parts))
 		for _, p := range parts {
 			quoted = append(quoted, shellSingleQuote(p))
 		}
-		remote = fmt.Sprintf("printf '%%s\\n' %s | sudo -S -p '' %s",
-			shellSingleQuote(pass), strings.Join(quoted, " "))
+		remote = fmt.Sprintf("sudo -S -p '' %s < %s",
+			strings.Join(quoted, " "), shellSingleQuote(guestPw))
 	}
 	return m.VBox.GuestControlRun(m.vmName(), user, pass, "/bin/bash", []string{"-lc", remote}, timeout)
+}
+
+// stageSudoPasswordFile copies the gateway password to a unique guest temp file
+// and returns a cleanup that removes it. Avoids embedding secrets in command lines.
+func (m *Manager) stageSudoPasswordFile() (guestPath string, cleanup func(), err error) {
+	_, pass := m.creds()
+	hostFile, err := os.CreateTemp("", "qlab-sudo-pw-*.tmp")
+	if err != nil {
+		return "", func() {}, err
+	}
+	hostPath := hostFile.Name()
+	hostCleanup := func() { _ = os.Remove(hostPath) }
+	if _, err := hostFile.WriteString(pass + "\n"); err != nil {
+		_ = hostFile.Close()
+		hostCleanup()
+		return "", func() {}, err
+	}
+	_ = hostFile.Close()
+	_ = os.Chmod(hostPath, 0o600)
+
+	guestPath = fmt.Sprintf("/tmp/.qlab-sudo-pw-%d", time.Now().UnixNano())
+	if err := m.linuxCopyFileTo(hostPath, guestPath); err != nil {
+		hostCleanup()
+		return "", func() {}, fmt.Errorf("stage sudo password: %w", err)
+	}
+	hostCleanup()
+
+	user, pass := m.creds()
+	cleanup = func() {
+		_, _ = m.VBox.GuestControlRun(m.vmName(), user, pass, "/bin/rm", []string{"-f", guestPath}, 30*time.Second)
+	}
+	return guestPath, cleanup, nil
+}
+
+func (m *Manager) sudoBashLC(inner string, timeout time.Duration) (string, error) {
+	user, pass := m.creds()
+	guestPw, cleanup, err := m.stageSudoPasswordFile()
+	if err != nil {
+		return "", err
+	}
+	defer cleanup()
+	lc := fmt.Sprintf("sudo -S -p '' bash -c %s < %s",
+		shellSingleQuote(inner), shellSingleQuote(guestPw))
+	return m.VBox.GuestControlRun(m.vmName(), user, pass, "/bin/bash", []string{"-lc", lc}, timeout)
 }
 
 // linuxCopyTo copies a host path into the Linux guest (forward-slash destinations).
 func (m *Manager) linuxCopyTo(hostPath, guestDest string) error {
 	user, pass := m.creds()
-	_, err := m.VBox.RunWithTimeout(10*time.Minute,
-		"guestcontrol", m.vmName(), "copyto",
-		"--username="+user,
-		"--password="+pass,
-		"--target-directory="+guestDest,
-		hostPath,
-	)
+	auth, cleanup, err := vbox.AuthFlags(user, pass)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	args := []string{"guestcontrol", m.vmName(), "copyto"}
+	args = append(args, auth...)
+	args = append(args, "--target-directory="+guestDest, hostPath)
+	_, err = m.VBox.RunWithTimeout(10*time.Minute, args...)
 	return err
 }
 
@@ -236,13 +288,15 @@ func (m *Manager) linuxCopyFrom(guestPath, hostPath string) error {
 func (m *Manager) linuxCopyFromWithTimeout(guestPath, hostPath string, timeout time.Duration) error {
 	user, pass := m.creds()
 	_ = os.MkdirAll(filepath.Dir(hostPath), 0o755)
-	_, err := m.VBox.RunWithTimeout(timeout,
-		"guestcontrol", m.vmName(), "copyfrom",
-		"--username="+user,
-		"--password="+pass,
-		"--target-directory="+hostPath,
-		guestPath,
-	)
+	auth, cleanup, err := vbox.AuthFlags(user, pass)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	args := []string{"guestcontrol", m.vmName(), "copyfrom"}
+	args = append(args, auth...)
+	args = append(args, "--target-directory="+hostPath, guestPath)
+	_, err = m.VBox.RunWithTimeout(timeout, args...)
 	return err
 }
 
@@ -296,13 +350,7 @@ func (m *Manager) Provision() (string, error) {
 		"chmod +x /opt/quarantine-gateway-src/first-boot.sh",
 		"/opt/quarantine-gateway-src/first-boot.sh",
 	}, "; ")
-	lc := fmt.Sprintf("printf '%%s\\n' %s | sudo -S -p '' bash -c %s",
-		shellSingleQuote(pass), shellSingleQuote(inner))
-	out, err := m.VBox.GuestControlRun(m.vmName(), user, pass,
-		"/bin/bash",
-		[]string{"-lc", lc},
-		30*time.Minute,
-	)
+	out, err := m.sudoBashLC(inner, 30*time.Minute)
 	if err != nil {
 		return out, fmt.Errorf("first-boot: %w (%s)", err, out)
 	}
@@ -316,13 +364,15 @@ func (m *Manager) linuxCopyFileTo(hostPath, guestFile string) error {
 		return err
 	}
 	user, pass := m.creds()
-	_, err = m.VBox.RunWithTimeout(10*time.Minute,
-		"guestcontrol", m.vmName(), "copyto",
-		"--username="+user,
-		"--password="+pass,
-		"--target-directory="+guestFile,
-		abs,
-	)
+	auth, cleanup, err := vbox.AuthFlags(user, pass)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	args := []string{"guestcontrol", m.vmName(), "copyto"}
+	args = append(args, auth...)
+	args = append(args, "--target-directory="+guestFile, abs)
+	_, err = m.VBox.RunWithTimeout(10*time.Minute, args...)
 	return err
 }
 
@@ -450,7 +500,6 @@ func (m *Manager) ApplyAgentLANForward() error {
 	if err := m.linuxCopyFileTo(shHost, "/tmp/enable-agent-forward.sh"); err != nil {
 		return fmt.Errorf("copy enable-agent-forward.sh: %w", err)
 	}
-	user, pass := m.creds()
 	inner := strings.Join([]string{
 		"mkdir -p /opt/quarantine-gateway",
 		"cp /tmp/quarantine-nftables.conf /opt/quarantine-gateway/nftables.conf",
@@ -458,10 +507,7 @@ func (m *Manager) ApplyAgentLANForward() error {
 		fmt.Sprintf("/tmp/enable-agent-forward.sh %s %d %s %s",
 			g.GuestIP, port, g.LANGateway, g.LANCidr),
 	}, "; ")
-	lc := fmt.Sprintf("printf '%%s\\n' %s | sudo -S -p '' bash -c %s",
-		shellSingleQuote(pass), shellSingleQuote(inner))
-	out, err := m.VBox.GuestControlRun(m.vmName(), user, pass,
-		"/bin/bash", []string{"-lc", lc}, 2*time.Minute)
+	out, err := m.sudoBashLC(inner, 2*time.Minute)
 	if err != nil {
 		return fmt.Errorf("gateway agent forward: %w (%s)", err, out)
 	}
@@ -832,7 +878,6 @@ func (m *Manager) ExportCA() (string, error) {
 	if err := m.Start(); err != nil {
 		return "", err
 	}
-	user, pass := m.creds()
 	destDir := filepath.Join(m.ProjectRoot, "network", "proxy")
 	_ = os.MkdirAll(destDir, 0o755)
 	dest := filepath.Join(destDir, "mitmproxy-ca-cert.cer")
@@ -847,9 +892,7 @@ func (m *Manager) ExportCA() (string, error) {
 		return "", fmt.Errorf("upload export-ca.sh: %w", err)
 	}
 	inner := "chmod +x /tmp/export-ca.sh; bash /tmp/export-ca.sh"
-	lc := fmt.Sprintf("printf '%%s\\n' %s | sudo -S -p '' bash -c %s",
-		shellSingleQuote(pass), shellSingleQuote(inner))
-	if out, err := m.VBox.GuestControlRun(m.vmName(), user, pass, "/bin/bash", []string{"-lc", lc}, 2*time.Minute); err != nil {
+	if out, err := m.sudoBashLC(inner, 2*time.Minute); err != nil {
 		return "", fmt.Errorf("export CA (stage in guest): %w (%s)", err, out)
 	}
 	if err := m.linuxCopyFrom("/tmp/quarantine-ca.cer", tmp); err != nil {

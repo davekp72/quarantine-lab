@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/quarantine-lab/quarantine/internal/applog"
+	"github.com/quarantine-lab/quarantine/internal/vbox"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
@@ -33,7 +34,7 @@ func (a *App) emitLog(level, message string) {
 	if a.Log == nil {
 		return
 	}
-	entry := a.Log.Add(level, message)
+	entry := a.Log.Add(level, vbox.RedactSecrets(message))
 	if a.WailsCtx != nil {
 		runtime.EventsEmit(a.WailsCtx, "applog", entry)
 	}

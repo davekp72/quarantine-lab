@@ -31,6 +31,8 @@ type Flow struct {
 	Info       string   `json:"info"`
 	Names      []string `json:"names,omitempty"`
 	HasPayload bool     `json:"hasPayload"`
+	PolicyBreach bool   `json:"policyBreach,omitempty"`
+	PolicyReason string `json:"policyReason,omitempty"`
 }
 
 // FollowResult is a dissected stream / packet dump for the detail pane.

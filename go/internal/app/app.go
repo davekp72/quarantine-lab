@@ -875,7 +875,27 @@ func (a *App) stopCaptureAndAttach(snapshotName, reason string) {
 	}
 	if dest != "" {
 		a.logInfo("Network evidence attached: " + dest)
+		a.writeCapturePolicy(dest)
 	}
+}
+
+func (a *App) writeCapturePolicy(dest string) {
+	if a == nil || a.Cfg == nil || dest == "" {
+		return
+	}
+	g := a.Cfg.Network.Gateway.WithDefaults(a.Cfg.Network.IntnetName)
+	doc := map[string]any{
+		"trafficMode": a.configuredTrafficMode(),
+		"permissive":  g.Permissive,
+		"lanCidr":     g.LANCidr,
+		"lanGateway":  g.LANGateway,
+		"guestIp":     g.GuestIP,
+	}
+	raw, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(dest, "permissive-policy.json"), append(raw, '\n'), 0o644)
 }
 
 // startCaptureAfterLaunch starts capture when enabled (best-effort; does not fail launch).
@@ -1085,12 +1105,12 @@ func (a *App) StopCaptureWails() (map[string]any, error) {
 // GatewayStatusWails returns Linux gateway VM status for the UI sidebar.
 // Uses VirtualBox state only — never guestcontrol (that can block the VBox lock for minutes).
 func (a *App) GatewayStatusWails() (map[string]any, error) {
-	mode := a.Cfg.Network.Mode
 	g := a.Cfg.Network.Gateway.WithDefaults(a.Cfg.Network.IntnetName)
 	out := map[string]any{
 		"enabled":     a.Cfg.IsGatewayMode() || g.Enabled,
-		"mode":        mode,
+		"mode":        "gateway",
 		"trafficMode": a.configuredTrafficMode(),
+		"permissive":  g.Permissive,
 		"vmName":      g.VMName,
 		"lanGateway":  g.LANGateway,
 		"guestIp":     g.GuestIP,
@@ -1115,7 +1135,7 @@ func (a *App) configuredTrafficMode() string {
 		}
 	}
 	if a == nil || a.Cfg == nil {
-		return "permissive"
+		return "fakenet"
 	}
 	return a.Cfg.Network.Gateway.WithDefaults(a.Cfg.Network.IntnetName).TrafficMode
 }
@@ -1141,9 +1161,51 @@ func (a *App) SetGatewayTrafficModeWails(mode string) (map[string]any, error) {
 		a.logInfo(msg)
 	}
 	applied := a.Cfg.Network.Gateway.TrafficMode
+	g := a.Cfg.Network.Gateway.WithDefaults(a.Cfg.Network.IntnetName)
 	return map[string]any{
-		"mode":    applied,
-		"message": msg,
+		"mode":       applied,
+		"message":    msg,
+		"permissive": g.Permissive,
+	}, nil
+}
+
+// PermissivePolicyWails returns the WAN allowlist used in permissive mode.
+func (a *App) PermissivePolicyWails() (map[string]any, error) {
+	g := a.Cfg.Network.Gateway.WithDefaults(a.Cfg.Network.IntnetName)
+	return map[string]any{
+		"trafficMode": a.configuredTrafficMode(),
+		"permissive":  g.Permissive,
+		"lanCidr":     g.LANCidr,
+		"lanGateway":  g.LANGateway,
+		"guestIp":     g.GuestIP,
+	}, nil
+}
+
+// SetPermissivePolicyWails saves the allowlist and reapplies nftables when already permissive.
+func (a *App) SetPermissivePolicyWails(tcpPorts []int, udpPorts []int, forceDNS bool, allowICMP bool) (map[string]any, error) {
+	if a.Gateway == nil {
+		return nil, fmt.Errorf("gateway unavailable")
+	}
+	pol := config.PermissivePolicy{
+		TCPPorts:          tcpPorts,
+		UDPPorts:          udpPorts,
+		ForceDNSToGateway: &forceDNS,
+		AllowICMP:         &allowICMP,
+	}.WithDefaults()
+	a.Cfg.Network.Gateway.Permissive = pol
+	a.logInfo(fmt.Sprintf("Permissive policy → tcp=%v udp=%v forceDns=%v icmp=%v", pol.TCPPorts, pol.UDPPorts, pol.ForceDNS(), pol.ICMP()))
+	msg, err := a.Gateway.ApplyPermissivePolicy()
+	if err != nil {
+		a.logError(err.Error())
+		return nil, err
+	}
+	if msg != "" {
+		a.logInfo(msg)
+	}
+	return map[string]any{
+		"permissive": pol,
+		"message":    msg,
+		"mode":       a.configuredTrafficMode(),
 	}, nil
 }
 
