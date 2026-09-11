@@ -6,11 +6,11 @@ Conflicts=quarantine-mitm-explicit.service quarantine-mitm-transparent.service d
 
 [Service]
 Type=simple
-# FakeNet uses NFQUEUE + iptables divert + binds :53/:80/:443/:25.
-# Non-root+caps was unreliable (guest CONNECT hung → GUI FakeNet switch failed).
-# mitm/capture stay non-root; egress still contained by nftables output.
+User=quarantine-fakenet
+Group=quarantine-fakenet
 WorkingDirectory=/var/log/quarantine/fakenet
-ExecStartPre=+/usr/bin/bash -c 'install -d -m 0755 /var/log/quarantine/fakenet /var/log/quarantine/fakenet/www /var/log/quarantine/fakenet/certs; if [[ -x /usr/local/sbin/quarantine-ensure-service-users ]]; then /usr/local/sbin/quarantine-ensure-service-users || true; fi'
+# '+' = root: create users/dirs/CA perms before drop.
+ExecStartPre=+/usr/local/sbin/quarantine-ensure-service-users
 ExecStart=/opt/quarantine-gateway/venv-fakenet/bin/python -m fakenet.fakenet \
   -c /etc/quarantine-gateway/fakenet.ini \
   -n -p \
@@ -18,7 +18,22 @@ ExecStart=/opt/quarantine-gateway/venv-fakenet/bin/python -m fakenet.fakenet \
 Restart=on-failure
 RestartSec=5
 TimeoutStartSec=90
+NoNewPrivileges=true
 PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelModules=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_PACKET
+ReadWritePaths=/var/log/quarantine/fakenet /var/lib/quarantine-fakenet /etc/quarantine-gateway /run /opt/quarantine-gateway/venv-fakenet
+ReadOnlyPaths=/opt/quarantine-gateway/fakenet
+# NFQUEUE / iptables divert + privileged listeners (:53/:80/:443/:25/:8080)
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+# FakeNet touches netfilter; keep sysctl path usable.
+ProtectKernelTunables=false
 
 [Install]
 WantedBy=multi-user.target

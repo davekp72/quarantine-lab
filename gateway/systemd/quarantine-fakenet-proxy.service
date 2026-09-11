@@ -6,11 +6,25 @@ Conflicts=quarantine-mitm-explicit.service quarantine-mitm-transparent.service
 
 [Service]
 Type=simple
+User=quarantine-fakenet
+Group=quarantine-fakenet
 EnvironmentFile=-/etc/quarantine-gateway/fakenet-proxy.env
+ExecStartPre=+/usr/local/sbin/quarantine-ensure-service-users
 ExecStart=/usr/bin/python3 /usr/local/sbin/quarantine-fakenet-explicit-proxy
 Restart=on-failure
 RestartSec=2
+NoNewPrivileges=true
 PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/log/quarantine/fakenet
+ReadOnlyPaths=/etc/quarantine-gateway /usr/local/sbin/quarantine-fakenet-explicit-proxy
+CapabilityBoundingSet=
+AmbientCapabilities=
 
 [Install]
 WantedBy=multi-user.target

@@ -197,6 +197,19 @@ patch_fakenet_ssl() {
     echo "ERROR: HTTPListener CONNECT copy did not install" >&2
     return 1
   fi
+  # Allow non-root FakeNet when systemd grants CAP_NET_ADMIN.
+  local priv_patch="$OPT/fakenet/patch_diverter_privcheck.py"
+  if [[ -f "$priv_patch" ]]; then
+    local div_dst
+    div_dst="$("$pybin" -c 'import fakenet.diverters.diverterbase as d, pathlib; print(pathlib.Path(d.__file__).resolve())' 2>/dev/null || true)"
+    if [[ -n "$div_dst" && -f "$div_dst" ]]; then
+      "$pybin" "$priv_patch" "$div_dst" || return 1
+      rm -rf "$(dirname "$div_dst")/__pycache__" 2>/dev/null || true
+    else
+      echo "ERROR: could not locate FakeNet diverterbase to patch" >&2
+      return 1
+    fi
+  fi
   rm -rf /opt/quarantine-gateway/venv-fakenet/lib/python*/site-packages/fakenet/configs/temp_certs \
     2>/dev/null || true
 }
@@ -312,9 +325,16 @@ mode_fakenet() {
   rm -rf /opt/quarantine-gateway/venv-fakenet/lib/python*/site-packages/fakenet/configs/temp_certs \
     /var/log/quarantine/fakenet/certs
   mkdir -p /var/log/quarantine/fakenet/certs /var/log/quarantine/fakenet/www
-  # Ensure writable for the FakeNet process (root today; safe if later dropped).
+  if [[ -x /usr/local/sbin/quarantine-ensure-service-users ]]; then
+    /usr/local/sbin/quarantine-ensure-service-users || true
+  fi
+  chown -R quarantine-fakenet:quarantine-fakenet \
+    /var/log/quarantine/fakenet /var/log/quarantine/fakenet/certs /var/log/quarantine/fakenet/www \
+    2>/dev/null || true
   chmod 755 /var/log/quarantine/fakenet /var/log/quarantine/fakenet/certs /var/log/quarantine/fakenet/www
   publish_fakenet_crl
+  # CRL/www served by FakeNet HTTPListener — keep readable/writable by service user.
+  chown -R quarantine-fakenet:quarantine-fakenet /var/log/quarantine/fakenet/www 2>/dev/null || true
   apply_nft "$OPT/nftables-fakenet.conf" || return 1
   systemctl daemon-reload 2>/dev/null || true
   systemctl start quarantine-fakenet || return 1

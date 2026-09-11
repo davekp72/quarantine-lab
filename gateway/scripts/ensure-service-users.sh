@@ -30,6 +30,19 @@ ensure_user quarantine-capture "$CAPTURE_HOME"
 install -d -o quarantine-mitm -g quarantine-mitm -m 0750 "$MITM_HOME" "$LOG/proxy"
 install -d -o quarantine-fakenet -g quarantine-fakenet -m 0750 \
   "$FAKENET_HOME" "$LOG/fakenet" "$LOG/fakenet/www" "$LOG/fakenet/certs"
+# FakeNet leaf-cert cache under the venv (must be writable by service user).
+shopt -s nullglob
+for d in /opt/quarantine-gateway/venv-fakenet/lib/python*/site-packages/fakenet/configs; do
+  install -d -o quarantine-fakenet -g quarantine-fakenet -m 0750 "$d/temp_certs"
+done
+shopt -u nullglob
+# Also allow writing packaged configs dir if FakeNet creates siblings there.
+for d in /opt/quarantine-gateway/venv-fakenet/lib/python*/site-packages/fakenet; do
+  if [[ -d "$d" ]]; then
+    chgrp -R quarantine-fakenet "$d/configs" 2>/dev/null || true
+    chmod -R g+rwX "$d/configs" 2>/dev/null || true
+  fi
+done
 install -d -o quarantine-capture -g quarantine-capture -m 0750 "$CAPTURE_HOME" "$LOG/pcap"
 
 # Fix leftovers from earlier root-owned runs so the service user can append.
@@ -102,6 +115,14 @@ if [[ -f "$ETC/fakenet-ca-key.pem" ]]; then
   chmod 640 "$ETC/fakenet-ca-key.pem"
 fi
 chmod 644 "$ETC/fakenet-ca-cert.pem" 2>/dev/null || true
+# FakeNet republishes CRL + CDP under /etc; must be group-writable.
+for f in mitmproxy-ca.crl fakenet-ca.crl fakenet-cdp.url; do
+  touch "$ETC/$f" 2>/dev/null || true
+  if [[ -e "$ETC/$f" ]]; then
+    chgrp quarantine-fakenet "$ETC/$f" 2>/dev/null || true
+    chmod 664 "$ETC/$f" 2>/dev/null || true
+  fi
+done
 
 # Service users must be able to traverse/exec the shared venvs (often installed 750 root).
 fix_opt_tree() {

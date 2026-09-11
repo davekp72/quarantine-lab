@@ -187,6 +187,13 @@ if [[ -f "$http_src" && -n "$http_dst" ]]; then
   echo "Installed FakeNet HTTPListener CONNECT -> $http_dst"
 fi
 
+priv_patch="$OPT/fakenet/patch_diverter_privcheck.py"
+if [[ -f "$priv_patch" ]]; then
+  div_dst="$("$pybin" -c 'import fakenet.diverters.diverterbase as d, pathlib; print(pathlib.Path(d.__file__).resolve())')"
+  "$pybin" "$priv_patch" "$div_dst"
+  rm -rf "$(dirname "$div_dst")/__pycache__" 2>/dev/null || true
+fi
+
 "$pybin" -c 'import fakenet, netfilterqueue, netifaces; from fakenet.listeners.ssl_utils import SSLWrapper; print("ok", fakenet.__file__)'
 
 # Smoke-test cert generation (catches X509Extension regressions early)

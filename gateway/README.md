@@ -21,7 +21,7 @@
 #
 # Service isolation
 #   mitm + capture: quarantine-mitm / quarantine-capture (non-root + caps).
-#   FakeNet: root (NFQUEUE/iptables + privileged ports); non-root was unreliable.
+#   FakeNet: quarantine-fakenet + CAP_NET_ADMIN/RAW/BIND_SERVICE (NFQUEUE + :53/:80/:443).
 #   ExecStartPre=+quarantine-ensure-service-users prepares users/dirs/venv perms.
 #   nftables output still drops private/metadata and allowlists public upstream.
 #   mitm CA: /var/lib/quarantine-mitm
