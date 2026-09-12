@@ -1,6 +1,6 @@
 module github.com/quarantine-lab/quarantine
 
-go 1.25.0
+go 1.26.0
 
 require (
 	github.com/andybalholm/brotli v1.1.0
@@ -11,7 +11,7 @@ require (
 	github.com/ulikunitz/xz v0.5.16
 	github.com/wailsapp/wails/v2 v2.15.0
 	golang.org/x/crypto v0.53.0
-	golang.org/x/sys v0.46.0
+	golang.org/x/sys v0.48.0
 	www.velocidex.com/golang/go-ntfs v0.2.1
 	www.velocidex.com/golang/regparser v0.0.0-20250203141505-31e704a67ef7
 )
