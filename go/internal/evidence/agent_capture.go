@@ -561,31 +561,6 @@ func AgentInstallInstructions() string {
 	return "Set-ExecutionPolicy -Scope Process Bypass; & '" + guestpaths.StagingInstallScript() + "'"
 }
 
-// RunAgentInstallScheduledTask asks the live agent to start a detached delayed upgrade.
-// Uses Start-Process + timeout so this HTTP call returns before the service is stopped.
-func (s *Service) RunAgentInstallScheduledTask(ctx context.Context) error {
-	if s == nil || s.Cfg == nil || !s.Cfg.Agent.Enabled {
-		return fmt.Errorf("agent is not enabled")
-	}
-	script := guestpaths.StagingUpgradeScript()
-	// Prefer the soft upgrade script; fall back to full installer if missing.
-	ps := fmt.Sprintf(`$ErrorActionPreference='Stop'
-$upgrade='%s'
-$full='%s'
-$target=$upgrade
-if (-not (Test-Path -LiteralPath $target)) { $target=$full }
-if (-not (Test-Path -LiteralPath $target)) { throw "no upgrade/install script in staging" }
-$cmd = 'timeout /t 15 /nobreak >nul & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $target + '"'
-Start-Process -FilePath 'C:\Windows\System32\cmd.exe' -ArgumentList '/c', $cmd -WindowStyle Hidden | Out-Null
-'detached'
-`, script, guestpaths.StagingInstallScript())
-	out, err := s.Guest.Run(guest.UserSystem, `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, []string{"-NoProfile", "-NonInteractive", "-Command", ps}, 45*time.Second)
-	if err != nil {
-		return fmt.Errorf("start detached agent upgrade: %w (%s)", err, strings.TrimSpace(out))
-	}
-	return nil
-}
-
 // WaitForAgentVersion polls /health until Version matches want (or any version if want is empty).
 func (s *Service) WaitForAgentVersion(ctx context.Context, want string) (*types.HealthResponse, error) {
 	want = strings.TrimSpace(want)

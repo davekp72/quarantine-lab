@@ -217,12 +217,21 @@ func (a *App) tryAgentFilePreview(guestPath string, expectSize, max int64) ([]by
 }
 
 // enrichChangedFilesBefore stores CleanSession bytes as bc/bd on modified Evidence rows.
+// Never starts a CloneMedium flatten — only reads an existing RAW cache. Preserve stays
+// sidecar-first; modified "before" diffs fill in only when baseline was already flattened.
 func (a *App) enrichChangedFilesBefore(evidenceSnap string) {
 	if a == nil || a.Disk == nil || a.Evidence == nil || a.Cfg == nil {
 		return
 	}
 	baseline := strings.TrimSpace(a.Cfg.Manifest.SessionBaselineSnapshot)
 	if baseline == "" {
+		return
+	}
+	if !a.Disk.HasUsableFlattenCache(baseline) {
+		a.logInfo(fmt.Sprintf(
+			"Skip baseline before-content enrich for %s (no cached RAW for %s — avoids multi-GB CloneMedium)",
+			evidenceSnap, baseline,
+		))
 		return
 	}
 	max := int64(a.Cfg.ContentMaxKBResolved()) * 1024

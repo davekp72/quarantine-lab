@@ -965,7 +965,7 @@ func agentCmd(cfgPath *string) *cobra.Command {
 	cmd := &cobra.Command{Use: "agent", Short: "Quarantine VM agent (HTTP evidence collector)"}
 	cmd.AddCommand(&cobra.Command{
 		Use:   "install",
-		Short: "Deploy quarantine-agent files and guest install script (run script elevated in VM)",
+		Short: "Stage quarantine-agent into the guest (run Install-QuarantineAgent.ps1 elevated in VM)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			a, err := app.New(*cfgPath)
 			if err != nil {

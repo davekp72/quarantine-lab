@@ -759,21 +759,17 @@ func (a *App) agentNatHint() string {
 	return "host reaches the agent via the Linux gateway only (127.0.0.1:9443 → gateway NAT → lab LAN)"
 }
 
-// InstallAgentWails deploys a new agent binary into the guest and upgrades the service.
-// In agent-only mode it stages via HTTP PUT, then registers a delayed SYSTEM task to
-// run Install-QuarantineAgent.ps1 (so the live agent is not killed mid-HTTP request).
+// InstallAgentWails stages the agent binary + Install-QuarantineAgent.ps1 into the guest.
+// Service install/upgrade is manual only (elevated guest PowerShell) — auto-upgrade via
+// a detached task was unreliable. Unattend FirstLogon still installs via GuestProvision.
 func (a *App) InstallAgentWails() (string, error) {
-	ctx := a.WailsCtx
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	progress := func(msg string) {
 		a.logInfo(msg)
 		fmt.Println(msg)
 	}
 	state, _ := a.VM.VBox.VMState(a.Cfg.VMName)
 	if state != "running" && state != "paused" {
-		return "", fmt.Errorf("VM must be running to install agent (state: %s)", state)
+		return "", fmt.Errorf("VM must be running to stage agent (state: %s)", state)
 	}
 	progress("Ensuring NAT port forward for quarantine-agent…")
 	if err := a.Network.EnsureAgentPortForward(); err != nil {
@@ -786,15 +782,15 @@ func (a *App) InstallAgentWails() (string, error) {
 			a.logInfo(syncErr.Error())
 		}
 	}
-	progress(fmt.Sprintf("Deploying quarantine-agent v%s to guest…", agenttypes.Version))
+	progress(fmt.Sprintf("Staging quarantine-agent v%s into guest…", agenttypes.Version))
 	if _, err := a.Evidence.DeployAgent(""); err != nil {
 		a.logError(err.Error())
 		return "", err
 	}
 
-	manual := fmt.Sprintf(`Deployed quarantine-agent v%s to guest (host token saved).
+	msg := fmt.Sprintf(`Staged quarantine-agent v%s (host token saved).
 
-If auto-upgrade did not finish, run in elevated guest PowerShell:
+Install/upgrade is manual — in elevated guest PowerShell:
   %s
 
 Then on the host:
@@ -802,51 +798,6 @@ Then on the host:
 If health is 401:
   .\quarantine-vm.ps1 agent sync-token
 `, agenttypes.Version, evidence.AgentInstallInstructions())
-
-	if a.Cfg.UseGuestAdditions() {
-		progress(manual)
-		return manual, nil
-	}
-
-	progress("Starting detached soft upgrade in 15s (stop → replace binary → start; keeps service registration)…")
-	if err := a.Evidence.RunAgentInstallScheduledTask(ctx); err != nil {
-		a.logWarn(err.Error())
-		progress(manual)
-		return manual + "\n\nAuto-upgrade failed: " + err.Error(), nil
-	}
-
-	// First wait for *any* healthy agent (service may bounce), then require the new version.
-	bounceCtx, bounceCancel := context.WithTimeout(ctx, 90*time.Second)
-	progress("Waiting for agent to come back after upgrade…")
-	hAny, err := a.Evidence.WaitForAgentVersion(bounceCtx, "")
-	bounceCancel()
-	if err != nil {
-		a.logWarn(err.Error())
-		recovery := manual + "\n\nAgent is unreachable after upgrade attempt. Recover in elevated guest PowerShell:\n  " +
-			evidence.AgentInstallInstructions() +
-			"\nOr Launch CleanSession to restore the previous agent, then retry.\n" +
-			"Guest log (if present): C:\\Users\\Public\\Quarantine\\agent-staging\\upgrade.log"
-		progress(recovery)
-		return recovery + "\n\n" + err.Error(), nil
-	}
-	if strings.TrimSpace(hAny.Version) == agenttypes.Version {
-		msg := fmt.Sprintf("Upgraded quarantine-agent to v%s (service running).", hAny.Version)
-		progress(msg)
-		return msg, nil
-	}
-
-	waitCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-	progress(fmt.Sprintf("Agent is up (v%s); waiting for v%s…", hAny.Version, agenttypes.Version))
-	h, err := a.Evidence.WaitForAgentVersion(waitCtx, agenttypes.Version)
-	if err != nil {
-		a.logWarn(err.Error())
-		msg := fmt.Sprintf("Agent reachable at v%s but not v%s yet. Soft upgrade may have failed to replace the binary.\n\n%s",
-			hAny.Version, agenttypes.Version, manual)
-		progress(msg)
-		return msg, nil
-	}
-	msg := fmt.Sprintf("Upgraded quarantine-agent to v%s (service running).", h.Version)
 	progress(msg)
 	return msg, nil
 }

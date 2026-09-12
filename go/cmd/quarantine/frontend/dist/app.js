@@ -1865,16 +1865,16 @@ $('#btn-install-agent').addEventListener('click', async () => {
     return;
   }
   const btn = $('#btn-install-agent');
-  setBusy(btn, true, 'Installing…');
+  setBusy(btn, true, 'Staging…');
   try {
     const msg = await api.InstallAgentWails();
-    $('#snap-action-msg').textContent = msg || 'Agent installed';
+    $('#snap-action-msg').textContent = msg || 'Agent staged — run install script elevated in guest';
     toggleLogDrawer(true);
     await refreshStatus();
   } catch (e) {
     alert(String(e));
   } finally {
-    setBusy(btn, false, 'Install VM agent');
+    setBusy(btn, false, 'Stage VM agent');
   }
 });
 $('#btn-capture-start')?.addEventListener('click', () => startCapture());

@@ -1,6 +1,6 @@
 # Live upgrade from agent-staging without deleting the Windows service first.
-# Designed for host "quarantine agent install" automation: stop → replace binary → start.
-# Falls back to Install-QuarantineAgent.ps1 only if a simple restart fails.
+# Designed for manual guest upgrades after host "agent install" stages files.
+# Prefer running Install-QuarantineAgent.ps1 elevated in the guest.
 param()
 
 $ErrorActionPreference = 'Continue'

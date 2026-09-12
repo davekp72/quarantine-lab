@@ -87,8 +87,8 @@ func (r *Reader) CacheDir() string {
 	return base
 }
 
-// EnsureFlattened returns path to flattened VDI for snapshot name.
-func (r *Reader) EnsureFlattened(snapshotName string) (string, error) {
+// resolveSnapshotEntry looks up snapshot disk metadata without cloning.
+func (r *Reader) resolveSnapshotEntry(snapshotName string) (SnapshotEntry, error) {
 	entry, ok := r.Index.Snapshots[strings.ToLower(snapshotName)]
 	if !ok || entry.DiskMediumUUID == "" {
 		if idx, err := ParseVBoxIndex(r.Cfg); err == nil {
@@ -101,7 +101,7 @@ func (r *Reader) EnsureFlattened(snapshotName string) (string, error) {
 	if !ok {
 		uuid, err := r.VBox.SnapshotUUID(r.Cfg.VMName, snapshotName)
 		if err != nil {
-			return "", err
+			return SnapshotEntry{}, err
 		}
 		entry = SnapshotEntry{Name: snapshotName, UUID: uuid}
 		if idx, err := ParseVBoxIndex(r.Cfg); err == nil {
@@ -109,6 +109,38 @@ func (r *Reader) EnsureFlattened(snapshotName string) (string, error) {
 				entry = e2
 			}
 		}
+	}
+	return entry, nil
+}
+
+// HasUsableFlattenCache reports whether a prior CloneMedium RAW for this snapshot
+// already exists. Never starts a flatten.
+func (r *Reader) HasUsableFlattenCache(snapshotName string) bool {
+	entry, err := r.resolveSnapshotEntry(snapshotName)
+	if err != nil || entry.UUID == "" {
+		return false
+	}
+	uuidClean := strings.Trim(entry.UUID, "{}")
+	out := filepath.Join(r.CacheDir(), uuidClean+".raw")
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if cached, ok := r.cache[entry.UUID]; ok {
+		if _, err := os.Stat(cached); err == nil && isUsableFlattenCache(cached) {
+			return true
+		}
+	}
+	if _, err := os.Stat(out); err == nil && isUsableFlattenCache(out) {
+		r.cache[entry.UUID] = out
+		return true
+	}
+	return false
+}
+
+// EnsureFlattened returns path to flattened VDI for snapshot name.
+func (r *Reader) EnsureFlattened(snapshotName string) (string, error) {
+	entry, err := r.resolveSnapshotEntry(snapshotName)
+	if err != nil {
+		return "", err
 	}
 	uuidClean := strings.Trim(entry.UUID, "{}")
 	out := filepath.Join(r.CacheDir(), uuidClean+".raw")
