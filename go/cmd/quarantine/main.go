@@ -207,7 +207,8 @@ func preserveCmd(cfgPath *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			name, err := a.PreserveEvidenceWails(label)
+			// CLI defaults to stopping/attaching an active PCAP (UI prompts instead).
+			name, err := a.PreserveEvidenceWails(label, true)
 			if err != nil {
 				return err
 			}
@@ -224,7 +225,7 @@ func resetCmd(cfgPath *string) *cobra.Command {
 	var clean bool
 	c := &cobra.Command{
 		Use:   "reset",
-		Short: "Restore snapshot (clears guest Sysmon via agent, starts capture)",
+		Short: "Restore snapshot (clears guest Sysmon via agent; does not start PCAP)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			a, err := app.New(*cfgPath)
 			if err != nil {

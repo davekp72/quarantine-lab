@@ -25,8 +25,8 @@ export function ListSnapshotsWails() {
 export function TakeSnapshotWails(name, description, force) {
   return window.go.app.App.TakeSnapshotWails(name, description, force);
 }
-export function PreserveEvidenceWails(label) {
-  return window.go.app.App.PreserveEvidenceWails(label);
+export function PreserveEvidenceWails(label, stopCapture) {
+  return window.go.app.App.PreserveEvidenceWails(label, stopCapture);
 }
 export function ResetToSnapshotWails(name, clean) {
   return window.go.app.App.ResetToSnapshotWails(name, clean);

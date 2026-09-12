@@ -190,10 +190,19 @@ func (a *App) DiffSnapshotFile(fromSnap, toSnap, guestPath string) (map[string]a
 		if src, _ := out["fromSource"].(string); src == "none" || src == "sidecar-meta" || src == "" {
 			out["fromContent"] = ""
 			out["fromUnavailable"] = false
-			out["fromNote"] = "Baseline content not in sidecar (re-Preserve to store before-state)."
+			out["fromNote"] = baselineMissingNote(fromSnap, toSnap)
 		}
 	}
 	return out, nil
+}
+
+func baselineMissingNote(fromSnap, toSnap string) string {
+	from := strings.ToLower(strings.TrimSpace(fromSnap))
+	if strings.Contains(from, "clean") || from == "baseline" {
+		return "CleanSession has no embedded file bodies (empty changed-files sidecar). Preserve→Preserve diffs work because each Evidence capture embeds content. Clean→Evidence shows the Evidence side only unless a flattened CleanSession RAW cache already exists."
+	}
+	_ = toSnap
+	return "From-side content not in sidecar. Compare two Evidence preserves for edit diffs, or ensure the older snapshot embedded this path."
 }
 
 // tryAgentFilePreview reads a small guest file via the agent when the sidecar

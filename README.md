@@ -141,6 +141,14 @@ Shut down after the guest looks right, then:
 
 ### 9. Launch the first analysis
 
+Recommended UI loop (sidecar embeds; compare Evidence→Evidence for file diffs):
+
+1. **Launch** `CleanSession` (PCAP does **not** auto-start)
+2. **Preserve** — checkpoint; if PCAP is stopped, confirm to **start** it for the work phase
+3. **Do stuff** in the guest (samples, browse, etc.)
+4. **Preserve** again — if PCAP is recording, confirm to **stop** and attach under `{Evidence}-network/`
+5. **Compare** `Evidence-*` (first) → `Evidence-*` (second) for edit diffs; or CleanSession → Evidence for session inventory (no baseline file bodies)
+
 ```powershell
 .\quarantine-vm.ps1 reset -Clean
 .\quarantine-vm.ps1 inbox push .\sample.bin
@@ -155,25 +163,32 @@ Shut down after the guest looks right, then:
 .\quarantine-vm.ps1 ui    # or: manifest view -FromSnapshot CleanSession -ToSnapshot Evidence-first-run
 ```
 
-Daily loop after that: restore CleanSession → work → preserve → reset → compare.
+CLI still starts/stops PCAP explicitly (`capture start` / `capture stop`). The desktop UI prompts on **Preserve** instead of auto-starting on Launch.
 
 ---
 
 ## The daily workflow (operational reference)
 
 ```
-  Set up VM  →  Baseline  →  CleanSession  →  Do stuff  →  Evidence  →  Compare
-     once         once          once/refresh     each run      save         review
+  Set up VM  →  Baseline  →  CleanSession  →  Launch  →  Preserve  →  Do stuff  →  Preserve  →  Compare
+     once         once          once/refresh    UI/CLI     start PCAP?     each run    stop PCAP?   review
 ```
 
-| Step | What it means | Command |
-|------|----------------|---------|
+| Step | What it means | Command / UI |
+|------|----------------|--------------|
 | **1. Set up VM** | Create the guest, install Windows, harden it, gateway | [Quick start](#quick-start) |
 | **2. Baseline** | Freeze a clean **disk** image named `Clean` | `.\quarantine-vm.ps1 baseline` |
 | **3. CleanSession** | Freeze a **logged-in desktop** you can jump back to | `.\quarantine-vm.ps1 snapshot` (VM running) |
-| **4. Do stuff** | Open samples, browse, click the phishing link | Work inside the guest |
-| **5. Evidence** | Save that session before you wipe it | `.\quarantine-vm.ps1 preserve` |
-| **6. Compare** | Diff files / registry / network vs the clean session | `.\quarantine-vm.ps1 manifest view ...` or **UI** |
+| **4. Launch** | Resume CleanSession (Sysmon clear + clock sync; **no** auto PCAP) | UI **Launch** or `reset -Clean` |
+| **5. Preserve (start)** | Checkpoint + optional **start PCAP** for the work phase | UI **Preserve** (prompt) |
+| **6. Do stuff** | Open samples, browse, click the phishing link | Work inside the guest |
+| **7. Preserve (stop)** | Save Evidence + optional **stop/attach PCAP** | UI **Preserve** (prompt) or `preserve` |
+| **8. Compare** | Diff files / registry / network | UI Compare or `manifest view` |
+
+**Compare tips**
+
+- **Evidence → Evidence** (two Preserves): line-level file diffs from embedded sidecars.
+- **CleanSession → Evidence**: session inventory (what appeared/changed). CleanSession has no embedded file bodies, so there is no baseline text diff unless you flatten CleanSession offline.
 
 ```powershell
 .\quarantine-vm.ps1 reset -Clean
@@ -260,11 +275,15 @@ Logs (treat as evidence): proxy flows, PCAPs, inbox SHA256 — under
 
 ```powershell
 .\quarantine-vm.ps1 reset -Clean
+# Optional: .\quarantine-vm.ps1 capture start
 # ... analysis in the guest ...
+.\quarantine-vm.ps1 capture stop   # if you started capture
 .\quarantine-vm.ps1 preserve -SnapshotName "case-42"
 .\quarantine-vm.ps1 reset -Clean
 .\quarantine-vm.ps1 manifest view -FromSnapshot CleanSession -ToSnapshot Evidence-case-42
 ```
+
+UI: **Launch CleanSession → Preserve (start PCAP?) → work → Preserve (stop PCAP?) → Compare Evidence→Evidence**.
 
 ```powershell
 .\quarantine-vm.ps1 snapshots

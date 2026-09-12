@@ -1078,9 +1078,13 @@ Quarantine VM utility (VirtualBox)
 
   baseline   Wipe all snapshots, merge current disk, save fresh disk-only Clean (VM is powered off)
 
-  preserve   Save compromised/session state for analysis (-SnapshotName as label). Live if VM is running.
+  preserve   Save Evidence-* of the current session (-SnapshotName as label). Live if VM is
+             running. CLI stops/attaches an active PCAP; the UI prompts start (if stopped) or
+             stop+attach (if recording). Launch/reset do not auto-start PCAP.
 
-  reset      Restore a snapshot and start it (interactive); -Clean skips picker. Live snapshots resume the logged-in session (no POST).
+  reset      Restore a snapshot and start it (interactive); -Clean skips picker. Live snapshots
+             resume the logged-in session (no POST). Does not start PCAP — use capture start
+             or the Preserve prompt in the UI.
 
   status     Show VM state
 

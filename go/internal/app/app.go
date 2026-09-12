@@ -1075,20 +1075,6 @@ func (a *App) writeCapturePolicy(dest string) {
 	_ = os.WriteFile(filepath.Join(dest, "permissive-policy.json"), append(raw, '\n'), 0o644)
 }
 
-// startCaptureAfterLaunch starts capture when enabled (best-effort; does not fail launch).
-func (a *App) startCaptureAfterLaunch() {
-	if a.Capture == nil || !a.Cfg.Network.Capture.Enabled {
-		return
-	}
-	a.logInfo("Starting packet capture…")
-	path, err := a.Capture.Start()
-	if err != nil {
-		a.logInfo("Packet capture not started: " + err.Error())
-		return
-	}
-	a.logInfo("Packet capture started: " + path)
-}
-
 // clearSysmonAfterLaunch waits for the guest agent, syncs the Windows clock to
 // host UTC, then clears Sysmon Operational. Best-effort: launch still succeeds
 // if the agent is down or Sysmon is missing.
@@ -1129,7 +1115,10 @@ func (a *App) clearSysmonAfterLaunch() {
 }
 
 // PreserveEvidenceWails captures sidecars then saves an Evidence-* snapshot.
-func (a *App) PreserveEvidenceWails(label string) (string, error) {
+// When stopCapture is true and a PCAP session is active, capture is stopped and
+// attached under {Evidence}-network/. Launch no longer starts PCAP; the UI prompts
+// on Preserve whether to start (if stopped) or stop+attach (if recording).
+func (a *App) PreserveEvidenceWails(label string, stopCapture bool) (string, error) {
 	ctx := a.WailsCtx
 	if ctx == nil {
 		ctx = context.Background()
@@ -1146,7 +1135,9 @@ func (a *App) PreserveEvidenceWails(label string) (string, error) {
 		return "", capErr
 	}
 	a.enrichChangedFilesBefore(name)
-	a.stopCaptureAndAttach(name, "preserve")
+	if stopCapture {
+		a.stopCaptureAndAttach(name, "preserve")
+	}
 	a.logInfo(fmt.Sprintf("Taking snapshot %q…", name))
 	if err := a.VM.SaveSnapshot(ctx, name, "Evidence preserve", false, true); err != nil {
 		a.logError(err.Error())
@@ -1191,7 +1182,6 @@ func (a *App) LaunchSnapshotWails(name string, clean bool) (string, error) {
 		return "", err
 	}
 	a.clearSysmonAfterLaunch()
-	a.startCaptureAfterLaunch()
 	launched := name
 	if clean {
 		launched = a.Cfg.CleanSnapshot

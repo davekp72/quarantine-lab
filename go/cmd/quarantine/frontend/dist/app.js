@@ -701,11 +701,45 @@ async function preserveEvidence() {
   const api = await backend();
   const msg = $('#snap-action-msg');
   const btn = $('#btn-preserve');
-  setBusy(btn, true, 'Preserving…');
-  msg.textContent = 'Preserving evidence… (stops capture, then snapshot)';
+
+  let stopCapture = false;
+  let startAfter = false;
   try {
-    const name = await api.PreserveEvidenceWails('');
-    msg.textContent = `Evidence: ${name}`;
+    if (api?.CaptureStatusWails) {
+      const st = await api.CaptureStatusWails();
+      if (st && st.enabled !== false) {
+        if (st.running) {
+          stopCapture = confirm(
+            'PCAP is recording.\n\nStop capture and attach it to this Evidence snapshot?\n\nChoose Cancel to Preserve without stopping PCAP.',
+          );
+        } else {
+          startAfter = confirm(
+            'PCAP is not running.\n\nStart capture after this Preserve (for the next work phase)?\n\nChoose Cancel to Preserve without starting PCAP.',
+          );
+        }
+      }
+    }
+  } catch (_) {
+    /* status probe is best-effort */
+  }
+
+  setBusy(btn, true, 'Preserving…');
+  msg.textContent = stopCapture
+    ? 'Preserving evidence… (stop PCAP, then snapshot)'
+    : 'Preserving evidence… (sidecars + snapshot)';
+  try {
+    const name = await api.PreserveEvidenceWails('', stopCapture);
+    if (startAfter && api?.StartCaptureWails) {
+      msg.textContent = `Evidence: ${name} — starting PCAP…`;
+      try {
+        await api.StartCaptureWails();
+        msg.textContent = `Evidence: ${name} — PCAP started`;
+      } catch (capErr) {
+        msg.textContent = `Evidence: ${name} — PCAP start failed: ${capErr}`;
+      }
+    } else {
+      msg.textContent = `Evidence: ${name}`;
+    }
     await loadSnapshots($('#from-snap').value, name);
     await refreshStatus();
     await refreshCaptureStatus();

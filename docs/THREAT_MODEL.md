@@ -15,10 +15,10 @@ operator’s daily-driver OS. It does **not** provide high-assurance isolation
 
 ## Intended use
 
-1. Restore a disposable **CleanSession** (logged-in analysis desktop).
-2. Introduce a sample via the agent inbox (`C:\Users\Public\Quarantine\inbox`) or, with `-GuestAdditions`, the read-only `\\VBOXSVR` share / host-to-guest paste.
+1. Restore a disposable **CleanSession** (logged-in analysis desktop). Launch does not auto-start PCAP.
+2. Optionally **Preserve** once (UI can prompt to start PCAP), then introduce a sample via the agent inbox (`C:\Users\Public\Quarantine\inbox`) or, with `-GuestAdditions`, the read-only `\\VBOXSVR` share / host-to-guest paste.
 3. Execute or open it in the guest as a **non-admin payload user**.
-4. Capture evidence (snapshot, Sysmon/USN/registry, PCAP/proxy).
+4. **Preserve** evidence (Sysmon/USN/registry sidecars + snapshot; UI prompts to stop/attach PCAP when recording). Compare Evidence→Evidence for file edit diffs.
 5. Restore CleanSession (or the disk **Clean** baseline after setup changes).
 
 Default network path is the Linux **gateway** VM on an internal network.

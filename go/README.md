@@ -25,6 +25,10 @@ From the repo root (uses `config/quarantine-vm.json`):
 ```powershell
 .\quarantine-vm.ps1 status
 .\quarantine-vm.ps1 snapshot -SnapshotName CleanSession -Force
+# Launch / reset -Clean does not start PCAP — start explicitly or via UI Preserve prompt
+.\quarantine-vm.ps1 capture start
+# ... work ...
+.\quarantine-vm.ps1 capture stop
 .\quarantine-vm.ps1 preserve -SnapshotName hostfile
 .\quarantine-vm.ps1 reset -Clean
 .\quarantine-vm.ps1 manifest diff -FromSnapshot CleanSession -ToSnapshot hostfile -Refresh
