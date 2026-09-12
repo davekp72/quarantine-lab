@@ -3,7 +3,7 @@ module github.com/quarantine-lab/quarantine
 go 1.25.0
 
 require (
-	github.com/andybalholm/brotli v1.1.0
+	github.com/andybalholm/brotli v1.2.3
 	github.com/diskfs/go-diskfs v1.9.4
 	github.com/klauspost/compress v1.20.0
 	github.com/pierrec/lz4/v4 v4.1.29
