@@ -149,37 +149,44 @@ func (c *Client) PutFile(ctx context.Context, guestPath, hostPath string) error 
 }
 
 func (c *Client) GetFile(ctx context.Context, guestPath, dest string) error {
-	u := c.BaseURL + "/v1/files?path=" + url.QueryEscape(guestPath)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	data, err := c.GetFileBytes(ctx, guestPath, types.FileMaxBytes)
 	if err != nil {
 		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+c.Token)
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
-		return fmt.Errorf("agent get file: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return decodeStatus(resp)
 	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return err
 	}
-	f, err := os.Create(dest)
+	return os.WriteFile(dest, data, 0o644)
+}
+
+// GetFileBytes downloads an allowlisted guest file into memory (capped).
+func (c *Client) GetFileBytes(ctx context.Context, guestPath string, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 || maxBytes > types.FileMaxBytes {
+		maxBytes = types.FileMaxBytes
+	}
+	u := c.BaseURL + "/v1/files?path=" + url.QueryEscape(guestPath)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer f.Close()
-	limited := io.LimitReader(resp.Body, types.FileMaxBytes+1)
-	n, err := io.Copy(f, limited)
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return fmt.Errorf("write %s: %w", dest, err)
+		return nil, fmt.Errorf("agent get file: %w", err)
 	}
-	if n > types.FileMaxBytes {
-		return fmt.Errorf("file exceeds 64 MiB")
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return nil, decodeStatus(resp)
 	}
-	return nil
+	limited := io.LimitReader(resp.Body, maxBytes+1)
+	data, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, fmt.Errorf("read agent file: %w", err)
+	}
+	if int64(len(data)) > maxBytes {
+		return data[:maxBytes], nil
+	}
+	return data, nil
 }
 
 func (c *Client) DeleteFile(ctx context.Context, guestPath string) error {

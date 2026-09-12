@@ -433,8 +433,16 @@ func (s *Service) DeployAgent(token string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := s.Guest.CopyToDest(hostScript, guestpaths.InstallScript()); err != nil {
-		return "", fmt.Errorf("copy install script to guest: %w", err)
+	// Prefer agent-staging: Public\Install-QuarantineAgent.ps1 is often ACL/read-only
+	// after FirstLogon, and the running agent cannot overwrite it.
+	if err := s.Guest.CopyToDest(hostScript, guestpaths.StagingInstallScript()); err != nil {
+		return "", fmt.Errorf("copy install script to guest staging: %w", err)
+	}
+	hostUpgrade := filepath.Join(s.ProjectRoot, "manifest", "Upgrade-QuarantineAgent.ps1")
+	if _, err := os.Stat(hostUpgrade); err == nil {
+		if err := s.Guest.CopyToDest(hostUpgrade, guestpaths.StagingUpgradeScript()); err != nil {
+			return "", fmt.Errorf("copy upgrade script to guest staging: %w", err)
+		}
 	}
 
 	if err := s.stageGuestToken(token, creds); err != nil {
@@ -461,8 +469,8 @@ func (s *Service) DeployAgent(token string) (string, error) {
 		return "", err
 	}
 	defer os.Remove(tmpCfg)
-	if err := s.Guest.CopyToDest(tmpCfg, guestpaths.InstallConfig()); err != nil {
-		return "", fmt.Errorf("copy agent install config to guest: %w", err)
+	if err := s.Guest.CopyToDest(tmpCfg, guestpaths.StagingInstallConfig()); err != nil {
+		return "", fmt.Errorf("copy agent install config to guest staging: %w", err)
 	}
 
 	return token, nil
@@ -549,7 +557,61 @@ func isGuestFileSharingViolation(err error) bool {
 
 // AgentInstallInstructions returns the elevated guest install command after DeployAgent.
 func AgentInstallInstructions() string {
-	return "Set-ExecutionPolicy -Scope Process Bypass; & '" + guestpaths.InstallScript() + "'"
+	return "Set-ExecutionPolicy -Scope Process Bypass; & '" + guestpaths.StagingInstallScript() + "'"
+}
+
+// RunAgentInstallScheduledTask asks the live agent to start a detached delayed upgrade.
+// Uses Start-Process + timeout so this HTTP call returns before the service is stopped.
+func (s *Service) RunAgentInstallScheduledTask(ctx context.Context) error {
+	if s == nil || s.Cfg == nil || !s.Cfg.Agent.Enabled {
+		return fmt.Errorf("agent is not enabled")
+	}
+	script := guestpaths.StagingUpgradeScript()
+	// Prefer the soft upgrade script; fall back to full installer if missing.
+	ps := fmt.Sprintf(`$ErrorActionPreference='Stop'
+$upgrade='%s'
+$full='%s'
+$target=$upgrade
+if (-not (Test-Path -LiteralPath $target)) { $target=$full }
+if (-not (Test-Path -LiteralPath $target)) { throw "no upgrade/install script in staging" }
+$cmd = 'timeout /t 15 /nobreak >nul & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $target + '"'
+Start-Process -FilePath 'C:\Windows\System32\cmd.exe' -ArgumentList '/c', $cmd -WindowStyle Hidden | Out-Null
+'detached'
+`, script, guestpaths.StagingInstallScript())
+	out, err := s.Guest.Run(guest.UserSystem, `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, []string{"-NoProfile", "-NonInteractive", "-Command", ps}, 45*time.Second)
+	if err != nil {
+		return fmt.Errorf("start detached agent upgrade: %w (%s)", err, strings.TrimSpace(out))
+	}
+	return nil
+}
+
+// WaitForAgentVersion polls /health until Version matches want (or any version if want is empty).
+func (s *Service) WaitForAgentVersion(ctx context.Context, want string) (*types.HealthResponse, error) {
+	want = strings.TrimSpace(want)
+	var last error
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		poll, cancel := context.WithTimeout(ctx, 8*time.Second)
+		h, err := s.AgentHealthQuick(poll)
+		cancel()
+		if err == nil && h != nil {
+			if want == "" || strings.TrimSpace(h.Version) == want {
+				return h, nil
+			}
+			last = fmt.Errorf("agent still v%s (want v%s)", h.Version, want)
+		} else {
+			last = err
+		}
+		select {
+		case <-ctx.Done():
+			if last == nil {
+				last = ctx.Err()
+			}
+			return nil, fmt.Errorf("wait for agent v%s: %w", want, last)
+		case <-ticker.C:
+		}
+	}
 }
 
 // AgentHealth queries the guest agent /health endpoint.
@@ -578,6 +640,19 @@ func (s *Service) AgentHealthQuick(ctx context.Context) (*types.HealthResponse, 
 		return nil, err
 	}
 	return client.Health(ctx)
+}
+
+// ReadGuestFileBytes fetches an allowlisted path from the live guest via the agent.
+// Used as a fast preview fallback when the changed-files sidecar has metadata only.
+func (s *Service) ReadGuestFileBytes(ctx context.Context, guestPath string, maxBytes int64) ([]byte, error) {
+	if s == nil || s.Cfg == nil || !s.Cfg.Agent.Enabled {
+		return nil, fmt.Errorf("agent is not enabled")
+	}
+	client, err := s.agentClient()
+	if err != nil {
+		return nil, err
+	}
+	return client.GetFileBytes(ctx, guestPath, maxBytes)
 }
 
 // WaitForAgent polls /health until success or ctx is done.

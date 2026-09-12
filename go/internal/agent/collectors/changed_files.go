@@ -156,14 +156,17 @@ func ChangedFiles(usnRaw json.RawMessage, sysmonRaw json.RawMessage, hashMaxMB, 
 				entry["h"] = h
 				hashed++
 			}
-			if info.Size() <= contentMax && FilePriority(item.path) <= 1 {
-				if c := fileContentPayload(item.path, contentMax); c != nil {
-					if v, ok := c["c"]; ok {
-						entry["c"] = v
-					}
-					if v, ok := c["d"]; ok {
-						entry["d"] = v
-					}
+		}
+		// Embed small bodies for priority ≤2 (System32 / Program Files / Desktop /
+		// Downloads / Documents / signal exts). Priority-2 user files used to be
+		// metadata-only, so the UI fell through to a slow VDI flatten for every click.
+		if info.Size() <= contentMax && FilePriority(item.path) <= 2 {
+			if c := fileContentPayload(item.path, contentMax); c != nil {
+				if v, ok := c["c"]; ok {
+					entry["c"] = v
+				}
+				if v, ok := c["d"]; ok {
+					entry["d"] = v
 				}
 			}
 		} else if info.Size() > hashMax {

@@ -265,7 +265,7 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "file exceeds 64 MiB", http.StatusRequestEntityTooLarge)
 			return
 		}
-		if err := os.WriteFile(path, data, 0o644); err != nil {
+		if err := writeGuestFile(path, data); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -335,6 +335,29 @@ func filepathDir(p string) string {
 		return p
 	}
 	return p[:i]
+}
+
+// writeGuestFile replaces path, clearing the read-only attribute when present.
+// FirstLogon-staged scripts under Public\Quarantine are often read-only.
+func writeGuestFile(path string, data []byte) error {
+	if st, err := os.Stat(path); err == nil {
+		if st.Mode()&0o222 == 0 {
+			_ = os.Chmod(path, st.Mode()|0o644)
+		}
+		_ = os.Remove(path)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		tmp := path + ".qlab-new"
+		_ = os.Remove(tmp)
+		if werr := os.WriteFile(tmp, data, 0o644); werr != nil {
+			return err
+		}
+		if rerr := os.Rename(tmp, path); rerr != nil {
+			_ = os.Remove(tmp)
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {

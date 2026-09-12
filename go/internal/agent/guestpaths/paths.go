@@ -20,6 +20,9 @@ func ConfigPath() string           { return DataDir + `\agent.json` }
 func LogPath() string              { return DataDir + `\agent.log` }
 func StagingDir() string           { return PublicDir + `\agent-staging` }
 func StagingTokenPath() string     { return StagingDir() + `\agent-token.txt` }
+func StagingInstallScript() string { return StagingDir() + `\Install-QuarantineAgent.ps1` }
+func StagingUpgradeScript() string { return StagingDir() + `\Upgrade-QuarantineAgent.ps1` }
+func StagingInstallConfig() string { return StagingDir() + `\agent-install.json` }
 func SyncExportPath() string       { return PublicDir + `\agent-token-sync.txt` }
 func GuestControlUserFile() string { return DataDir + `\guestcontrol.user` }
 func HiveRoot() string             { return DataDir + `\hives` }

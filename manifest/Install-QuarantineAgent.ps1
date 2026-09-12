@@ -9,7 +9,7 @@
   Run inside the guest VM in an elevated PowerShell window:
 
     Set-ExecutionPolicy -Scope Process Bypass
-    & 'C:\Users\Public\Quarantine\Install-QuarantineAgent.ps1'
+    & 'C:\Users\Public\Quarantine\agent-staging\Install-QuarantineAgent.ps1'
 
   Copies the staged binary into Program Files, stores the token and config under
   ProgramData with a SYSTEM + Administrators DACL, and removes leftover Public secrets.
@@ -197,6 +197,7 @@ Protect-QuarantineAcl -Path $InstallDir
 Protect-QuarantineAcl -Path $DataDir
 
 $config = Read-InstallConfig -Paths @(
+    'C:\Users\Public\Quarantine\agent-staging\agent-install.json',
     'C:\Users\Public\Quarantine\agent-install.json',
     'C:\Users\Public\Quarantine\agent\agent-install.json',
     (Join-Path $DataDir 'agent-install.json')

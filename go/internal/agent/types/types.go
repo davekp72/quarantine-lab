@@ -2,7 +2,7 @@ package types
 
 import "encoding/json"
 
-const Version = "1.0.16"
+const Version = "1.0.17"
 
 // FileMaxBytes is the /v1/files PUT/GET cap (64 MiB).
 const FileMaxBytes = 64 << 20

@@ -280,16 +280,21 @@ func (a *App) filePreviewMaxBytes() int64 {
 // ReadSnapshotFile reads file content from sidecar capture or snapshot disk.
 func (a *App) ReadSnapshotFile(snapshotName, guestPath string) (map[string]any, error) {
 	max := a.filePreviewMaxBytes()
+	var expectSize int64
 	if a.Evidence != nil {
 		if entry, ok := a.Evidence.FileSidecarEntry(snapshotName, guestPath); ok {
 			if data, ok := evidence.FileSidecarContent(entry); ok {
 				return filePreviewResult(guestPath, data, evidence.FileSidecarSize(entry), "sidecar", max), nil
 			}
-			if size := evidence.FileSidecarSize(entry); size > max {
-				return tooLargeFilePreview(guestPath, size, max), nil
+			expectSize = evidence.FileSidecarSize(entry)
+			if expectSize > max {
+				return tooLargeFilePreview(guestPath, expectSize, max), nil
 			}
-			// Metadata-only sidecar rows (e.g. Downloads priority) used to short-circuit
-			// here as "events_only" and never tried the evidence snapshot disk.
+			// Metadata-only sidecar (common for older Desktop/Downloads captures):
+			// try the live agent before an expensive VDI flatten.
+			if data, ok := a.tryAgentFilePreview(guestPath, expectSize, max); ok {
+				return filePreviewResult(guestPath, data, expectSize, "agent", max), nil
+			}
 		}
 	}
 	if a.Disk == nil {
@@ -314,6 +319,28 @@ func (a *App) ReadSnapshotFile(snapshotName, guestPath string) (map[string]any, 
 		full = info.Size
 	}
 	return filePreviewResult(guestPath, data, full, "disk", max), nil
+}
+
+// tryAgentFilePreview reads a small guest file via the agent when the sidecar
+// has size/metadata but no embedded body. Rejects when live size disagrees with
+// the sidecar (guest likely restored to a different snapshot).
+func (a *App) tryAgentFilePreview(guestPath string, expectSize, max int64) ([]byte, bool) {
+	if a == nil || a.Evidence == nil || a.Cfg == nil || !a.Cfg.Agent.Enabled {
+		return nil, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	data, err := a.Evidence.ReadGuestFileBytes(ctx, guestPath, max)
+	if err != nil || len(data) == 0 {
+		return nil, false
+	}
+	if expectSize > 0 && int64(len(data)) != expectSize {
+		// Allow truncation at the preview cap.
+		if !(expectSize > max && int64(len(data)) == max) {
+			return nil, false
+		}
+	}
+	return data, true
 }
 
 func isDiskFileNotFound(err error) bool {
@@ -787,35 +814,42 @@ func (a *App) agentNatHint() string {
 	return "host reaches the agent via the Linux gateway only (127.0.0.1:9443 → gateway NAT → lab LAN)"
 }
 
-// InstallAgentWails deploys agent files to the guest and prints elevated install steps.
+// InstallAgentWails deploys a new agent binary into the guest and upgrades the service.
+// In agent-only mode it stages via HTTP PUT, then registers a delayed SYSTEM task to
+// run Install-QuarantineAgent.ps1 (so the live agent is not killed mid-HTTP request).
 func (a *App) InstallAgentWails() (string, error) {
 	ctx := a.WailsCtx
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	progress := func(msg string) {
+		a.logInfo(msg)
+		fmt.Println(msg)
+	}
 	state, _ := a.VM.VBox.VMState(a.Cfg.VMName)
 	if state != "running" && state != "paused" {
 		return "", fmt.Errorf("VM must be running to install agent (state: %s)", state)
 	}
-	a.logInfo("Ensuring NAT port forward for quarantine-agent…")
+	progress("Ensuring NAT port forward for quarantine-agent…")
 	if err := a.Network.EnsureAgentPortForward(); err != nil {
 		a.logError(err.Error())
 		return "", err
 	}
 	if err := a.Evidence.EnsureHostAgentToken(); err != nil {
-		a.logInfo("Syncing agent token from guest…")
+		progress("Syncing agent token from guest…")
 		if syncErr := a.Evidence.SyncAgentTokenFromGuest(); syncErr != nil {
 			a.logInfo(syncErr.Error())
 		}
 	}
-	a.logInfo(fmt.Sprintf("Deploying quarantine-agent v%s to guest…", agenttypes.Version))
+	progress(fmt.Sprintf("Deploying quarantine-agent v%s to guest…", agenttypes.Version))
 	if _, err := a.Evidence.DeployAgent(""); err != nil {
 		a.logError(err.Error())
 		return "", err
 	}
-	msg := fmt.Sprintf(`Deployed quarantine-agent v%s to guest (host token saved).
 
-Run in elevated guest PowerShell:
+	manual := fmt.Sprintf(`Deployed quarantine-agent v%s to guest (host token saved).
+
+If auto-upgrade did not finish, run in elevated guest PowerShell:
   %s
 
 Then on the host:
@@ -823,10 +857,52 @@ Then on the host:
 If health is 401:
   .\quarantine-vm.ps1 agent sync-token
 `, agenttypes.Version, evidence.AgentInstallInstructions())
-	a.logInfo(msg)
-	if health, err := a.Evidence.AgentHealth(ctx); err == nil {
-		msg += fmt.Sprintf("\n(Current agent v%s reachable — re-run guest script to upgrade service.)", health.Version)
+
+	if a.Cfg.UseGuestAdditions() {
+		progress(manual)
+		return manual, nil
 	}
+
+	progress("Starting detached soft upgrade in 15s (stop → replace binary → start; keeps service registration)…")
+	if err := a.Evidence.RunAgentInstallScheduledTask(ctx); err != nil {
+		a.logWarn(err.Error())
+		progress(manual)
+		return manual + "\n\nAuto-upgrade failed: " + err.Error(), nil
+	}
+
+	// First wait for *any* healthy agent (service may bounce), then require the new version.
+	bounceCtx, bounceCancel := context.WithTimeout(ctx, 90*time.Second)
+	progress("Waiting for agent to come back after upgrade…")
+	hAny, err := a.Evidence.WaitForAgentVersion(bounceCtx, "")
+	bounceCancel()
+	if err != nil {
+		a.logWarn(err.Error())
+		recovery := manual + "\n\nAgent is unreachable after upgrade attempt. Recover in elevated guest PowerShell:\n  " +
+			evidence.AgentInstallInstructions() +
+			"\nOr Launch CleanSession to restore the previous agent, then retry.\n" +
+			"Guest log (if present): C:\\Users\\Public\\Quarantine\\agent-staging\\upgrade.log"
+		progress(recovery)
+		return recovery + "\n\n" + err.Error(), nil
+	}
+	if strings.TrimSpace(hAny.Version) == agenttypes.Version {
+		msg := fmt.Sprintf("Upgraded quarantine-agent to v%s (service running).", hAny.Version)
+		progress(msg)
+		return msg, nil
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	progress(fmt.Sprintf("Agent is up (v%s); waiting for v%s…", hAny.Version, agenttypes.Version))
+	h, err := a.Evidence.WaitForAgentVersion(waitCtx, agenttypes.Version)
+	if err != nil {
+		a.logWarn(err.Error())
+		msg := fmt.Sprintf("Agent reachable at v%s but not v%s yet. Soft upgrade may have failed to replace the binary.\n\n%s",
+			hAny.Version, agenttypes.Version, manual)
+		progress(msg)
+		return msg, nil
+	}
+	msg := fmt.Sprintf("Upgraded quarantine-agent to v%s (service running).", h.Version)
+	progress(msg)
 	return msg, nil
 }
 

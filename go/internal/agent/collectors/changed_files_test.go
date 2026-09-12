@@ -2,6 +2,8 @@ package collectors
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -39,5 +41,43 @@ func TestChangedFilesKeepsSystem32DropsCache(t *testing.T) {
 	}
 	if strings.Contains(s, `HKLM\Software\Run`) {
 		t.Fatalf("registry event must not be a file: %s", s)
+	}
+}
+
+func TestChangedFilesEmbedsDesktopContent(t *testing.T) {
+	// Must not live under %TEMP% — that path is classified as noise.
+	desktop := filepath.Join(`C:\Users\Public`, "Desktop", "QuarantineLabPreviewTest")
+	if err := os.MkdirAll(desktop, 0o755); err != nil {
+		t.Skip("cannot create Public Desktop test dir: ", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(desktop) })
+	marker := filepath.Join(desktop, "marker.txt")
+	body := "QuarantineLabTest marker\n"
+	if err := os.WriteFile(marker, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	usn, _ := json.Marshal(map[string]any{
+		"events": []any{
+			map[string]any{"path": marker, "change": "added", "fileName": "marker.txt"},
+		},
+	})
+	raw, n, err := ChangedFiles(usn, nil, 50, 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("n=%d %s", n, raw)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	files, _ := out["files"].([]any)
+	entry, _ := files[0].(map[string]any)
+	if entry["c"] != "text" {
+		t.Fatalf("expected embedded text content, got %#v", entry)
+	}
+	if entry["d"] != body {
+		t.Fatalf("body=%v", entry["d"])
 	}
 }
