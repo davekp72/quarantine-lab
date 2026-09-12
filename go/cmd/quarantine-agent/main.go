@@ -46,6 +46,7 @@ func runInstall(args []string) {
 	token := fs.String("token", "", "Bearer token (generated if empty)")
 	port := fs.Int("port", 9443, "Listen port")
 	payloadUser := fs.String("payload-user", "analyst", "Payload/test user for HKCU capture")
+	labAdmin := fs.String("lab-admin", "", "Lab admin account name for /v1/exec user=guest")
 	sysmonLog := fs.String("sysmon-log", `Microsoft-Windows-Sysmon/Operational`, "Sysmon event log name")
 	_ = fs.Parse(args)
 
@@ -57,6 +58,7 @@ func runInstall(args []string) {
 		Port:        *port,
 		TokenFile:   agentsvc.DefaultTokenPath(),
 		PayloadUser: *payloadUser,
+		LabAdmin:    *labAdmin,
 		SysmonLog:   *sysmonLog,
 	}
 	if err := agentsvc.Install("", tok, cfg); err != nil {

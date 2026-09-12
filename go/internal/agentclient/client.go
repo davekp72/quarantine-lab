@@ -120,6 +120,103 @@ func (c *Client) DeleteHiveDir(ctx context.Context, guestDir string) error {
 	return nil
 }
 
+func (c *Client) PutFile(ctx context.Context, guestPath, hostPath string) error {
+	f, err := os.Open(hostPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if st.Size() > types.FileMaxBytes {
+		return fmt.Errorf("file exceeds 64 MiB")
+	}
+	u := c.BaseURL + "/v1/files?path=" + url.QueryEscape(guestPath)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, u, f)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	req.ContentLength = st.Size()
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return fmt.Errorf("agent put file: %w", err)
+	}
+	defer resp.Body.Close()
+	return decodeStatus(resp)
+}
+
+func (c *Client) GetFile(ctx context.Context, guestPath, dest string) error {
+	u := c.BaseURL + "/v1/files?path=" + url.QueryEscape(guestPath)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return fmt.Errorf("agent get file: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return decodeStatus(resp)
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return err
+	}
+	f, err := os.Create(dest)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	limited := io.LimitReader(resp.Body, types.FileMaxBytes+1)
+	n, err := io.Copy(f, limited)
+	if err != nil {
+		return fmt.Errorf("write %s: %w", dest, err)
+	}
+	if n > types.FileMaxBytes {
+		return fmt.Errorf("file exceeds 64 MiB")
+	}
+	return nil
+}
+
+func (c *Client) DeleteFile(ctx context.Context, guestPath string) error {
+	u := c.BaseURL + "/v1/files?path=" + url.QueryEscape(guestPath)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, u, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return fmt.Errorf("agent delete file: %w", err)
+	}
+	defer resp.Body.Close()
+	return decodeStatus(resp)
+}
+
+func (c *Client) Exec(ctx context.Context, reqBody types.ExecRequest) (*types.ExecResponse, error) {
+	var out types.ExecResponse
+	if err := c.post(ctx, "/v1/exec", reqBody, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func decodeStatus(resp *http.Response) error {
+	if resp.StatusCode < 400 {
+		return nil
+	}
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	msg := strings.TrimSpace(string(data))
+	if msg == "" {
+		msg = resp.Status
+	}
+	return fmt.Errorf("agent HTTP %d: %s", resp.StatusCode, msg)
+}
+
 func (c *Client) Baseline(ctx context.Context) (json.RawMessage, error) {
 	var out struct {
 		Baseline json.RawMessage `json:"baseline"`

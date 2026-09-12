@@ -16,7 +16,7 @@ operator’s daily-driver OS. It does **not** provide high-assurance isolation
 ## Intended use
 
 1. Restore a disposable **CleanSession** (logged-in analysis desktop).
-2. Introduce a sample via the read-only inbox share or host-to-guest paste.
+2. Introduce a sample via the agent inbox (`C:\Users\Public\Quarantine\inbox`) or, with `-GuestAdditions`, the read-only `\\VBOXSVR` share / host-to-guest paste.
 3. Execute or open it in the guest as a **non-admin payload user**.
 4. Capture evidence (snapshot, Sysmon/USN/registry, PCAP/proxy).
 5. Restore CleanSession (or the disk **Clean** baseline after setup changes).
@@ -27,9 +27,10 @@ Default network path is the Linux **gateway** VM on an internal network.
 
 ```
  Operator / host
-        |  VirtualBox + Guest Additions  <-- primary escape boundary
+        |  VirtualBox (primary escape boundary)
+        |  Agent HTTP 127.0.0.1:9443 → gateway NAT → guest:9443
         v
- Windows analysis guest (payload user + lab admin)
+ Windows analysis guest (payload user + lab admin + agent service)
         |  intnet 10.66.0.0/24
         v
  Linux gateway (FakeNet or permissive MITM + nftables)
@@ -38,9 +39,10 @@ Default network path is the Linux **gateway** VM on an internal network.
  Internet
 ```
 
-**VirtualBox is the primary escape boundary.** A guest-to-host escape, a
-buggy Guest Additions shared feature, or a hostile USB/clipboard path can
-reach the host regardless of gateway policy.
+**VirtualBox is the primary escape boundary.** A guest-to-host escape can
+reach the host regardless of gateway policy. Guest Additions (HGCM, shared
+folders, clipboard) are **not** installed by default; they are an optional
+`-GuestAdditions` fallback.
 
 ## Network workflows (do not mix them up)
 
@@ -58,14 +60,18 @@ before Launch if you care about source IP.
 
 These remain even when the lab is configured as intended:
 
-- **Hypervisor / Guest Additions** — 3D, shared folders, drag-drop, and
-  additions bugs. This project disables USB, drag-drop, audio, and persistent
-  shared folders by default; clipboard is host-to-guest only.
-- **Clipboard** — host-to-guest paste can carry hostile content onto the
-  guest; a guest-to-host escape or mis-set bidirectional clipboard can go
-  the other way. Do not copy secrets out of the guest.
-- **Inbox share** — temporary read-only `quarantine-in` is the supported
-  sample path. Treat that host directory as semi-trusted after use.
+- **Hypervisor** — USB, drag-drop, audio, and persistent shared folders are
+  disabled by default; clipboard is disabled unless `-GuestAdditions` is used.
+- **Guest agent** — SYSTEM HTTP on TCP 9443, reachable from the host only via
+  the gateway NAT bind on `127.0.0.1`. File/exec APIs are allowlisted. Token
+  theft at SYSTEM still means fake evidence.
+- **Guest Additions (opt-in)** — 3D, shared folders, drag-drop, clipboard, and
+  additions bugs. Only in play when you pass `-GuestAdditions`.
+- **Inbox** — default is an agent copy into `C:\Users\Public\Quarantine\inbox`.
+  Treat the host inbox directory as semi-trusted after use. `\\VBOXSVR` is the
+  `-GuestAdditions` path.
+- **Clipboard** — disabled by default. Host-to-guest paste (Additions) can
+  carry hostile content onto the guest; do not copy secrets out of the guest.
 - **Gateway** — nftables bugs, FakeNet patches, or a permissive allowlist
   that is too wide. Analysis daemons run as dedicated users; fail-closed
   emergency nftables drop LAN→WAN if the normal ruleset will not load.

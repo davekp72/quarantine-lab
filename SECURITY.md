@@ -20,9 +20,9 @@ Read the threat model: [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).
 
 ## Residual attack surfaces
 
-- VirtualBox (and Guest Additions)
-- Host-to-guest clipboard (default `hosttoguest`)
-- Temporary read-only inbox share (`\\VBOXSVR\quarantine-in`)
+- VirtualBox
+- Guest agent listener (TCP 9443 from the gateway IP; allowlisted file/exec)
+- Guest Additions, host-to-guest clipboard, and `\\VBOXSVR` **when `-GuestAdditions` is used**
 - Permissive-mode WAN allowlist and DNS policy
 - Operator error (wrong snapshot, personal accounts, VPN off)
 

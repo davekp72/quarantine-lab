@@ -14,7 +14,7 @@ import (
 )
 
 // ApplyStealth applies host-side VirtualBox fingerprint softening while the VM is powered off.
-// Does not remove Guest Additions or change the graphics controller (required for lab tooling).
+// Does not change the graphics controller (VBoxSVGA). Guest Additions are optional.
 func (s *Service) ApplyStealth() (string, error) {
 	st := s.Cfg.Isolation.Stealth
 	if st.Enabled != nil && !*st.Enabled {
@@ -33,11 +33,18 @@ func (s *Service) ApplyStealth() (string, error) {
 	}
 
 	var notes []string
+	fw, _ := firmwareType(s.VBox, s.Cfg.VMName)
 	cpu := strings.TrimSpace(st.CPUProfile)
 	if cpu == "" {
 		cpu = "Intel Core i7-6700K"
 	}
-	if !strings.EqualFold(cpu, "host") && !strings.EqualFold(cpu, "none") {
+	// EFI + a named VBox CPU profile (Skylake etc.) triple-faults Win11 Setup/boot.
+	if strings.EqualFold(fw, "efi") {
+		if err := s.VBox.ModifyVM(s.Cfg.VMName, "cpu-profile", "host"); err != nil {
+			return "", fmt.Errorf("cpu-profile host (EFI): %w", err)
+		}
+		notes = append(notes, "cpu-profile=host (EFI)")
+	} else if !strings.EqualFold(cpu, "host") && !strings.EqualFold(cpu, "none") {
 		if err := s.VBox.ModifyVM(s.Cfg.VMName, "cpu-profile", cpu); err != nil {
 			return "", fmt.Errorf("cpu-profile: %w", err)
 		}
@@ -67,7 +74,6 @@ func (s *Service) ApplyStealth() (string, error) {
 		}
 	}
 
-	fw, _ := firmwareType(s.VBox, s.Cfg.VMName)
 	if strings.EqualFold(fw, "efi") {
 		// Any pcbios/0/Config/* on EFI replaces CFGM and drops BootDevice0
 		// (VERR_CFGM_VALUE_NOT_FOUND on start). Clear leftovers; keep ACPI only.
@@ -93,7 +99,7 @@ func (s *Service) ApplyStealth() (string, error) {
 	_ = s.VBox.SetExtraData(s.Cfg.VMName, "VBoxInternal/Devices/acpi/0/Config/AcpiCreatorId", "DELL")
 	_ = s.VBox.SetExtraData(s.Cfg.VMName, "VBoxInternal/Devices/acpi/0/Config/AcpiCreatorRev", "0x00000001")
 
-	msg := "Stealth applied (Guest Additions / VBoxSVGA unchanged): " + strings.Join(notes, "; ")
+	msg := "Stealth applied (VBoxSVGA unchanged): " + strings.Join(notes, "; ")
 	return msg, nil
 }
 

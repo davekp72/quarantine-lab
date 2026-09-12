@@ -149,6 +149,11 @@ func PayloadSessionActive(payloadUser string) (bool, string) {
 	return true, user
 }
 
+// InteractiveUserToken returns a duplicated impersonation token for a logged-on user.
+func InteractiveUserToken(username string) (windows.Token, string, string, error) {
+	return userSessionToken(username)
+}
+
 func userSessionToken(username string) (windows.Token, string, string, error) {
 	sessions, err := enumerateSessions()
 	if err != nil {

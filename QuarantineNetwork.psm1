@@ -835,30 +835,48 @@ function Enable-QuarantineGatewayNetwork {
         }
     }
 
-    $powerLine = & $vbox showvminfo $vmName --machinereadable 2>&1 |
-        Where-Object { "$_".Trim() -match '^VMState=' } |
-        Select-Object -First 1
-    $powerState = ("$powerLine".Trim() -replace '^VMState="([^"]+)".*', '$1').ToLowerInvariant()
-    if ($powerState -eq 'saved') {
-        & $vbox discardstate $vmName 2>&1 | Out-Null
-        Start-Sleep -Seconds 1
-    } elseif ($powerState -in @('running', 'paused', 'starting')) {
-        Write-Host 'Stopping lab VM before attaching to gateway intnet...'
-        & $vbox controlvm $vmName poweroff 2>&1 | Out-Null
-        Start-Sleep -Seconds 2
+    $infoLines = & $vbox showvminfo $vmName --machinereadable 2>&1
+    $fields = @{}
+    foreach ($line in $infoLines) {
+        $trimmed = "$line".Trim()
+        if ($trimmed -match '^(?<k>[^=]+)="(?<v>[^"]*)"$') {
+            $fields[$Matches.k] = $Matches.v
+        } elseif ($trimmed -match '^(?<k>[^=]+)=(?<v>.*)$') {
+            $fields[$Matches.k] = $Matches.v.Trim()
+        }
     }
+    $powerState = ("$($fields['VMState'])").ToLowerInvariant()
+    $nic1 = "$($fields['nic1'])".ToLowerInvariant()
+    $intnet1 = [string]$fields['intnet1']
+    $nic2 = "$($fields['nic2'])".ToLowerInvariant()
+    $alreadyOnLan = ($nic1 -eq 'intnet' -and $intnet1 -eq $intnet -and ($nic2 -eq 'none' -or [string]::IsNullOrWhiteSpace($nic2)))
+    $wasRunning = $powerState -in @('running', 'paused', 'starting')
 
-    $modOut = & $vbox modifyvm $vmName --nic1 intnet --intnet1 $intnet --cableconnected1 on 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        $modText = if ($modOut) { ($modOut | Out-String).Trim() } else { 'Unknown VirtualBox error.' }
-        throw "Failed to set lab VM NIC to intnet '$intnet'.`n$modText"
+    if ($alreadyOnLan) {
+        Write-Host "Lab VM already on intnet '$intnet' — leaving power state ($powerState)."
+    } else {
+        if ($wasRunning -and $nic1 -eq 'intnet' -and $intnet1 -eq $intnet) {
+            Write-Host '  Disconnecting leftover NIC2+ without powering off...'
+            for ($slot = 2; $slot -le 4; $slot++) {
+                $null = & $vbox controlvm $vmName "setlinkstate$slot" off 2>&1
+            }
+        } else {
+            if ($wasRunning) {
+                Write-Warning "Lab VM is $powerState with nic1=$nic1 — not powering it off to attach intnet. Stop the VM first if you really need a NIC change."
+            } else {
+                if ($powerState -eq 'saved') {
+                    & $vbox discardstate $vmName 2>&1 | Out-Null
+                    Start-Sleep -Seconds 1
+                }
+                $modOut = & $vbox modifyvm $vmName --nic1 intnet --intnet1 $intnet --cableconnected1 on --nic2 none --nic3 none --nic4 none 2>&1
+                if ($LASTEXITCODE -ne 0) {
+                    $modText = if ($modOut) { ($modOut | Out-String).Trim() } else { 'Unknown VirtualBox error.' }
+                    throw "Failed to set lab VM NIC to intnet '$intnet'.`n$modText"
+                }
+                Write-Host "  Lab NIC2+ disabled (gateway-only path)."
+            }
+        }
     }
-
-    # Remove any leftover NAT/host-only NIC that would bypass the gateway.
-    for ($slot = 2; $slot -le 4; $slot++) {
-        $null = & $vbox modifyvm $vmName "--nic$slot" none 2>&1
-    }
-    Write-Host "  Lab NIC2+ disabled (gateway-only path)."
 
     # Persist guest addressing hints in config JSON
     if ($ConfigPath -and (Test-Path -LiteralPath $ConfigPath)) {

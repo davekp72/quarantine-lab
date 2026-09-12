@@ -14,6 +14,7 @@ import (
 	"github.com/quarantine-lab/quarantine/internal/app"
 	"github.com/quarantine-lab/quarantine/internal/config"
 	"github.com/quarantine-lab/quarantine/internal/gateway"
+	guestpkg "github.com/quarantine-lab/quarantine/internal/guest"
 	"github.com/spf13/cobra"
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -48,6 +49,7 @@ func main() {
 		Short: "Quarantine lab VM and evidence manager",
 	}
 	root.PersistentFlags().StringVar(&cfgPath, "config", cfgPath, "Path to quarantine-vm.json")
+	root.PersistentFlags().BoolVar(&config.GuestAdditionsCLI, "guest-additions", false, "Use VirtualBox Guest Additions (guestcontrol, clipboard, VBOXSVR) instead of the agent")
 
 	root.AddCommand(uiCmd(&cfgPath))
 	root.AddCommand(statusCmd(&cfgPath))
@@ -69,6 +71,7 @@ func main() {
 	root.AddCommand(setupCmd(&cfgPath))
 	root.AddCommand(clipboardCmd(&cfgPath))
 	root.AddCommand(guestCmd(&cfgPath))
+	root.AddCommand(payloadCmd(&cfgPath))
 	root.AddCommand(agentCmd(&cfgPath))
 	root.AddCommand(stealthCmd(&cfgPath))
 
@@ -221,13 +224,17 @@ func resetCmd(cfgPath *string) *cobra.Command {
 	var clean bool
 	c := &cobra.Command{
 		Use:   "reset",
-		Short: "Restore snapshot",
+		Short: "Restore snapshot (clears guest Sysmon via agent, starts capture)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			a, err := app.New(*cfgPath)
 			if err != nil {
 				return err
 			}
-			return a.VM.Launch(context.Background(), snap, clean)
+			msg, err := a.LaunchSnapshotWails(snap, clean)
+			if msg != "" {
+				fmt.Println(msg)
+			}
+			return err
 		},
 	}
 	c.Flags().StringVar(&snap, "snapshot", "", "Snapshot name")
@@ -622,14 +629,18 @@ func parseAgeDuration(s string) (time.Duration, error) {
 }
 
 func inboxCmd(cfgPath *string) *cobra.Command {
-	cmd := &cobra.Command{Use: "inbox", Short: "Inbox shared folder"}
+	cmd := &cobra.Command{Use: "inbox", Short: "Deliver samples (agent copy, or VBOXSVR with --guest-additions)"}
 	cmd.AddCommand(&cobra.Command{
 		Use: "open", RunE: func(cmd *cobra.Command, args []string) error {
 			a, err := app.New(*cfgPath)
 			if err != nil {
 				return err
 			}
-			return a.Inbox.Open()
+			if err := a.Inbox.Open(); err != nil {
+				return err
+			}
+			fmt.Println(a.Inbox.Status())
+			return nil
 		},
 	})
 	cmd.AddCommand(&cobra.Command{
@@ -638,7 +649,11 @@ func inboxCmd(cfgPath *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return a.Inbox.Close()
+			if err := a.Inbox.Close(); err != nil {
+				return err
+			}
+			fmt.Println(a.Inbox.Status())
+			return nil
 		},
 	})
 	return cmd
@@ -729,7 +744,7 @@ func clipboardCmd(cfgPath *string) *cobra.Command {
 func stealthCmd(cfgPath *string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "stealth",
-		Short: "Soften VirtualBox guest fingerprints (DMI/MAC/CPU); keep Guest Additions",
+		Short: "Soften VirtualBox guest fingerprints (DMI/MAC/CPU)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			a, err := app.New(*cfgPath)
 			if err != nil {
@@ -745,7 +760,7 @@ func stealthCmd(cfgPath *string) *cobra.Command {
 }
 
 func guestCmd(cfgPath *string) *cobra.Command {
-	cmd := &cobra.Command{Use: "guest", Short: "Guest control (admin lab account)"}
+	cmd := &cobra.Command{Use: "guest", Short: "Guest control (agent by default; --guest-additions for VBox)"}
 	var exe, hostPath string
 	var runArgs []string
 	run := &cobra.Command{
@@ -755,11 +770,13 @@ func guestCmd(cfgPath *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			creds := a.Evidence.Guest.GuestCreds()
 			if exe == "" {
 				exe = a.Cfg.Guest.DefaultExe
 			}
-			out, err := a.VM.VBox.GuestControlRun(a.Cfg.VMName, creds.Username, creds.Password, exe, runArgs, 0)
+			if exe == "" {
+				exe = `C:\Windows\System32\cmd.exe`
+			}
+			out, err := a.Evidence.Guest.Run(guestpkg.UserGuest, exe, runArgs, 0)
 			if out != "" {
 				fmt.Println(out)
 			}
@@ -791,6 +808,25 @@ func guestCmd(cfgPath *string) *cobra.Command {
 	}
 	copyC.Flags().StringVar(&hostPath, "host", "", "Host file to copy")
 	cmd.AddCommand(copyC)
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "test",
+		Short: "Verify agent health (or guestcontrol with --guest-additions)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			a, err := app.New(*cfgPath)
+			if err != nil {
+				return err
+			}
+			if err := a.Network.EnsureAgentPortForward(); err != nil {
+				fmt.Println("agent port-forward:", err)
+			}
+			if err := a.Evidence.Guest.Ready(); err != nil {
+				return err
+			}
+			fmt.Println("ok (" + a.Evidence.Guest.Transport().Name() + ")")
+			return nil
+		},
+	})
 
 	cmd.AddCommand(&cobra.Command{
 		Use:   "provision",
@@ -835,6 +871,93 @@ func guestCmd(cfgPath *string) *cobra.Command {
 			return a.VM.DisableAutoLogon()
 		},
 	})
+	return cmd
+}
+
+func payloadCmd(cfgPath *string) *cobra.Command {
+	cmd := &cobra.Command{Use: "payload", Short: "Run/copy as the payload user (agent session or --guest-additions)"}
+	var exe, hostPath, targetDir string
+	var runArgs []string
+	run := &cobra.Command{
+		Use:   "run",
+		Short: "Run a program as the logged-on payload user",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			a, err := app.New(*cfgPath)
+			if err != nil {
+				return err
+			}
+			if exe == "" {
+				exe = a.Cfg.Payload.DefaultExe
+			}
+			if exe == "" {
+				exe = `C:\Windows\System32\cmd.exe`
+			}
+			if len(runArgs) == 0 && len(args) > 0 {
+				runArgs = args
+			}
+			out, err := a.Evidence.Guest.Run(guestpkg.UserPayload, exe, runArgs, time.Duration(a.Cfg.Payload.TimeoutMs)*time.Millisecond)
+			if out != "" {
+				fmt.Println(out)
+			}
+			return err
+		},
+	}
+	run.Flags().StringVar(&exe, "exe", "", "Guest executable")
+	run.Flags().StringSliceVar(&runArgs, "args", nil, "Guest arguments")
+	cmd.AddCommand(run)
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "ps [command]",
+		Short: "Run PowerShell as the payload user",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			a, err := app.New(*cfgPath)
+			if err != nil {
+				return err
+			}
+			ps := strings.Join(args, " ")
+			out, err := a.Evidence.Guest.Run(
+				guestpkg.UserPayload,
+				`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`,
+				[]string{"-NoProfile", "-NonInteractive", "-Command", ps},
+				time.Duration(a.Cfg.Payload.TimeoutMs)*time.Millisecond,
+			)
+			if out != "" {
+				fmt.Println(out)
+			}
+			return err
+		},
+	})
+
+	copyC := &cobra.Command{
+		Use:   "copy [host-file]",
+		Short: "Copy a host file into the payload copyTargetDir",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			a, err := app.New(*cfgPath)
+			if err != nil {
+				return err
+			}
+			path := hostPath
+			if path == "" && len(args) > 0 {
+				path = args[0]
+			}
+			if path == "" {
+				return fmt.Errorf("usage: quarantine payload copy <host-file>")
+			}
+			dir := targetDir
+			if dir == "" {
+				dir = a.Cfg.Payload.CopyTargetDir
+			}
+			if dir == "" {
+				dir = a.Cfg.Guest.CopyTargetDir
+			}
+			return a.Evidence.Guest.CopyTo(path, dir, a.Evidence.Guest.PayloadCreds())
+		},
+	}
+	copyC.Flags().StringVar(&hostPath, "host", "", "Host file to copy")
+	copyC.Flags().StringVar(&targetDir, "target", "", "Guest directory")
+	cmd.AddCommand(copyC)
 	return cmd
 }
 
@@ -910,5 +1033,32 @@ func agentCmd(cfgPath *string) *cobra.Command {
 			return enc.Encode(h)
 		},
 	})
+	var waitMin int
+	wait := &cobra.Command{
+		Use:   "wait",
+		Short: "Poll agent /health until FirstLogon finishes (default 90 minutes)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			a, err := app.New(*cfgPath)
+			if err != nil {
+				return err
+			}
+			if err := a.Network.EnsureAgentPortForward(); err != nil {
+				fmt.Println("agent port-forward:", err)
+			}
+			if waitMin <= 0 {
+				waitMin = 90
+			}
+			fmt.Printf("Waiting up to %d min for agent health on %s:%d...\n", waitMin, a.Cfg.Agent.Host, a.Cfg.Agent.Port)
+			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(waitMin)*time.Minute)
+			defer cancel()
+			if err := a.Evidence.WaitForAgent(ctx); err != nil {
+				return err
+			}
+			fmt.Println("Agent is ready.")
+			return nil
+		},
+	}
+	wait.Flags().IntVar(&waitMin, "minutes", 90, "Timeout in minutes")
+	cmd.AddCommand(wait)
 	return cmd
 }

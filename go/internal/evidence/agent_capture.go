@@ -15,6 +15,7 @@ import (
 	"github.com/quarantine-lab/quarantine/internal/agent/guestpaths"
 	"github.com/quarantine-lab/quarantine/internal/agent/types"
 	"github.com/quarantine-lab/quarantine/internal/agentclient"
+	"github.com/quarantine-lab/quarantine/internal/config"
 	"github.com/quarantine-lab/quarantine/internal/guest"
 )
 
@@ -38,9 +39,29 @@ func (s *Service) SyncAgentTokenFromGuest() error {
 	if strings.TrimSpace(s.Cfg.Agent.TokenFile) == "" && strings.TrimSpace(s.Cfg.Agent.Token) == "" {
 		return fmt.Errorf("configure agent.tokenFile or agent.token in quarantine-vm.json")
 	}
-	creds := s.Guest.GuestCreds()
 	tmp := filepath.Join(os.TempDir(), "quarantine-agent-token-sync.txt")
 	var errs []string
+	if client, cErr := agentclient.New(s.Cfg); cErr == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+		for _, guestPath := range []string{guestpaths.TokenPath(), guestpaths.StagingTokenPath(), guestpaths.SyncExportPath()} {
+			if err := client.GetFile(ctx, guestPath, tmp); err != nil {
+				errs = append(errs, guestPath+": "+shortGuestErr(err))
+				continue
+			}
+			if err := s.saveSyncedAgentToken(tmp); err != nil {
+				errs = append(errs, guestPath+": "+err.Error())
+				continue
+			}
+			return nil
+		}
+	} else {
+		errs = append(errs, cErr.Error())
+	}
+	if !s.Cfg.UseGuestAdditions() {
+		return fmt.Errorf("sync token via agent failed (%s). %s", strings.Join(errs, "; "), config.AgentUnreachableHint(nil))
+	}
+	creds := s.Guest.GuestCreds()
 	for _, guestPath := range guestpaths.TokenCopyCandidates() {
 		if err := s.copyFromGuest(guestPath, tmp, creds); err != nil {
 			errs = append(errs, guestPath+": "+shortGuestErr(err))
@@ -54,7 +75,7 @@ func (s *Service) SyncAgentTokenFromGuest() error {
 	}
 	if err := s.syncAgentTokenElevated(tmp, creds); err != nil {
 		errs = append(errs, "elevated export: "+shortGuestErr(err))
-		return fmt.Errorf("sync token from guest failed (%s). Guest Additions cannot read the ACL-locked token, and schtasks elevation is denied from an unelevated session.\nIn elevated guest PowerShell, either re-run Install-QuarantineAgent.ps1 or:\n  icacls C:\\ProgramData\\QuarantineLab /grant:r \"${env:USERDOMAIN}\\${env:USERNAME}:(OI)(CI)RX\"\n  icacls C:\\ProgramData\\QuarantineLab\\agent-token.txt /grant:r \"${env:USERDOMAIN}\\${env:USERNAME}:(RX)\"\nThen retry sync-token, or paste the Bearer line:\n  quarantine agent set-token --token <token>", strings.Join(errs, "; "))
+		return fmt.Errorf("sync token from guest failed (%s). Guest Additions cannot read the ACL-locked token, and schtasks elevation is denied from an unelevated session.\nIn elevated guest PowerShell, either re-run Install-QuarantineAgent.ps1 or paste the Bearer line:\n  quarantine agent set-token --token <token>", strings.Join(errs, "; "))
 	}
 	return nil
 }
@@ -99,12 +120,7 @@ func (s *Service) saveSyncedAgentToken(tmp string) error {
 }
 
 func (s *Service) deleteGuestFile(guestPath string, creds guest.Credentials) {
-	_, _ = s.VBox.GuestControlRun(
-		s.Cfg.VMName, creds.Username, creds.Password,
-		`C:\Windows\System32\cmd.exe`,
-		[]string{"/c", "del", "/f", "/q", guestPath},
-		30*time.Second,
-	)
+	_ = s.Guest.Remove(guestPath)
 }
 
 func (s *Service) syncAgentTokenElevated(hostTmp string, creds guest.Credentials) error {
@@ -134,27 +150,18 @@ func (s *Service) syncAgentTokenElevated(hostTmp string, creds guest.Credentials
 	}
 	defer os.Remove(credHost)
 	credGuest := filepath.Join(guestDir, "qv-token-sync-cred.json")
-	if err := s.VBox.GuestControlCopyTo(
-		s.Cfg.VMName, creds.Username, creds.Password,
-		credHost, credGuest, s.captureTimeout(),
-	); err != nil {
+	if err := s.Guest.CopyToDest(credHost, credGuest); err != nil {
 		return fmt.Errorf("copy elevated creds: %w", err)
 	}
 
 	elevGuest := filepath.Join(guestDir, "Invoke-QuarantineGuestElevated.ps1")
 	exportGuest := filepath.Join(guestDir, "Export-QuarantineAgentToken.ps1")
-	out, err := s.VBox.GuestControlRun(
-		s.Cfg.VMName, creds.Username, creds.Password,
-		`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`,
-		[]string{
-			"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", elevGuest,
-			"-ScriptPath", exportGuest,
-			"-OutFile", outGuest,
-			"-CredentialFile", credGuest,
-			"-TimeoutSeconds", "90",
-		},
-		2*time.Minute,
-	)
+	out, err := s.Guest.RunPowerShell(elevGuest, []string{
+		"-ScriptPath", exportGuest,
+		"-OutFile", outGuest,
+		"-CredentialFile", credGuest,
+		"-TimeoutSeconds", "90",
+	}, creds)
 	if err != nil {
 		s.deleteGuestFile(outGuest, creds)
 		s.deleteGuestFile(credGuest, creds)
@@ -376,12 +383,7 @@ func (s *Service) deleteGuestHiveDir(ctx context.Context, client *agentclient.Cl
 			return
 		}
 	}
-	_, _ = s.VBox.GuestControlRun(
-		s.Cfg.VMName, creds.Username, creds.Password,
-		`C:\Windows\System32\cmd.exe`,
-		[]string{"/c", "rmdir", "/s", "/q", guestDir},
-		s.captureTimeout(),
-	)
+	_ = s.Guest.Remove(guestDir)
 }
 
 func prettyJSON(raw json.RawMessage) []byte {
@@ -425,16 +427,13 @@ func (s *Service) DeployAgent(token string) (string, error) {
 		_ = s.Cfg.SaveAgentToken(token)
 	}
 
-	_ = s.VBox.GuestControlMkdir(s.Cfg.VMName, creds.Username, creds.Password, guestDir, s.captureTimeout())
+	_ = s.Guest.Transport().Mkdir(context.Background(), guestDir)
 
 	guestStaging, err := s.copyAgentBinary(hostBin, guestDir, creds)
 	if err != nil {
 		return "", err
 	}
-	if err := s.VBox.GuestControlCopyTo(
-		s.Cfg.VMName, creds.Username, creds.Password,
-		hostScript, guestpaths.InstallScript(), s.captureTimeout(),
-	); err != nil {
+	if err := s.Guest.CopyToDest(hostScript, guestpaths.InstallScript()); err != nil {
 		return "", fmt.Errorf("copy install script to guest: %w", err)
 	}
 
@@ -447,6 +446,7 @@ func (s *Service) DeployAgent(token string) (string, error) {
 		"binary":      guestStaging,
 		"port":        s.Cfg.Agent.Port,
 		"payloadUser": s.Cfg.Payload.Username,
+		"labAdmin":    s.Cfg.Guest.Username,
 		"installExe":  guestpaths.InstallExe(),
 	}
 	if s.Cfg.Sysmon.EventLog != "" {
@@ -461,10 +461,7 @@ func (s *Service) DeployAgent(token string) (string, error) {
 		return "", err
 	}
 	defer os.Remove(tmpCfg)
-	if err := s.VBox.GuestControlCopyTo(
-		s.Cfg.VMName, creds.Username, creds.Password,
-		tmpCfg, guestpaths.InstallConfig(), s.captureTimeout(),
-	); err != nil {
+	if err := s.Guest.CopyToDest(tmpCfg, guestpaths.InstallConfig()); err != nil {
 		return "", fmt.Errorf("copy agent install config to guest: %w", err)
 	}
 
@@ -478,16 +475,12 @@ func (s *Service) stageGuestToken(token string, creds guest.Credentials) error {
 	}
 	defer os.Remove(tmpTok)
 	// Public staging is guestcontrol-writable. ProgramData is created/locked by the elevated installer.
-	if err := s.VBox.GuestControlCopyTo(
-		s.Cfg.VMName, creds.Username, creds.Password,
-		tmpTok, guestpaths.StagingTokenPath(), s.captureTimeout(),
-	); err != nil {
+	if err := s.Guest.CopyToDest(tmpTok, guestpaths.StagingTokenPath()); err != nil {
 		return fmt.Errorf("stage agent token to guest: %w", err)
 	}
-	_ = s.VBox.GuestControlCopyTo(
-		s.Cfg.VMName, creds.Username, creds.Password,
-		tmpTok, guestpaths.TokenPath(), s.captureTimeout(),
-	)
+	if s.Cfg.UseGuestAdditions() {
+		_ = s.Guest.CopyToDest(tmpTok, guestpaths.TokenPath())
+	}
 	return nil
 }
 
@@ -495,8 +488,10 @@ func (s *Service) copyAgentBinary(hostBin, guestDir string, creds guest.Credenti
 	if err := verifyAgentBinaryVersion(hostBin, types.Version); err != nil {
 		return "", err
 	}
-	// Stop the running service so the canonical path is not sharing-locked on an old binary.
-	s.stopGuestAgentService(creds)
+	// Unique first so a locked stale vN.exe never becomes the only successful copy.
+	if s.Cfg.UseGuestAdditions() {
+		s.stopGuestAgentService(creds)
+	}
 
 	versionTag := strings.ReplaceAll(types.Version, ".", "-")
 	stamp := time.Now().Unix()
@@ -509,10 +504,7 @@ func (s *Service) copyAgentBinary(hostBin, guestDir string, creds guest.Credenti
 	var lastErr error
 	var copied string
 	for _, dest := range dests {
-		err := s.VBox.GuestControlCopyTo(
-			s.Cfg.VMName, creds.Username, creds.Password,
-			hostBin, dest, s.captureTimeout(),
-		)
+		err := s.Guest.CopyToDest(hostBin, dest)
 		if err == nil {
 			copied = dest
 			break
@@ -530,19 +522,9 @@ func (s *Service) copyAgentBinary(hostBin, guestDir string, creds guest.Credenti
 
 func (s *Service) stopGuestAgentService(creds guest.Credentials) {
 	timeout := s.captureTimeout()
-	_, _ = s.VBox.GuestControlRun(
-		s.Cfg.VMName, creds.Username, creds.Password,
-		`C:\Windows\System32\sc.exe`,
-		[]string{"stop", "QuarantineLabAgent"},
-		timeout,
-	)
+	_, _ = s.Guest.Run(guest.UserSystem, `C:\Windows\System32\sc.exe`, []string{"stop", "QuarantineLabAgent"}, timeout)
 	time.Sleep(2 * time.Second)
-	_, _ = s.VBox.GuestControlRun(
-		s.Cfg.VMName, creds.Username, creds.Password,
-		`C:\Windows\System32\cmd.exe`,
-		[]string{"/c", "taskkill /F /IM quarantine-agent.exe /IM quarantine-agent-v1-0-15.exe /IM quarantine-agent-v1-0-14.exe /IM quarantine-agent-v1-0-13.exe /IM quarantine-agent-v1-0-12.exe 2>nul"},
-		timeout,
-	)
+	_, _ = s.Guest.Run(guest.UserSystem, `C:\Windows\System32\cmd.exe`, []string{"/c", "taskkill /F /IM quarantine-agent.exe 2>nul"}, timeout)
 	time.Sleep(1 * time.Second)
 }
 
@@ -596,6 +578,112 @@ func (s *Service) AgentHealthQuick(ctx context.Context) (*types.HealthResponse, 
 		return nil, err
 	}
 	return client.Health(ctx)
+}
+
+// WaitForAgent polls /health until success or ctx is done.
+func (s *Service) WaitForAgent(ctx context.Context) error {
+	var last error
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		poll, cancel := context.WithTimeout(ctx, 8*time.Second)
+		h, err := s.AgentHealthQuick(poll)
+		cancel()
+		if err == nil && h != nil {
+			return nil
+		}
+		last = err
+		select {
+		case <-ctx.Done():
+			if last == nil {
+				last = ctx.Err()
+			}
+			return fmt.Errorf("%s", config.AgentUnreachableHint(last))
+		case <-ticker.C:
+		}
+	}
+}
+
+// SyncWindowsGuestClock sets the Windows lab guest clock from the host (UTC)
+// via agent SYSTEM exec. Gateway proxy/PCAP already use host-aligned time;
+// without this, capturedAt stays ~20–30+ minutes behind network evidence and
+// snapshot window filters look "wrong" even for short sessions.
+func (s *Service) SyncWindowsGuestClock(ctx context.Context) error {
+	if s == nil || s.Cfg == nil || !s.Cfg.Agent.Enabled {
+		return fmt.Errorf("agent is not enabled")
+	}
+	client, err := s.agentClient()
+	if err != nil {
+		return err
+	}
+	stamp := time.Now().UTC().Format(time.RFC3339)
+	// Parse as UTC round-trip then Set-Date in local time (SYSTEM).
+	script := fmt.Sprintf(
+		`$ErrorActionPreference='Stop'; $u=[datetime]::Parse('%s',[cultureinfo]::InvariantCulture,[System.Globalization.DateTimeStyles]::RoundtripKind); Set-Date -Date $u.ToLocalTime() | Out-Null; (Get-Date).ToUniversalTime().ToString('o')`,
+		stamp,
+	)
+	resp, err := client.Exec(ctx, types.ExecRequest{
+		Exe:       `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`,
+		Args:      []string{"-NoProfile", "-NonInteractive", "-Command", script},
+		User:      "system",
+		TimeoutMs: 45000,
+	})
+	if err != nil {
+		return err
+	}
+	if resp.ExitCode != 0 {
+		msg := strings.TrimSpace(resp.Stderr)
+		if msg == "" {
+			msg = strings.TrimSpace(resp.Stdout)
+		}
+		if msg == "" {
+			msg = resp.Error
+		}
+		if msg == "" {
+			msg = fmt.Sprintf("exit %d", resp.ExitCode)
+		}
+		return fmt.Errorf("Set-Date: %s", msg)
+	}
+	return nil
+}
+
+// ClearSysmonLog clears the guest Sysmon Operational channel via agent SYSTEM exec.
+// Best used right after Launch so evidence only sees this session's events.
+func (s *Service) ClearSysmonLog(ctx context.Context) error {
+	if s == nil || s.Cfg == nil || !s.Cfg.Agent.Enabled {
+		return fmt.Errorf("agent is not enabled")
+	}
+	logName := strings.TrimSpace(s.Cfg.Sysmon.EventLog)
+	if logName == "" {
+		logName = `Microsoft-Windows-Sysmon/Operational`
+	}
+	client, err := s.agentClient()
+	if err != nil {
+		return err
+	}
+	resp, err := client.Exec(ctx, types.ExecRequest{
+		Exe:       `C:\Windows\System32\wevtutil.exe`,
+		Args:      []string{"cl", logName},
+		User:      "system",
+		TimeoutMs: 60000,
+	})
+	if err != nil {
+		return err
+	}
+	if resp.ExitCode != 0 {
+		msg := strings.TrimSpace(resp.Stderr)
+		if msg == "" {
+			msg = strings.TrimSpace(resp.Stdout)
+		}
+		if msg == "" {
+			msg = resp.Error
+		}
+		if msg == "" {
+			msg = fmt.Sprintf("exit %d", resp.ExitCode)
+		}
+		return fmt.Errorf("wevtutil cl %s: %s", logName, msg)
+	}
+	return nil
 }
 
 func randomAgentToken() string {

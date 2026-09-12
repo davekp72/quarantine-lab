@@ -6,8 +6,8 @@
 .DESCRIPTION
   Invoked by autounattend FirstLogonCommands from the unattend floppy (A:).
   Copies staged Quarantine\* helpers into C:\Users\Public\Quarantine and runs
-  Invoke-QuarantineGuestProvision.ps1 when present (skips missing agent/Sysmon
-  binaries until the host stages them after Guest Additions).
+  Invoke-QuarantineGuestProvision.ps1 when present (agent/Sysmon binaries come
+  from the remastered setup ISO; host can restage later via the agent).
 
   Does NOT register a persistent SYSTEM privileged-export scheduled task.
   Admin membership is enforced by SetupComplete.cmd + FirstLogon net localgroup
@@ -133,7 +133,7 @@ if (Test-Path -LiteralPath $prov) {
         Write-FirstLog ("Guest provision error: " + $_.Exception.Message)
     }
 } else {
-    Write-FirstLog 'Invoke-QuarantineGuestProvision.ps1 not present yet — run host guest provision after Guest Additions, then Finish-QuarantineProvision.cmd'
+    Write-FirstLog 'Invoke-QuarantineGuestProvision.ps1 not present yet — restage from the host with guest provision (agent HTTP)'
 }
 
 Set-Content -LiteralPath (Join-Path $PublicDir 'firstlogon.ok') -Value ((Get-Date).ToString('o') + [Environment]::NewLine) -Encoding ASCII

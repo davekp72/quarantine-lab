@@ -12,6 +12,35 @@ from pathlib import Path
 MAX_BODY = 65536
 
 
+def _is_ip(host: str) -> bool:
+    h = (host or "").strip().strip("[]")
+    if not h:
+        return False
+    if h.count(".") == 3 and all(p.isdigit() for p in h.split(".")):
+        return True
+    return ":" in h and "/" not in h and " " not in h
+
+
+def _host_from_url(url: str) -> str:
+    try:
+        from urllib.parse import urlparse
+
+        h = urlparse(url).hostname or ""
+        return h.strip("[]")
+    except Exception:
+        return ""
+
+
+def _display_host(flow, url: str) -> str:
+    from_url = _host_from_url(url)
+    raw = str(getattr(flow.request, "host", "") or "").strip()
+    if from_url and not _is_ip(from_url):
+        return from_url
+    if raw and not _is_ip(raw):
+        return raw
+    return from_url or raw
+
+
 def _ts(flow) -> str:
     try:
         t = flow.request.timestamp_start
@@ -99,7 +128,7 @@ def flow_to_record(flow) -> dict | None:
         "t": _ts(flow),
         "method": flow.request.method,
         "url": url,
-        "host": flow.request.host,
+        "host": _display_host(flow, url),
         "path": flow.request.path,
         "resolvedIps": resolved,
         "request": {

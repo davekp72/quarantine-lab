@@ -78,3 +78,46 @@ func TestHiveFilePathRejectsTraversal(t *testing.T) {
 		t.Fatal("expected protected roots")
 	}
 }
+
+func TestFileAllowlist(t *testing.T) {
+	p := FilePolicy{PayloadUser: "analyst", LabAdmin: "quarantine"}
+	if err := p.AllowedFile(`C:\Users\Public\Quarantine\inbox\sample.bin`, FilePut); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.AllowedFile(`C:\Users\Public\Quarantine\agent-staging\quarantine-agent.exe`, FileGet); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.AllowedFile(`C:\Users\analyst\Desktop\x.exe`, FilePut); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.AllowedFile(`C:\Users\quarantine\Downloads\a.bin`, FileGet); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.AllowedFile(TokenPath(), FileGet); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.AllowedFile(TokenPath(), FilePut); err == nil {
+		t.Fatal("must not PUT token")
+	}
+	if err := p.AllowedFile(`C:\Windows\System32\cmd.exe`, FilePut); err == nil {
+		t.Fatal("must not PUT System32")
+	}
+	if err := p.AllowedFile(`C:\Users\Public\Quarantine\..\..\Windows\System32\cmd.exe`, FilePut); err == nil {
+		t.Fatal("must reject traversal put")
+	}
+	if err := p.AllowedFile(`\\VBOXSVR\share\x`, FileGet); err == nil {
+		t.Fatal("must reject UNC")
+	}
+	if err := p.AllowedExec(`C:\Windows\System32\cmd.exe`); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.AllowedExec(`C:\Users\Public\Quarantine\inbox\sample.exe`); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.AllowedExec(`sample.exe`); err == nil {
+		t.Fatal("relative exe must fail")
+	}
+	if err := p.AllowedExec(`C:\Temp\evil.exe`); err == nil {
+		t.Fatal("exe outside allowlist must fail")
+	}
+}

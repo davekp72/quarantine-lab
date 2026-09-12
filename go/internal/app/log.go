@@ -40,8 +40,10 @@ func (a *App) emitLog(level, message string) {
 	}
 }
 
-func (a *App) logInfo(msg string)  { a.emitLog("info", msg) }
-func (a *App) logError(msg string) { a.emitLog("error", msg) }
+func (a *App) logDebug(msg string) { a.emitLog(applog.LevelDebug, msg) }
+func (a *App) logInfo(msg string)  { a.emitLog(applog.LevelInfo, msg) }
+func (a *App) logWarn(msg string)  { a.emitLog(applog.LevelWarn, msg) }
+func (a *App) logError(msg string) { a.emitLog(applog.LevelError, msg) }
 
 // OnStartup is called when the Wails UI starts.
 func (a *App) OnStartup(ctx context.Context) {
@@ -49,12 +51,24 @@ func (a *App) OnStartup(ctx context.Context) {
 	a.logInfo("Quarantine Lab UI started")
 }
 
-// GetAppLogWails returns buffered activity log lines.
+// GetAppLogWails returns buffered activity log lines (all levels).
 func (a *App) GetAppLogWails() []applog.Entry {
 	if a.Log == nil {
 		return nil
 	}
 	return a.Log.Lines()
+}
+
+// GetAppLogFilteredWails returns activity lines at or above minLevel
+// (debug, info, warn, error). Empty minLevel defaults to info.
+func (a *App) GetAppLogFilteredWails(minLevel string) []applog.Entry {
+	if a.Log == nil {
+		return nil
+	}
+	if strings.TrimSpace(minLevel) == "" {
+		minLevel = applog.LevelInfo
+	}
+	return a.Log.LinesAtLeast(minLevel)
 }
 
 // ClearAppLogWails clears the activity log buffer.
@@ -95,7 +109,7 @@ func (a *App) ListLogFilesWails() ([]LogFileInfo, error) {
 		}
 		entries, err := os.ReadDir(dir)
 		if err != nil {
-			a.emitLog("debug", fmt.Sprintf("log dir unavailable (%s): %s", ds.source, dir))
+			a.emitLog(applog.LevelDebug, fmt.Sprintf("log dir unavailable (%s): %s", ds.source, dir))
 			continue
 		}
 		for _, ent := range entries {

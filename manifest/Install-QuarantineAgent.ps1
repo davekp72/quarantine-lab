@@ -249,6 +249,7 @@ Remove-PublicSecrets
 
 Write-Step "Installing from $finalExe"
 Write-Host "    Selected binary LastWriteTime: $((Get-Item -LiteralPath $finalExe).LastWriteTime)"
+$labAdmin = if ($config.PSObject.Properties['labAdmin'] -and $config.labAdmin) { [string]$config.labAdmin } else { '' }
 $installArgs = @(
     'install',
     "-token=$token",
@@ -256,6 +257,7 @@ $installArgs = @(
     "-payload-user=$payloadUser",
     "-sysmon-log=$sysmonLog"
 )
+if ($labAdmin) { $installArgs += "-lab-admin=$labAdmin" }
 & $finalExe @installArgs
 if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
     throw "Agent install failed with exit code $LASTEXITCODE"

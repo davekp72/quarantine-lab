@@ -65,7 +65,7 @@ func (c *Client) Run(ctx context.Context, args ...string) (string, error) {
 
 	argLine := FormatArgs(args)
 	if c.OnLog != nil {
-		c.OnLog("cmd", "VBoxManage "+argLine)
+		c.OnLog("debug", "VBoxManage "+argLine)
 	}
 
 	vboxDir := c.installDir()

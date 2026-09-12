@@ -216,7 +216,7 @@ func (a *App) ensureHiveIndex(snapshotName string, force bool) (*registry.IndexM
 	if a.Disk == nil {
 		return nil, fmt.Errorf("disk reader required")
 	}
-	a.logInfo("WARNING: Flattening full snapshot disk to RAW for " + snapshotName + " (one-time, multi-GB). Prefer live hive dumps.")
+	a.logWarn("Flattening full snapshot disk to RAW for " + snapshotName + " (one-time, multi-GB). Prefer live hive dumps.")
 	workDir, err := a.Evidence.EnsureRegistryIndexDir(snapshotName)
 	if err != nil {
 		return nil, err
@@ -288,9 +288,8 @@ func (a *App) ReadSnapshotFile(snapshotName, guestPath string) (map[string]any, 
 			if size := evidence.FileSidecarSize(entry); size > max {
 				return tooLargeFilePreview(guestPath, size, max), nil
 			}
-			if !evidence.FileCapturedInSidecar(entry) {
-				return unavailableFilePreview(a.Evidence, snapshotName, guestPath, "events_only"), nil
-			}
+			// Metadata-only sidecar rows (e.g. Downloads priority) used to short-circuit
+			// here as "events_only" and never tried the evidence snapshot disk.
 		}
 	}
 	if a.Disk == nil {
@@ -443,11 +442,18 @@ func unavailableFilePreview(svc *evidence.Service, snapshotName, guestPath, reas
 		meta = svc.FileCreateMetaFromSysmon(snapshotName, guestPath)
 	}
 	msg := fmt.Sprintf(
-		"Content unavailable — this file was seen during the session but is not on the evidence snapshot disk.\n\n"+
-			"Typical cause: a short-lived temp file (e.g. PowerShell __PSScriptPolicyTest_*) created during capture and deleted before the snapshot was taken.\n\n"+
+		"Content unavailable — this path is not present on the evidence snapshot disk.\n\n"+
+			"Typical cause: a short-lived temp file created during the session and deleted before the snapshot was taken.\n\n"+
 			"Path: %s",
 		guestPath,
 	)
+	if reason == "events_only" {
+		msg = fmt.Sprintf(
+			"Content unavailable — capture recorded this path as an event only (no embedded bytes).\n\n"+
+				"Path: %s",
+			guestPath,
+		)
+	}
 	if meta != nil {
 		if meta.Time != "" {
 			msg += fmt.Sprintf("\nSysmon FileCreate: %s", meta.Time)
@@ -863,13 +869,12 @@ func (a *App) ProvisionGuest() (string, error) {
 Copied:  %s
 Skipped: %s
 
-If FirstLogon already ran, finish agent/Sysmon with Public Desktop
-Finish-QuarantineProvision.cmd (UAC once), or elevated PowerShell:
+FirstLogon already installs the agent from the setup ISO. This restage is for
+updated scripts/binaries. If the agent service is missing, run elevated:
 
   Set-ExecutionPolicy -Scope Process Bypass -Force
   & '%s\Invoke-QuarantineGuestProvision.ps1'
 
-That script installs the agent (with guestcontrol ACLs), gateway network, mitm CA, Sysmon, event-log grant, and disables autologon when those files were staged.
 Then on the host:  .\quarantine-vm.ps1 agent health
 `, dir, copiedText, skippedText, dir)
 	if len(notes) > 0 {
@@ -1061,7 +1066,7 @@ func (a *App) stopCaptureAndAttach(snapshotName, reason string) {
 	a.logInfo(fmt.Sprintf("Stopping packet capture (%s)…", reason))
 	pull, err := a.Capture.StopWithResult()
 	if err != nil {
-		a.logInfo("Packet capture stop warning: " + err.Error())
+		a.logWarn("Packet capture stop warning: " + err.Error())
 		return
 	}
 	a.logInfo("Packet capture stopped")
@@ -1073,7 +1078,7 @@ func (a *App) stopCaptureAndAttach(snapshotName, reason string) {
 	}
 	dest, err := a.Evidence.AttachNetworkArtifacts(snapshotName, pull.PcapPath, pull.ProxyDir)
 	if err != nil {
-		a.logInfo("Attach network artifacts warning: " + err.Error())
+		a.logWarn("Attach network artifacts warning: " + err.Error())
 		return
 	}
 	if dest != "" {
@@ -1113,6 +1118,45 @@ func (a *App) startCaptureAfterLaunch() {
 		return
 	}
 	a.logInfo("Packet capture started: " + path)
+}
+
+// clearSysmonAfterLaunch waits for the guest agent, syncs the Windows clock to
+// host UTC, then clears Sysmon Operational. Best-effort: launch still succeeds
+// if the agent is down or Sysmon is missing.
+func (a *App) clearSysmonAfterLaunch() {
+	if a.Cfg == nil || !a.Cfg.Agent.Enabled || a.Evidence == nil {
+		return
+	}
+	a.logInfo("Waiting for guest agent (clock sync + Sysmon clear)…")
+	if a.Network != nil {
+		if err := a.Network.EnsureAgentPortForward(); err != nil {
+			a.logWarn("Agent port-forward before guest prep: " + err.Error())
+		}
+	}
+	waitCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if err := a.Evidence.WaitForAgent(waitCtx); err != nil {
+		a.logWarn("Guest prep skipped (agent not ready): " + err.Error())
+		return
+	}
+	clockCtx, clockCancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer clockCancel()
+	if err := a.Evidence.SyncWindowsGuestClock(clockCtx); err != nil {
+		a.logWarn("Windows guest clock sync failed: " + err.Error())
+	} else {
+		a.logInfo("Synced Windows guest clock to host UTC")
+	}
+	clearCtx, clearCancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer clearCancel()
+	if err := a.Evidence.ClearSysmonLog(clearCtx); err != nil {
+		a.logWarn("Sysmon clear failed: " + err.Error())
+		return
+	}
+	logName := strings.TrimSpace(a.Cfg.Sysmon.EventLog)
+	if logName == "" {
+		logName = `Microsoft-Windows-Sysmon/Operational`
+	}
+	a.logInfo("Cleared guest Sysmon log (" + logName + ")")
 }
 
 // PreserveEvidenceWails captures sidecars then saves an Evidence-* snapshot.
@@ -1176,6 +1220,7 @@ func (a *App) LaunchSnapshotWails(name string, clean bool) (string, error) {
 		a.logError(err.Error())
 		return "", err
 	}
+	a.clearSysmonAfterLaunch()
 	a.startCaptureAfterLaunch()
 	launched := name
 	if clean {

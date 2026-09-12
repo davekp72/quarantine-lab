@@ -27,3 +27,7 @@ func PayloadIdentity(payloadUser string) (sid, user string, err error) {
 func PayloadSessionActive(payloadUser string) (bool, string) {
 	return false, ""
 }
+
+func InteractiveUserToken(username string) (any, string, string, error) {
+	return nil, "", "", fmt.Errorf("interactive token requires windows")
+}

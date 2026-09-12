@@ -1,6 +1,7 @@
 package guest
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -8,14 +9,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/quarantine-lab/quarantine/internal/agent/guestpaths"
 	"github.com/quarantine-lab/quarantine/internal/config"
 	"github.com/quarantine-lab/quarantine/internal/vbox"
 )
 
-// Client runs guestcontrol operations.
+// Client runs operations in the Windows guest via agent or guestcontrol.
 type Client struct {
 	Cfg  *config.Config
 	VBox *vbox.Client
+	tr   Transport
 }
 
 // New creates a guest client.
@@ -23,7 +26,19 @@ func New(cfg *config.Config, vb *vbox.Client) *Client {
 	return &Client{Cfg: cfg, VBox: vb}
 }
 
-// Credentials for an account block.
+func (c *Client) Transport() Transport {
+	if c.tr == nil {
+		c.tr = NewTransport(c.Cfg, c.VBox)
+	}
+	return c.tr
+}
+
+// SetTransport overrides the host↔guest transport (tests).
+func (c *Client) SetTransport(t Transport) {
+	c.tr = t
+}
+
+// Credentials for an account block (guestcontrol fallback).
 type Credentials struct {
 	Username string
 	Password string
@@ -58,35 +73,70 @@ func (c *Client) timeout(account AccountConfig) time.Duration {
 
 type AccountConfig = config.AccountConfig
 
-// RunPowerShell runs a script in guest as admin.
-func (c *Client) RunPowerShell(scriptPath string, args []string, creds Credentials) (string, error) {
-	psArgs := append([]string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath}, args...)
-	return c.VBox.GuestControlRun(
-		c.Cfg.VMName, creds.Username, creds.Password,
-		`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`,
-		psArgs, c.timeout(c.Cfg.Guest),
-	)
+func (c *Client) ctxTimeout(d time.Duration) (context.Context, context.CancelFunc) {
+	if d <= 0 {
+		d = 120 * time.Second
+	}
+	return context.WithTimeout(context.Background(), d)
 }
 
-// CopyTo copies host file to guest directory.
+// RunPowerShell runs a script in the guest as the lab admin (or SYSTEM via agent).
+func (c *Client) RunPowerShell(scriptPath string, args []string, creds Credentials) (string, error) {
+	psArgs := append([]string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath}, args...)
+	ctx, cancel := c.ctxTimeout(c.timeout(c.Cfg.Guest))
+	defer cancel()
+	account := UserSystem
+	if c.Cfg.UseGuestAdditions() {
+		account = UserGuest
+	}
+	return c.Transport().Run(ctx, account, `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, psArgs, c.timeout(c.Cfg.Guest))
+}
+
+// Run executes a program in the guest as system, guest, or payload.
+func (c *Client) Run(account, exe string, args []string, timeout time.Duration) (string, error) {
+	ctx, cancel := c.ctxTimeout(timeout)
+	defer cancel()
+	return c.Transport().Run(ctx, account, exe, args, timeout)
+}
+
+// CopyTo copies a host file into a guest directory (basename preserved).
 func (c *Client) CopyTo(hostPath, guestDir string, creds Credentials) error {
 	abs, err := filepath.Abs(hostPath)
 	if err != nil {
 		return err
 	}
-	guestDest := filepath.Join(guestDir, filepath.Base(abs))
-	return c.VBox.GuestControlCopyTo(
-		c.Cfg.VMName, creds.Username, creds.Password,
-		abs, guestDest, c.timeout(c.Cfg.Guest),
-	)
+	guestDest := guestpaths.GuestJoin(guestDir, filepath.Base(abs))
+	ctx, cancel := c.ctxTimeout(c.timeout(c.Cfg.Guest))
+	defer cancel()
+	_ = c.Transport().Mkdir(ctx, guestDir)
+	return c.Transport().CopyTo(ctx, abs, guestDest)
 }
 
-// CopyFrom copies guest file to host path.
+func (c *Client) CopyToDest(hostPath, guestDest string) error {
+	ctx, cancel := c.ctxTimeout(c.timeout(c.Cfg.Guest))
+	defer cancel()
+	parent := filepath.Dir(guestDest)
+	_ = c.Transport().Mkdir(ctx, parent)
+	return c.Transport().CopyTo(ctx, hostPath, guestDest)
+}
+
+// CopyFrom copies a guest file to a host path.
 func (c *Client) CopyFrom(guestPath, hostPath string, creds Credentials) error {
-	return c.VBox.GuestControlCopyFrom(
-		c.Cfg.VMName, creds.Username, creds.Password,
-		guestPath, hostPath, c.timeout(c.Cfg.Guest),
-	)
+	ctx, cancel := c.ctxTimeout(c.timeout(c.Cfg.Guest))
+	defer cancel()
+	return c.Transport().CopyFrom(ctx, guestPath, hostPath)
+}
+
+func (c *Client) Remove(guestPath string) error {
+	ctx, cancel := c.ctxTimeout(30 * time.Second)
+	defer cancel()
+	return c.Transport().Remove(ctx, guestPath)
+}
+
+func (c *Client) Ready() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	return c.Transport().Ready(ctx)
 }
 
 // DeployScript copies a host script to guest copyTargetDir.
@@ -264,15 +314,9 @@ func (c *Client) DeployProvisionFiles(projectRoot string) (copied []string, skip
 	return copied, skipped, nil
 }
 
-// TestGuestSession verifies guest credentials work.
+// TestGuestSession verifies the selected transport is reachable.
 func (c *Client) TestGuestSession(creds Credentials) error {
-	_, err := c.VBox.GuestControlRun(
-		c.Cfg.VMName, creds.Username, creds.Password,
-		`C:\Windows\System32\cmd.exe`,
-		[]string{"/c", "echo", "ok"},
-		30*time.Second,
-	)
-	if err != nil {
+	if err := c.Ready(); err != nil {
 		return fmt.Errorf("guest session test failed: %w", err)
 	}
 	return nil

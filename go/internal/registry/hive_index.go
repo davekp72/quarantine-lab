@@ -12,9 +12,9 @@ import (
 )
 
 const (
-	IndexSuffix      = "-registry-index.jsonl.gz"
-	IndexMetaSuffix  = "-registry-meta.json"
-	IndexFormatSlim  = "slim-fnv64-json"
+	IndexSuffix     = "-registry-index.jsonl.gz"
+	IndexMetaSuffix = "-registry-meta.json"
+	IndexFormatSlim = "slim-fnv64-json"
 )
 
 // IndexRecord is one registry value in the sorted hive index.
@@ -39,14 +39,16 @@ func ContentHash(typ string, value any) string {
 
 // IndexMeta describes a built hive index sidecar.
 type IndexMeta struct {
-	Engine     string            `json:"engine"`
-	Format     string            `json:"format,omitempty"`
-	Snapshot   string            `json:"snapshot"`
-	BuiltAt    string            `json:"builtAt"`
-	EntryCount int               `json:"entryCount"`
-	Hives      []HiveMeta        `json:"hives"`
-	Warnings   []string          `json:"warnings,omitempty"`
-	Digests    map[string]string `json:"digests,omitempty"`
+	Engine     string     `json:"engine"`
+	Format     string     `json:"format,omitempty"`
+	Snapshot   string     `json:"snapshot"`
+	BuiltAt    string     `json:"builtAt"`
+	EntryCount int        `json:"entryCount"`
+	Hives      []HiveMeta `json:"hives"`
+	// Source is informational (e.g. live-reg-save); not shown as a warning banner.
+	Source   string            `json:"source,omitempty"`
+	Warnings []string          `json:"warnings,omitempty"`
+	Digests  map[string]string `json:"digests,omitempty"`
 }
 
 // HiveMeta is one extracted hive contribution.

@@ -299,13 +299,28 @@ func ApplyHiveRegistryDiff(res *Result, fromIndex, toIndex string, fromMeta, toM
 	res.Meta.Warnings = nil
 	if fromMeta != nil {
 		res.Meta.FromUserRegistryCount = fromMeta.EntryCount
-		res.Meta.Warnings = append(res.Meta.Warnings, fromMeta.Warnings...)
+		res.Meta.Warnings = append(res.Meta.Warnings, filterInformationalWarnings(fromMeta.Warnings)...)
 	}
 	if toMeta != nil {
 		res.Meta.ToUserRegistryCount = toMeta.EntryCount
-		res.Meta.Warnings = append(res.Meta.Warnings, toMeta.Warnings...)
+		res.Meta.Warnings = append(res.Meta.Warnings, filterInformationalWarnings(toMeta.Warnings)...)
 	}
 	return nil
+}
+
+func filterInformationalWarnings(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(in))
+	for _, w := range in {
+		lw := strings.ToLower(strings.TrimSpace(w))
+		if lw == "" || strings.HasPrefix(lw, "source:") {
+			continue
+		}
+		out = append(out, w)
+	}
+	return out
 }
 
 func indexToEntry(r registry.IndexRecord) evidence.RegistryEntry {

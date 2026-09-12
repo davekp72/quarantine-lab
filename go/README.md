@@ -48,7 +48,7 @@ cd go
 | `internal/network` | NIC modes including `gateway` |
 | `internal/vbox` | VBoxManage wrapper |
 | `internal/vm` | Snapshot / preserve / reset / baseline |
-| `internal/guest` | Guestcontrol copy/run |
+| `internal/guest` | Windows guest transport (agent HTTP, or guestcontrol with `--guest-additions`) |
 | `internal/evidence` | Sidecars, manifest publish, guest script deploy |
 | `internal/diff` | Manifest diff JSON (viewer-compatible) |
 | `internal/disk` | Snapshot VDI flatten cache + NTFS file read |
@@ -56,12 +56,12 @@ cd go
 | `internal/network` | NIC modes |
 | `internal/proxy` | mitmproxy subprocess |
 | `internal/capture` | VirtualBox NIC trace / PCAP |
-| `internal/inbox` | Transient shared folder |
+| `internal/inbox` | Agent inbox copy (VBOXSVR with `--guest-additions`) |
 | `cmd/quarantine/frontend/dist` | Wails report UI (files/registry trees, live file preview) |
 
 ## PowerShell vs Go
 
-`quarantine-vm.ps1` prefers the Go binary for daily commands (`start`, `proxy`, `capture`, `manifest`, `ui`, …). Setup-only PowerShell paths remain for `create`, `install`, `guest-additions`, `payload`, `proxy export-ca`, and similar. Force the PowerShell path with `$env:QUARANTINE_FORCE_PS=1`.
+`quarantine-vm.ps1` prefers the Go binary for daily commands (`start`, `proxy`, `capture`, `manifest`, `ui`, `guest`, `payload`, `inbox`, …). Setup-only PowerShell paths remain for `create`, `install`, `guest-additions`, `build-windows`, `proxy export-ca`, and similar. Pass `-GuestAdditions` / `--guest-additions` to use VirtualBox guestcontrol. Force the PowerShell path with `$env:QUARANTINE_FORCE_PS=1`.
 
 ## Tests
 

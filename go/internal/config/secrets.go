@@ -299,8 +299,7 @@ func (c *Config) unattendStageExtras(projectRoot string, notes *[]string) (unatt
 	}
 	bin := c.AgentHostBinary(projectRoot)
 	if _, err := os.Stat(bin); err != nil {
-		*notes = append(*notes, "skip quarantine-agent.exe (build the agent, then re-run setup secrets)")
-		return extras, nil
+		return extras, fmt.Errorf("quarantine-agent.exe not found at %s (build with: go build -o go/quarantine-agent.exe ./cmd/quarantine-agent, then re-run setup secrets)", bin)
 	}
 	extras.AgentExe = bin
 	return extras, nil

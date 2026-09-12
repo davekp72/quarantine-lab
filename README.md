@@ -74,39 +74,40 @@ installs the agent and static `10.66.0.15` addressing:
 ```
 
 The Linux gateway must already exist (`gateway create` / `gateway provision`).
-`build-windows` starts it before Windows Setup.
-
-Guest Additions are optional for **agent health** (host → gateway NAT → guest
-:9443). They are still needed for host guestcontrol (clipboard / later file
-copy).
+`build-windows` starts it before Windows Setup and waits for **agent /health**
+(`127.0.0.1:9443` via the gateway), not Guest Additions.
 
 Useful flags:
 - `-Force` — destroy/recreate the VM named in config (renamed VMs are untouched)
 - `-NoWait` — return after starting Setup; later: `.\quarantine-vm.ps1 build-windows -Continue`
-- `-WaitMinutes 120` — custom guestcontrol wait
+- `-WaitMinutes 120` — custom agent-health wait
+- `-GuestAdditions` — fallback: wait for guestcontrol, mount Additions ISO, enable clipboard
 
 Manual equivalent: `setup secrets` → `create` → `install` (same NIC/unattend).
 
 ### 6. Install and harden the guest
 
-1. Guest Additions (optional; paste, guest control, resize):
-
-   ```powershell
-   .\quarantine-vm.ps1 guest-additions
-   ```
-
-   In the guest: run the installer from the DVD, then reboot.
-
-2. Accounts from config (also created by unattend):
-   - **`Administrator`** — built-in admin (lab tooling, Sysmon, guest control); password from `guest.password`
-   - **`analyst`** (or `payload.username`) — standard user for samples
-
-3. FirstLogon already put the guest on the gateway LAN (`10.66.0.15` → `10.66.0.1`)
+1. FirstLogon already put the guest on the gateway LAN (`10.66.0.15` → `10.66.0.1`)
    and installed the agent from the setup ISO. Confirm on the host:
 
    ```powershell
    .\quarantine-vm.ps1 agent health
    ```
+
+2. Accounts from config (also created by unattend):
+   - **`Administrator`** — built-in admin (lab tooling, Sysmon); password from `guest.password`
+   - **`analyst`** (or `payload.username`) — standard user for samples
+
+3. Guest Additions are **optional** (clipboard paste, auto-resize, `\\VBOXSVR`).
+   Default copy/run/inbox uses the agent. To enable paste/resize:
+
+   ```powershell
+   .\quarantine-vm.ps1 guest-additions
+   ```
+
+   In the guest: run the installer from the DVD, then reboot. Pass
+   `-GuestAdditions` on later `guest` / `inbox` / `payload` commands to use
+   guestcontrol instead of the agent.
 
    If health fails after a Force rebuild, re-run `setup secrets` (needs
    `go\quarantine-agent.exe`) so the remastered ISO contains the binary.
@@ -144,7 +145,7 @@ Shut down after the guest looks right, then:
 .\quarantine-vm.ps1 reset -Clean
 .\quarantine-vm.ps1 inbox push .\sample.bin
 .\quarantine-vm.ps1 inbox open
-# In guest: copy from \\VBOXSVR\quarantine-in
+# In guest: C:\Users\Public\Quarantine\inbox
 .\quarantine-vm.ps1 inbox close
 .\quarantine-vm.ps1 capture start
 # ... work in the guest ...
@@ -292,21 +293,24 @@ Logs (treat as evidence): proxy flows, PCAPs, inbox SHA256 — under
 | `guest …` | Run commands / copy files into guest |
 | `sysmon fetch` | Download Sysmon from Microsoft |
 | `stealth` | Soften VBox MAC/CPU/ACPI fingerprints (powered off) |
-| `guest-additions` | Mount Guest Additions ISO |
+| `guest-additions` | Mount Guest Additions ISO (optional fallback) |
+| `-GuestAdditions` | Use guestcontrol / VBOXSVR / clipboard for this command |
 
 ---
 
 ## Guest helpers
 
-**Inbox** (preferred sample transfer):
+**Inbox** (preferred sample transfer; agent copy by default):
 
 ```powershell
 .\quarantine-vm.ps1 inbox push .\sample.exe
-.\quarantine-vm.ps1 inbox open    # guest: \\VBOXSVR\quarantine-in
+.\quarantine-vm.ps1 inbox open    # guest: C:\Users\Public\Quarantine\inbox
 .\quarantine-vm.ps1 inbox close
 ```
 
-**Guest control** (needs Guest Additions + `guest` credentials in config):
+With `-GuestAdditions`, `inbox open` mounts `\\VBOXSVR\quarantine-in` instead.
+
+**Guest control** (agent HTTP by default; `-GuestAdditions` for VBox guestcontrol):
 
 ```powershell
 .\quarantine-vm.ps1 guest test
@@ -314,10 +318,10 @@ Logs (treat as evidence): proxy flows, PCAPs, inbox SHA256 — under
 .\quarantine-vm.ps1 guest copy .\tool.exe
 ```
 
-Clipboard is host → guest only by default:
+Clipboard is **disabled** by default (needs Guest Additions):
 
 ```powershell
-.\quarantine-vm.ps1 clipboard hosttoguest
+.\quarantine-vm.ps1 -GuestAdditions clipboard hosttoguest
 ```
 
 ---
@@ -348,9 +352,9 @@ Move an old VM home into that layout:
 - Use a host you can rebuild; VM escape is rare but possible.
 - Do not sign into personal accounts inside the guest.
 - Always `preserve` (if you care) then `reset -Clean` after a session.
-- Keep VirtualBox updated; treat host clipboard and inbox paths as semi-trusted.
-- Host-to-guest clipboard and the temporary read-only inbox share remain
-  residual attack surfaces. See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+- Keep VirtualBox updated; treat host inbox paths as semi-trusted.
+- Default residual guest surface is the agent listener (TCP 9443 from the gateway IP).
+- Guest Additions, host-to-guest clipboard, and `\\VBOXSVR` are residual **only when you pass `-GuestAdditions`**. See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 
 ---
 

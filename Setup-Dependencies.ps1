@@ -134,8 +134,8 @@ function Write-QuarantineConfig {
             }
         }
         isolation            = [ordered]@{
-            disableClipboard     = $false
-            clipboardMode        = 'hosttoguest'
+            disableClipboard     = $true
+            clipboardMode        = 'disabled'
             disableDragDrop      = $true
             disableUsb           = $true
             disableAudio         = $true
@@ -156,6 +156,7 @@ function Write-QuarantineConfig {
             defaultExe    = 'C:\Windows\System32\cmd.exe'
             copyTargetDir = 'C:\Users\Public\Quarantine'
             timeoutMs     = 60000
+            transport     = 'agent'
         }
         payload              = [ordered]@{
             username      = 'analyst'

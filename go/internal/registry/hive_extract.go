@@ -57,8 +57,8 @@ func BuildIndexFromLocalHives(snapshotName, indexPath, metaPath string, files []
 		Snapshot: snapshotName,
 		BuiltAt:  time.Now().UTC().Format(time.RFC3339),
 		Digests:  map[string]string{},
+		Source:   "live-reg-save",
 	}
-	meta.Warnings = append(meta.Warnings, "source: live-reg-save")
 
 	results := walkLocalHivesParallel(files)
 	chunks := make([][]IndexRecord, 0, len(results))

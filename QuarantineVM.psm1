@@ -366,7 +366,7 @@ function Get-QuarantineClipboardMode {
     if ($Isolation.clipboardMode) {
         return $Isolation.clipboardMode.ToString().ToLowerInvariant()
     }
-    return 'hosttoguest'
+    return 'disabled'
 }
 
 function Get-QuarantineVMModifyContext {
@@ -3531,6 +3531,47 @@ function Get-QuarantineVMStatus {
     }
 }
 
+function Wait-QuarantineVMAgentReady {
+    <#
+    .SYNOPSIS
+      Poll agent /health through the gateway until FirstLogon finishes or timeout.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [string]$ConfigPath,
+
+        [Parameter()]
+        [int]$TimeoutMinutes = 90,
+
+        [Parameter()]
+        [string]$CliExe
+    )
+
+    if ($TimeoutMinutes -le 0) {
+        throw 'TimeoutMinutes must be > 0'
+    }
+    $cfg = Get-QuarantineVMConfig -ConfigPath $ConfigPath
+    $vmName = $cfg.vmName
+    Write-Host "Waiting up to $TimeoutMinutes min for agent health on '$vmName' (FirstLogon installs the agent)..."
+    Write-Host 'Host reaches the agent via the Linux gateway: 127.0.0.1:9443'
+    if (-not $CliExe -or -not (Test-Path -LiteralPath $CliExe)) {
+        throw "CLI binary missing — cannot wait for agent health"
+    }
+    & (Get-Item -LiteralPath $CliExe).FullName --config $ConfigPath agent wait --minutes $TimeoutMinutes
+    if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+        throw (
+            "Timed out or failed waiting for the guest agent.`n`n" +
+            "Complete in the VM GUI:`n" +
+            "  1. Press a key when prompted to boot from the Windows ISO.`n" +
+            "  2. Wait for unattend + FirstLogon (network + agent service).`n" +
+            "  3. Confirm the Linux gateway is running.`n" +
+            "  4. Re-run: .\quarantine-vm.ps1 build-windows -Continue`n" +
+            "Optional Guest Additions fallback: .\quarantine-vm.ps1 -GuestAdditions build-windows -Continue"
+        )
+    }
+}
+
 function Wait-QuarantineVMGuestControlReady {
     <#
     .SYNOPSIS
@@ -3592,7 +3633,7 @@ function Invoke-QuarantineWindowsBuild {
     <#
     .SYNOPSIS
       One-shot host bootstrap: secrets, create Windows VM, start unattended install,
-      optionally wait for guest control and stage post-GA provision files.
+      optionally wait for the guest agent (or Guest Additions with -GuestAdditions).
     #>
     [CmdletBinding()]
     param(
@@ -3615,7 +3656,10 @@ function Invoke-QuarantineWindowsBuild {
         [switch]$NoWait,
 
         [Parameter()]
-        [switch]$Continue
+        [switch]$Continue,
+
+        [Parameter()]
+        [switch]$GuestAdditions
     )
 
     if (-not $ProjectRoot) { $ProjectRoot = $PSScriptRoot }
@@ -3670,7 +3714,7 @@ function Invoke-QuarantineWindowsBuild {
     }
 
     if ($Continue) {
-        Write-Host "Continue mode: stage post-GA provision for '$vmName'..."
+        Write-Host "Continue mode: wait for guest ready on '$vmName'..."
         if (-not (Test-QuarantineVMExists -VmName $vmName)) {
             throw "VM '$vmName' not found. Run build-windows without -Continue first."
         }
@@ -3679,7 +3723,11 @@ function Invoke-QuarantineWindowsBuild {
             Start-QuarantineVM -ConfigPath $ConfigPath -Type gui
             Start-Sleep -Seconds 5
         }
-        Wait-QuarantineVMGuestControlReady -ConfigPath $ConfigPath -TimeoutMinutes ([Math]::Max(5, $WaitMinutes))
+        if ($GuestAdditions) {
+            Wait-QuarantineVMGuestControlReady -ConfigPath $ConfigPath -TimeoutMinutes ([Math]::Max(5, $WaitMinutes))
+        } else {
+            Wait-QuarantineVMAgentReady -ConfigPath $ConfigPath -TimeoutMinutes ([Math]::Max(5, $WaitMinutes)) -CliExe $CliExe
+        }
     } else {
         if ((Test-QuarantineVMExists -VmName $vmName) -and -not $Force) {
             throw (
@@ -3717,9 +3765,12 @@ function Invoke-QuarantineWindowsBuild {
             Write-Host @'
 
 Host bootstrap started (NoWait).
-After Windows FirstLogon finishes:
-  1. .\quarantine-vm.ps1 guest-additions   # install from DVD in guest, reboot
-  2. .\quarantine-vm.ps1 build-windows -Continue
+After Windows FirstLogon finishes (agent listening on the gateway LAN):
+  .\quarantine-vm.ps1 agent health
+  .\quarantine-vm.ps1 build-windows -Continue
+
+Optional Guest Additions (clipboard/resize):
+  .\quarantine-vm.ps1 -GuestAdditions build-windows -Continue
 
 '@
             return
@@ -3731,32 +3782,54 @@ Windows is installing. In the VM window:
   - Press a key at the DVD boot prompt if shown (efisys_noprompt skips this)
   - Leave it alone through OOBE / FirstLogon (elevated provision from the setup ISO)
 
-FirstLogon installs the agent and sets gateway networking. Guest Additions are
-only needed for host guestcontrol (paste / later staging), not agent health.
+FirstLogon installs the agent and sets gateway networking. The host waits on
+agent /health (127.0.0.1:9443 via the Linux gateway), not Guest Additions.
 
 '@
-        Wait-QuarantineVMGuestControlReady -ConfigPath $ConfigPath -TimeoutMinutes $WaitMinutes
+        if ($GuestAdditions) {
+            Wait-QuarantineVMGuestControlReady -ConfigPath $ConfigPath -TimeoutMinutes $WaitMinutes
+        } else {
+            Wait-QuarantineVMAgentReady -ConfigPath $ConfigPath -TimeoutMinutes $WaitMinutes -CliExe $CliExe
+        }
     }
 
-    Write-Host '=== Mount Guest Additions ISO ==='
-    try {
-        Mount-QuarantineVMGuestAdditions -ConfigPath $ConfigPath
-    } catch {
-        Write-Warning "Guest Additions mount: $($_.Exception.Message)"
+    if ($GuestAdditions) {
+        Write-Host '=== Mount Guest Additions ISO ==='
+        try {
+            Mount-QuarantineVMGuestAdditions -ConfigPath $ConfigPath
+        } catch {
+            Write-Warning "Guest Additions mount: $($_.Exception.Message)"
+        }
+        try {
+            Set-QuarantineVMClipboard -ConfigPath $ConfigPath -Mode hosttoguest
+        } catch {
+            Write-Warning "clipboard hosttoguest: $($_.Exception.Message)"
+        }
     }
 
-    Write-Host '=== Network: gateway ==='
-    try {
-        Set-QuarantineVMNetworkMode -ConfigPath $ConfigPath -Mode gateway
-    } catch {
-        Write-Warning "network gateway: $($_.Exception.Message)"
+    # Do not re-run `network gateway` here. Create + pre-Setup already put NIC1 on
+    # the lab intnet. The old PowerShell attach always powered the guest off, which
+    # only happened after Guest Additions wait succeeded — agent wait now succeeds
+    # without Additions, so that leftover step killed a live unattend guest.
+
+    $state = Get-QuarantineVMState -VmName $vmName
+    if ($state -notin @('running', 'paused')) {
+        Write-Warning "Lab VM is '$state' after Setup — starting it (agent should already be installed)."
+        Start-QuarantineVM -ConfigPath $ConfigPath -Type gui
+        if ($GuestAdditions) {
+            Wait-QuarantineVMGuestControlReady -ConfigPath $ConfigPath -TimeoutMinutes ([Math]::Max(5, $WaitMinutes))
+        } else {
+            Wait-QuarantineVMAgentReady -ConfigPath $ConfigPath -TimeoutMinutes ([Math]::Max(5, $WaitMinutes)) -CliExe $CliExe
+        }
     }
 
-    if ($CliExe -and (Test-Path -LiteralPath $CliExe)) {
-        Write-Host '=== Stage guest provision (agent/Sysmon/scripts) ==='
-        & (Get-Item -LiteralPath $CliExe).FullName --config $ConfigPath guest provision
+    if ($CliExe -and (Test-Path -LiteralPath $CliExe) -and ((Get-QuarantineVMState -VmName $vmName) -in @('running', 'paused'))) {
+        $gaArgs = @()
+        if ($GuestAdditions) { $gaArgs = @('--guest-additions') }
+        Write-Host '=== Restage guest provision files (optional; FirstLogon already ran) ==='
+        & (Get-Item -LiteralPath $CliExe).FullName --config $ConfigPath @gaArgs guest provision
         if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
-            Write-Warning "guest provision staging exited $LASTEXITCODE"
+            Write-Warning "guest provision restage exited $LASTEXITCODE (FirstLogon install is still the source of truth)"
         }
     }
 
@@ -3769,8 +3842,13 @@ On the host:
   .\quarantine-vm.ps1 agent health
   .\quarantine-vm.ps1 baseline
 
-If provision skipped the agent (binary missing from the setup ISO), re-run
-setup secrets after building quarantine-agent.exe, then in the guest:
+Inbox samples (no Guest Additions):
+  .\quarantine-vm.ps1 inbox push .\sample.bin
+  .\quarantine-vm.ps1 inbox open
+  In the guest: C:\Users\Public\Quarantine\inbox
+
+If the agent binary was missing from the setup ISO, re-run setup secrets after
+building quarantine-agent.exe, then in the guest:
   Public Desktop: Finish-QuarantineProvision.cmd
   or:  & '$pub\Invoke-QuarantineGuestProvision.ps1'
 
@@ -3839,7 +3917,7 @@ Windows install workflow:
   1. VM boots from remastered ISO + unattend floppy (GUI window opens).
   2. Host flips boot order to disk-first after PE starts (avoids re-entering Setup).
   3. Autounattend creates accounts; FirstLogon runs from floppy A:.
-  4. Install Guest Additions, then: .\quarantine-vm.ps1 build-windows -Continue
+  4. Host waits for agent /health (or Guest Additions with -GuestAdditions).
   5. Install analysis tools, then: .\quarantine-vm.ps1 baseline / snapshot
 
 '@
@@ -4070,6 +4148,7 @@ Export-ModuleMember -Function @(
     'Mount-QuarantineUnattendFloppy',
     'Mount-QuarantineUnattendMedia',
     'Set-QuarantineVMInstallNat',
+    'Wait-QuarantineVMAgentReady',
     'Wait-QuarantineVMGuestControlReady',
     'Invoke-QuarantineWindowsBuild',
     'Set-QuarantineVMNormalBoot',

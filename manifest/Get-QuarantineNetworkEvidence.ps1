@@ -181,9 +181,18 @@ function Read-QuarantineFlowsJsonl {
             if ($ts -lt $From -or $ts -gt $To) { continue }
         }
 
-        $hostName = [string]$obj.host
-        if ([string]::IsNullOrWhiteSpace($hostName) -and $url -match '^https?://([^/:]+)') {
+        $hostName = ''
+        if ($url -match '^https?://([^/:]+)') {
             $hostName = $Matches[1]
+        }
+        $rawHost = [string]$obj.host
+        # Transparent MITM often puts the peer IP in host; prefer URL hostname.
+        if ($hostName -match '^\d{1,3}(\.\d{1,3}){3}$' -or ($hostName -and $hostName.Contains(':'))) {
+            if ($rawHost -and $rawHost -notmatch '^\d{1,3}(\.\d{1,3}){3}$' -and -not $rawHost.Contains(':')) {
+                $hostName = $rawHost
+            }
+        } elseif ([string]::IsNullOrWhiteSpace($hostName) -and $rawHost) {
+            $hostName = $rawHost
         }
 
         $tText = if ($ts) { $ts.ToUniversalTime().ToString('o') } else { [string]$obj.t }
@@ -396,6 +405,8 @@ function Get-QuarantineDnsFromProxyRequests {
     foreach ($req in @($Requests)) {
         $hostName = if ($req.host) { [string]$req.host.Trim().ToLowerInvariant() } else { '' }
         if ([string]::IsNullOrWhiteSpace($hostName)) { continue }
+        # HTTP host is often the resolved IP after transparent MITM — not a DNS name.
+        if ($hostName -match '^\d{1,3}(\.\d{1,3}){3}$' -or $hostName.Contains(':')) { continue }
         $ips = @()
         if ($req.PSObject.Properties['resolvedIps'] -and $req.resolvedIps) {
             $ips = @($req.resolvedIps | ForEach-Object { [string]$_.Trim() } | Where-Object { $_ })
@@ -428,6 +439,62 @@ function Get-QuarantineDnsFromProxyRequests {
         }
     }
     return @($out)
+}
+
+function Select-QuarantineNetworkBySnapshotWindow {
+    <#
+      Clip package rows to the CleanSession→Evidence gap.
+      Prefer absolute From/To with clock skew; if empty or the kept span is much
+      larger than the snapshot gap (leftover traffic admitted by skew), keep the
+      duration-tail ending at the latest package timestamp.
+    #>
+    param(
+        [array]$Rows,
+        [datetimeoffset]$From,
+        [datetimeoffset]$To,
+        [int]$ClockSkewMinutes = 30
+    )
+
+    $list = @($Rows | Where-Object { $_ })
+    if ($list.Count -eq 0 -or -not $From -or -not $To) { return $list }
+    if ($To -lt $From) {
+        $tmp = $From; $From = $To; $To = $tmp
+    }
+    $session = $To - $From
+    if ($session.TotalMinutes -lt 2) {
+        $session = [TimeSpan]::FromMinutes(2)
+    }
+    $looseFrom = $From.AddMinutes(-$ClockSkewMinutes)
+    $looseTo = $To.AddMinutes($ClockSkewMinutes)
+
+    $parsed = @()
+    foreach ($r in $list) {
+        $ts = ConvertTo-QuarantineNetworkInstant -Text ([string]$r.t)
+        if (-not $ts) { continue }
+        $parsed += [pscustomobject]@{ Row = $r; Ts = $ts }
+    }
+    if ($parsed.Count -eq 0) { return $list }
+
+    $abs = @($parsed | Where-Object { $_.Ts -ge $looseFrom -and $_.Ts -le $looseTo })
+    if ($abs.Count -gt 0) {
+        $absMin = ($abs | Measure-Object -Property Ts -Minimum).Minimum
+        $absMax = ($abs | Measure-Object -Property Ts -Maximum).Maximum
+        $absSpan = $absMax - $absMin
+        $maxSpan = $session + [TimeSpan]::FromMinutes(10)
+        if ($absSpan -le $maxSpan) {
+            return @($abs | ForEach-Object { $_.Row })
+        }
+    }
+
+    $maxT = ($parsed | Measure-Object -Property Ts -Maximum).Maximum
+    $pad = [TimeSpan]::FromMinutes(2)
+    if (($session.TotalMinutes / 4) -gt $pad.TotalMinutes) {
+        $pad = [TimeSpan]::FromMinutes($session.TotalMinutes / 4)
+    }
+    $cut = $maxT - ($session + $pad)
+    $tail = @($parsed | Where-Object { $_.Ts -ge $cut } | ForEach-Object { $_.Row })
+    if ($tail.Count -eq 0) { return $list }
+    return $tail
 }
 
 function Get-QuarantinePcapDnsAnswers {
@@ -752,7 +819,9 @@ function Get-QuarantineNetworkEvidence {
     } else { '' }
 
     $namedNetworkDirs = @()
-    foreach ($snap in @($FromSnapshot, $ToSnapshot)) {
+    # Only the To (Evidence) package is authoritative. From (CleanSession) network
+    # dirs are baselines from earlier sessions and must not be merged into the diff.
+    foreach ($snap in @($ToSnapshot)) {
         $safe = Get-QuarantineSafeSnapshotFileName -Name $snap
         if (-not $safe -or -not $manifestLogDir) { continue }
         $dir = Join-Path $manifestLogDir ($safe + '-network')
@@ -762,7 +831,9 @@ function Get-QuarantineNetworkEvidence {
     }
     $namedNetworkDirs = @($namedNetworkDirs | Select-Object -Unique)
 
-    # Snapshot-scoped packages are authoritative: include all proxy lines (no host clock filter).
+    # Snapshot-scoped packages: load full contents then clip to the snapshot gap
+    # (absolute window with clock skew, else duration-tail). Do not IgnoreTimeWindow
+    # forever — that reintroduced hours of leftover flows when truncate failed.
     foreach ($dir in $namedNetworkDirs) {
         $flowsPath = Join-Path $dir 'flows.jsonl'
         $access = Join-Path $dir 'access.log'
@@ -783,6 +854,9 @@ function Get-QuarantineNetworkEvidence {
         } elseif ($usedFlows -and (Test-Path -LiteralPath $access)) {
             $proxyLogs += $access
         }
+    }
+    if ($packageHits -gt 0 -and $requests.Count -gt 0) {
+        $requests = @(Select-QuarantineNetworkBySnapshotWindow -Rows $requests -From $From -To $To -ClockSkewMinutes $skew)
     }
 
     # When a named evidence-network package supplied HTTP, do not mix ambient host proxy
@@ -873,6 +947,9 @@ function Get-QuarantineNetworkEvidence {
     $proxyDns = Get-QuarantineDnsFromProxyRequests -Requests $requests
     $pcapDnsCount = @($dns | Where-Object { $_.source -eq 'pcap' }).Count
     $sortedDns = Merge-QuarantineDnsEntries -Entries (@($dns) + @($proxyDns))
+    if ($packageHits -gt 0 -and $sortedDns.Count -gt 0) {
+        $sortedDns = @(Select-QuarantineNetworkBySnapshotWindow -Rows $sortedDns -From $From -To $To -ClockSkewMinutes $skew)
+    }
 
     if ($MaxDns -gt 0 -and $sortedDns.Count -gt $MaxDns) {
         $sortedDns = @($sortedDns | Select-Object -First $MaxDns)

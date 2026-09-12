@@ -148,6 +148,14 @@
               <option value="activity">Activity</option>
             </select>
           </label>
+          <label class="log-source-label" title="Hide quieter lines. Status polls / VBoxManage pings are debug.">Level
+            <select id="log-level">
+              <option value="debug">Debug+</option>
+              <option value="info" selected>Info+</option>
+              <option value="warn">Warn+</option>
+              <option value="error">Error only</option>
+            </select>
+          </label>
           <button id="btn-log-refresh" type="button">Refresh</button>
           <button id="btn-log-clear" type="button">Clear</button>
           <label class="check log-check"><input type="checkbox" id="log-autoscroll" checked /> Auto-scroll</label>

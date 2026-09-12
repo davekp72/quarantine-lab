@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/quarantine-lab/quarantine/internal/agent/capture"
+	"github.com/quarantine-lab/quarantine/internal/agent/cmdexec"
 	"github.com/quarantine-lab/quarantine/internal/agent/collectors"
 	"github.com/quarantine-lab/quarantine/internal/agent/guestpaths"
 	"github.com/quarantine-lab/quarantine/internal/agent/types"
@@ -41,6 +42,8 @@ func (s *Server) ListenAndServe() error {
 	mux.HandleFunc("/v1/baseline", s.auth(s.handleBaseline))
 	mux.HandleFunc("/v1/capture", s.auth(s.handleCapture))
 	mux.HandleFunc("/v1/hives", s.auth(s.handleHives))
+	mux.HandleFunc("/v1/files", s.auth(s.handleFiles))
+	mux.HandleFunc("/v1/exec", s.auth(s.handleExec))
 
 	addr := fmt.Sprintf(":%d", s.Config.Port)
 	s.httpServer = &http.Server{
@@ -215,6 +218,156 @@ func writeJSON(w http.ResponseWriter, v any) {
 func writeJSONCompact(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func (s *Server) filePolicy() guestpaths.FilePolicy {
+	return guestpaths.FilePolicy{
+		PayloadUser: s.Config.PayloadUser,
+		LabAdmin:    s.Config.LabAdmin,
+		SysmonDir:   s.Config.SysmonDir,
+	}
+}
+
+func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimSpace(r.URL.Query().Get("path"))
+	if path == "" {
+		http.Error(w, "path is required", http.StatusBadRequest)
+		return
+	}
+	pol := s.filePolicy()
+	switch r.Method {
+	case http.MethodGet:
+		if err := pol.AllowedFile(path, guestpaths.FileGet); err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
+		s.serveRegularFile(w, path)
+	case http.MethodPut:
+		if err := pol.AllowedFile(path, guestpaths.FilePut); err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
+		if r.ContentLength > types.FileMaxBytes {
+			http.Error(w, "file exceeds 64 MiB", http.StatusRequestEntityTooLarge)
+			return
+		}
+		if err := os.MkdirAll(filepathDir(path), 0o755); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		limited := io.LimitReader(r.Body, types.FileMaxBytes+1)
+		data, err := io.ReadAll(limited)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if int64(len(data)) > types.FileMaxBytes {
+			http.Error(w, "file exceeds 64 MiB", http.StatusRequestEntityTooLarge)
+			return
+		}
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	case http.MethodDelete:
+		if err := pol.AllowedFile(path, guestpaths.FileDelete); err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
+		st, err := os.Lstat(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if st.Mode()&os.ModeSymlink != 0 {
+			http.Error(w, "refusing to delete symlink", http.StatusForbidden)
+			return
+		}
+		if st.IsDir() {
+			err = os.RemoveAll(path)
+		} else {
+			err = os.Remove(path)
+		}
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) serveRegularFile(w http.ResponseWriter, path string) {
+	st, err := os.Lstat(path)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if st.Mode()&os.ModeSymlink != 0 || st.IsDir() {
+		http.Error(w, "path must be a regular file", http.StatusForbidden)
+		return
+	}
+	if st.Size() > types.FileMaxBytes {
+		http.Error(w, "file exceeds 64 MiB", http.StatusRequestEntityTooLarge)
+		return
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer f.Close()
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", st.Size()))
+	_, _ = io.Copy(w, f)
+}
+
+func filepathDir(p string) string {
+	p = strings.ReplaceAll(p, `/`, `\`)
+	i := strings.LastIndex(p, `\`)
+	if i <= 0 {
+		return p
+	}
+	return p[:i]
+}
+
+func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	var req types.ExecRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	req.Exe = strings.TrimSpace(req.Exe)
+	if req.Exe == "" {
+		http.Error(w, "exe is required", http.StatusBadRequest)
+		return
+	}
+	if err := s.filePolicy().AllowedExec(req.Exe); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	resp := cmdexec.Run(req, s.Config)
+	if resp.Error != "" && resp.ExitCode == -1 && strings.Contains(resp.Error, "not allowed") {
+		http.Error(w, resp.Error, http.StatusForbidden)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func sysmonAvailable() bool {

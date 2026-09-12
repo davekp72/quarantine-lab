@@ -41,6 +41,31 @@ function formatActivityLines(entries) {
   return (entries || []).map((e) => `[${e.time}] ${e.level}: ${e.message}`).join('\n');
 }
 
+const LOG_LEVEL_RANK = { debug: 10, cmd: 10, info: 20, warn: 30, warning: 30, error: 40 };
+const LOG_LEVEL_KEY = 'quarantine.logMinLevel';
+
+function logLevelRank(level) {
+  return LOG_LEVEL_RANK[String(level || '').toLowerCase()] || 20;
+}
+
+function currentMinLogLevel() {
+  const sel = $('#log-level');
+  return (sel?.value || localStorage.getItem(LOG_LEVEL_KEY) || 'info').toLowerCase();
+}
+
+function activityPassesFilter(entry) {
+  return logLevelRank(entry?.level) >= logLevelRank(currentMinLogLevel());
+}
+
+function restoreLogLevelSelect() {
+  const sel = $('#log-level');
+  if (!sel) return;
+  const saved = localStorage.getItem(LOG_LEVEL_KEY);
+  if (saved && [...sel.options].some((o) => o.value === saved)) {
+    sel.value = saved;
+  }
+}
+
 function scrollLogView() {
   const view = $('#log-view');
   if ($('#log-autoscroll')?.checked) {
@@ -76,7 +101,13 @@ async function refreshLogView() {
   const api = await backend();
   const source = $('#log-source').value;
   if (source === 'activity') {
-    const lines = api?.GetAppLogWails ? await api.GetAppLogWails() : [];
+    const min = currentMinLogLevel();
+    let lines = [];
+    if (api?.GetAppLogFilteredWails) {
+      lines = await api.GetAppLogFilteredWails(min) || [];
+    } else if (api?.GetAppLogWails) {
+      lines = (await api.GetAppLogWails() || []).filter((e) => logLevelRank(e.level) >= logLevelRank(min));
+    }
     renderLogView(formatActivityLines(lines));
     return;
   }
@@ -102,6 +133,7 @@ function toggleLogDrawer(forceOpen) {
 }
 
 function appendActivityLine(entry) {
+  if (!activityPassesFilter(entry)) return;
   const view = $('#log-view');
   view.textContent += `[${entry.time}] ${entry.level}: ${entry.message}\n`;
   scrollLogView();
@@ -314,36 +346,44 @@ async function stopCapture() {
   }
 }
 
+let statusRefreshInFlight = false;
+
 async function refreshStatus() {
-  const api = await backend();
-  if (!api?.GetVMStatusWails) {
-    $('#vm-status').textContent = 'Wails backend unavailable';
-    return;
-  }
-  const st = await api.GetVMStatusWails();
-  let line = `${st.vmName || ''} — ${st.state || 'unknown'}`;
-  if (st.networkMode) line += ` · net ${st.networkMode}`;
-  if (st.agentEnabled === 'true') {
-    if (st.agentStatus === 'ok') {
-      line += ` | agent v${st.agentVersion || '?'} (payload=${st.agentPayloadSession})`;
-    } else {
-      line += ' | agent unreachable';
+  if (statusRefreshInFlight) return;
+  statusRefreshInFlight = true;
+  try {
+    const api = await backend();
+    if (!api?.GetVMStatusWails) {
+      $('#vm-status').textContent = 'Wails backend unavailable';
+      return;
     }
-  }
-  $('#vm-status').textContent = line;
-  const agentEl = $('#agent-status');
-  if (agentEl) {
-    if (st.agentEnabled !== 'true') {
-      agentEl.textContent = 'Agent disabled in config';
-    } else if (st.agentStatus === 'ok') {
-      const usn = st.agentVersion >= '1.0.2'
-        ? `, USN ${st.agentUSN === 'true' ? 'on' : 'off'}`
-        : '';
-      const payload = st.agentPayloadSession === 'true' ? '' : ' (payload user not logged in — HKCU diff empty)';
-      agentEl.textContent = `Agent OK — Sysmon ${st.agentSysmon === 'true' ? 'on' : 'off'}${usn}${payload}`;
-    } else {
-      agentEl.textContent = st.agentError || 'Agent not installed';
+    const st = await api.GetVMStatusWails();
+    let line = `${st.vmName || ''} — ${st.state || 'unknown'}`;
+    if (st.networkMode) line += ` · net ${st.networkMode}`;
+    if (st.agentEnabled === 'true') {
+      if (st.agentStatus === 'ok') {
+        line += ` | agent v${st.agentVersion || '?'} (payload=${st.agentPayloadSession})`;
+      } else {
+        line += ' | agent unreachable';
+      }
     }
+    $('#vm-status').textContent = line;
+    const agentEl = $('#agent-status');
+    if (agentEl) {
+      if (st.agentEnabled !== 'true') {
+        agentEl.textContent = 'Agent disabled in config';
+      } else if (st.agentStatus === 'ok') {
+        const usn = st.agentVersion >= '1.0.2'
+          ? `, USN ${st.agentUSN === 'true' ? 'on' : 'off'}`
+          : '';
+        const payload = st.agentPayloadSession === 'true' ? '' : ' (payload user not logged in — HKCU diff empty)';
+        agentEl.textContent = `Agent OK — Sysmon ${st.agentSysmon === 'true' ? 'on' : 'off'}${usn}${payload}`;
+      } else {
+        agentEl.textContent = st.agentError || 'Agent not installed';
+      }
+    }
+  } finally {
+    statusRefreshInFlight = false;
   }
 }
 
@@ -786,12 +826,16 @@ function renderOverview() {
   if ((m.warnings || []).length) {
     const ul = document.createElement('ul');
     ul.className = 'warn-list';
-    for (const w of m.warnings) {
+	for (const w of m.warnings) {
+      const text = w == null ? '' : String(w);
+      if (/^source:/i.test(text.trim())) continue;
       const li = document.createElement('li');
-      li.textContent = w == null ? '' : String(w);
+      li.textContent = text;
       ul.appendChild(li);
     }
-    panel.appendChild(ul);
+    if (ul.childElementCount) {
+      panel.appendChild(ul);
+    }
   }
 
   const grid = document.createElement('div');
@@ -1762,6 +1806,10 @@ $('#btn-log-clear').addEventListener('click', async () => {
   await refreshLogView();
 });
 $('#log-source').addEventListener('change', () => refreshLogView().catch((e) => renderLogView(String(e))));
+$('#log-level')?.addEventListener('change', () => {
+  localStorage.setItem(LOG_LEVEL_KEY, currentMinLogLevel());
+  refreshLogView().catch((e) => renderLogView(String(e)));
+});
 
 EventsOn('applog', (entry) => {
   if (!logDrawerOpen || $('#log-source').value !== 'activity') return;
@@ -1769,6 +1817,7 @@ EventsOn('applog', (entry) => {
 });
 
 (async () => {
+  restoreLogLevelSelect();
   // Load panels independently so one slow/hung call cannot leave the whole UI on "Loading…".
   const results = await Promise.allSettled([
     loadUISettings(),
@@ -1788,6 +1837,7 @@ EventsOn('applog', (entry) => {
   }
   renderOverview();
   setInterval(() => {
+    refreshStatus().catch(() => {});
     refreshCaptureStatus().catch(() => {});
     refreshGatewayStatus().catch(() => {});
   }, 10000);

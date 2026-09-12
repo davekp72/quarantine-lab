@@ -10,9 +10,9 @@ import (
 )
 
 var (
-	modAdvapi32                   = windows.NewLazySystemDLL("advapi32.dll")
-	procImpersonateLoggedOnUser   = modAdvapi32.NewProc("ImpersonateLoggedOnUser")
-	procRevertToSelf              = modAdvapi32.NewProc("RevertToSelf")
+	modAdvapi32                 = windows.NewLazySystemDLL("advapi32.dll")
+	procImpersonateLoggedOnUser = modAdvapi32.NewProc("ImpersonateLoggedOnUser")
+	procRevertToSelf            = modAdvapi32.NewProc("RevertToSelf")
 )
 
 var backupPrivs = []string{
@@ -59,7 +59,7 @@ func ImpersonateUser(token windows.Token, fn func() error) error {
 	return fn()
 }
 
-// DuplicateImpersonationToken returns a primary token suitable for impersonation.
+// DuplicateImpersonationToken returns an impersonation token.
 func DuplicateImpersonationToken(token windows.Token) (windows.Token, error) {
 	var dup windows.Token
 	err := windows.DuplicateTokenEx(
@@ -68,6 +68,23 @@ func DuplicateImpersonationToken(token windows.Token) (windows.Token, error) {
 		nil,
 		windows.SecurityImpersonation,
 		windows.TokenImpersonation,
+		&dup,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return dup, nil
+}
+
+// DuplicatePrimaryToken returns a primary token for CreateProcessAsUser / os/exec Token.
+func DuplicatePrimaryToken(token windows.Token) (windows.Token, error) {
+	var dup windows.Token
+	err := windows.DuplicateTokenEx(
+		token,
+		windows.MAXIMUM_ALLOWED,
+		nil,
+		windows.SecurityImpersonation,
+		windows.TokenPrimary,
 		&dup,
 	)
 	if err != nil {

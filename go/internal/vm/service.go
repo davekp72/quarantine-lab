@@ -10,14 +10,15 @@ import (
 	"time"
 
 	"github.com/quarantine-lab/quarantine/internal/config"
+	"github.com/quarantine-lab/quarantine/internal/guest"
 	"github.com/quarantine-lab/quarantine/internal/network"
 	"github.com/quarantine-lab/quarantine/internal/vbox"
 )
 
 // Service provides VM lifecycle operations.
 type Service struct {
-	Cfg    *config.Config
-	VBox   *vbox.Client
+	Cfg        *config.Config
+	VBox       *vbox.Client
 	ConfigPath string
 }
 
@@ -178,7 +179,7 @@ func (s *Service) DeleteSnapshot(ctx context.Context, name string, force bool) e
 	}
 
 	protected := map[string]bool{
-		strings.ToLower(s.Cfg.CleanSnapshot): true,
+		strings.ToLower(s.Cfg.CleanSnapshot):                    true,
 		strings.ToLower(s.Cfg.Manifest.SessionBaselineSnapshot): true,
 	}
 	if protected[strings.ToLower(name)] && !force {
@@ -310,25 +311,17 @@ func (s *Service) disableAutoLogonIfRunning() error {
 	if s == nil || s.Cfg == nil || s.VBox == nil {
 		return nil
 	}
-	user := strings.TrimSpace(s.Cfg.Guest.Username)
-	pass := strings.TrimSpace(s.Cfg.Guest.Password)
-	if user == "" || pass == "" {
-		return fmt.Errorf("guest credentials missing")
-	}
+	g := guest.New(s.Cfg, s.VBox)
 	root := config.ProjectRoot(s.ConfigPath)
 	host := filepath.Join(root, "network", "guest", "Disable-QuarantineAutoLogon.ps1")
 	if _, err := os.Stat(host); err != nil {
 		return err
 	}
-	dest := `C:\Users\Public\Quarantine\Disable-QuarantineAutoLogon.ps1`
-	if err := s.VBox.GuestControlCopyTo(s.Cfg.VMName, user, pass, host, dest, 45*time.Second); err != nil {
+	destDir := `C:\Users\Public\Quarantine`
+	if err := g.CopyTo(host, destDir, g.GuestCreds()); err != nil {
 		return err
 	}
-	_, err := s.VBox.GuestControlRun(
-		s.Cfg.VMName, user, pass,
-		`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`,
-		[]string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", dest},
-		60*time.Second,
-	)
+	dest := destDir + `\Disable-QuarantineAutoLogon.ps1`
+	_, err := g.RunPowerShell(dest, nil, g.GuestCreds())
 	return err
 }

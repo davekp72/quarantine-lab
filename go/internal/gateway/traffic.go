@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/quarantine-lab/quarantine/internal/config"
+	"github.com/quarantine-lab/quarantine/internal/guest"
 )
 
 // SetTrafficMode switches the Linux gateway between permissive MITM and FakeNet sinkhole.
@@ -98,7 +99,6 @@ func (m *Manager) windowsGuestState() (running bool, state string, err error) {
 
 // testFakeNetGuestBrowser runs CONNECT+TLS inside the Windows VM (same path as Edge/Chrome).
 func (m *Manager) testFakeNetGuestBrowser() error {
-	win := strings.TrimSpace(m.Cfg.VMName)
 	script := filepath.Join(m.ProjectRoot, "network", "guest", "Test-FakeNetBrowserHttps.ps1")
 	script, err := filepath.Abs(script)
 	if err != nil {
@@ -107,18 +107,12 @@ func (m *Manager) testFakeNetGuestBrowser() error {
 	if _, err := os.Stat(script); err != nil {
 		return fmt.Errorf("missing %s: %w", script, err)
 	}
-	user := m.Cfg.Guest.Username
-	pass := m.Cfg.Guest.Password
+	g := guest.New(m.Cfg, m.VBox)
 	dest := `C:\Users\Public\Quarantine\Test-FakeNetBrowserHttps.ps1`
-	if err := m.VBox.GuestControlCopyTo(win, user, pass, script, dest, 45*time.Second); err != nil {
+	if err := g.CopyToDest(script, dest); err != nil {
 		return fmt.Errorf("upload guest HTTPS test: %w", err)
 	}
-	out, err := m.VBox.GuestControlRun(
-		win, user, pass,
-		`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`,
-		[]string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", dest},
-		45*time.Second,
-	)
+	out, err := g.RunPowerShell(dest, nil, g.GuestCreds())
 	msg := strings.TrimSpace(out)
 	if err != nil {
 		return fmt.Errorf("%w (%s)", err, msg)
@@ -130,7 +124,6 @@ func (m *Manager) testFakeNetGuestBrowser() error {
 }
 
 func (m *Manager) testPermissiveGuestHttps() error {
-	win := strings.TrimSpace(m.Cfg.VMName)
 	script := filepath.Join(m.ProjectRoot, "network", "guest", "Test-PermissiveHttps.ps1")
 	script, err := filepath.Abs(script)
 	if err != nil {
@@ -139,18 +132,12 @@ func (m *Manager) testPermissiveGuestHttps() error {
 	if _, err := os.Stat(script); err != nil {
 		return fmt.Errorf("missing %s: %w", script, err)
 	}
-	user := m.Cfg.Guest.Username
-	pass := m.Cfg.Guest.Password
+	g := guest.New(m.Cfg, m.VBox)
 	dest := `C:\Users\Public\Quarantine\Test-PermissiveHttps.ps1`
-	if err := m.VBox.GuestControlCopyTo(win, user, pass, script, dest, 45*time.Second); err != nil {
+	if err := g.CopyToDest(script, dest); err != nil {
 		return fmt.Errorf("upload guest HTTPS test: %w", err)
 	}
-	out, err := m.VBox.GuestControlRun(
-		win, user, pass,
-		`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`,
-		[]string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", dest},
-		90*time.Second,
-	)
+	out, err := g.RunPowerShell(dest, nil, g.GuestCreds())
 	msg := strings.TrimSpace(out)
 	if err != nil {
 		return fmt.Errorf("%w (%s)", err, msg)

@@ -2,7 +2,10 @@ package types
 
 import "encoding/json"
 
-const Version = "1.0.15"
+const Version = "1.0.16"
+
+// FileMaxBytes is the /v1/files PUT/GET cap (64 MiB).
+const FileMaxBytes = 64 << 20
 
 // CaptureRequest is POST /v1/capture body.
 type CaptureRequest struct {
@@ -84,10 +87,28 @@ type HealthResponse struct {
 	PayloadUserLogged string `json:"payloadUserLogged,omitempty"`
 }
 
+// ExecRequest is POST /v1/exec body.
+type ExecRequest struct {
+	Exe       string   `json:"exe"`
+	Args      []string `json:"args,omitempty"`
+	User      string   `json:"user,omitempty"` // system | guest | payload
+	TimeoutMs int      `json:"timeoutMs,omitempty"`
+}
+
+// ExecResponse is POST /v1/exec result.
+type ExecResponse struct {
+	Stdout   string `json:"stdout"`
+	Stderr   string `json:"stderr"`
+	ExitCode int    `json:"exitCode"`
+	Error    string `json:"error,omitempty"`
+}
+
 // AgentConfig is persisted on the guest.
 type AgentConfig struct {
 	Port        int    `json:"port"`
 	TokenFile   string `json:"tokenFile"`
 	PayloadUser string `json:"payloadUser"`
+	LabAdmin    string `json:"labAdmin,omitempty"`
 	SysmonLog   string `json:"sysmonLog"`
+	SysmonDir   string `json:"sysmonDir,omitempty"`
 }

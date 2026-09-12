@@ -202,7 +202,10 @@ param(
     [switch]$Wait,
 
     [Parameter()]
-    [switch]$Continue
+    [switch]$Continue,
+
+    [Parameter()]
+    [switch]$GuestAdditions
 
 )
 
@@ -354,21 +357,20 @@ function Test-QuarantinePreferGo {
         'guest-additions'  = $true
         'relocate'         = $true
         'consolidate'      = $true
-        'payload'          = $true
         'help'             = $true
         'stealth'          = $true
     }
     if ($psOnly.ContainsKey($ActionName)) { return $false }
     if ($ActionName -eq 'capture' -and $Sub -eq 'status') { return $false }
     if ($ActionName -eq 'inbox' -and $Sub -in @('push', 'clear', 'status')) { return $false }
-    if ($ActionName -eq 'guest' -and $Sub -in @('test', 'ps', 'hosts')) { return $false }
+    if ($ActionName -eq 'guest' -and $Sub -in @('ps', 'hosts')) { return $false }
     if ($ActionName -eq 'sysmon' -and $Sub -in @('copy', 'install', 'grant', 'fetch')) { return $false }
     if ($ActionName -eq 'manifest' -and $Sub -in @('mark', 'list', 'enrich', 'probe', 'capture', 'capture-live')) { return $false }
     if ($env:QUARANTINE_FORCE_PS -eq '1') { return $false }
     $goActions = @(
         'ui', 'status', 'start', 'stop', 'snapshot', 'snapshots', 'preserve', 'reset',
         'baseline', 'delete-snapshot', 'manifest', 'network', 'proxy', 'capture',
-        'inbox', 'clipboard', 'guest', 'agent', 'setup', 'sysmon', 'gateway'
+        'inbox', 'clipboard', 'guest', 'payload', 'agent', 'setup', 'sysmon', 'gateway'
     )
     return ($goActions -contains $ActionName)
 }
@@ -380,6 +382,9 @@ function Get-QuarantineGoArgList {
         [string[]]$Rest
     )
     $goArgs = New-Object System.Collections.Generic.List[string]
+    if ($GuestAdditions) {
+        [void]$goArgs.Add('--guest-additions')
+    }
     [void]$goArgs.Add($ActionName)
     if (-not [string]::IsNullOrWhiteSpace($Sub)) {
         # Pass through Go-style flags already in SubAction (--clean) or subcommands (start).
@@ -497,7 +502,8 @@ switch ($Action) {
             -Force:$Force `
             -WaitMinutes $waitMin `
             -NoWait:$NoWait `
-            -Continue:$Continue
+            -Continue:$Continue `
+            -GuestAdditions:$GuestAdditions
     }
 
     'install' {
@@ -1056,7 +1062,7 @@ Quarantine VM utility (VirtualBox)
 
   create     Create the isolated VM (requires config + Windows ISO)
 
-  build-windows  Secrets + create + unattend install; wait for GA/guestcontrol; stage provision (-Force/-NoWait/-Continue/-WaitMinutes)
+  build-windows  Secrets + create + unattend install; wait for agent health (-Force/-NoWait/-Continue/-WaitMinutes/-GuestAdditions)
 
   install    Start VM for first-time Windows installation
 
@@ -1080,16 +1086,17 @@ Quarantine VM utility (VirtualBox)
 
   ui         Open the Wails desktop UI (Go)
 
-  agent      install|sync-token|health|set-token (Go)
+  agent      install|sync-token|health|set-token|wait (Go)
 
 
 
-Guest Additions (host-to-guest paste):
+Guest Additions fallback (clipboard / resize / VBOXSVR / guestcontrol):
 
-  guest-additions   Mount VirtualBox Guest Additions ISO in the VM
+  -GuestAdditions       Use VBox guestcontrol instead of the agent for this command
 
-  stealth           Soften VBox fingerprints (DMI/MAC/CPU); keeps Guest Additions
+  guest-additions       Mount VirtualBox Guest Additions ISO in the VM
 
+  stealth               Soften VBox fingerprints (DMI/MAC/CPU); keeps VBoxSVGA
 
 
 Network (internet-only quarantine vs offline):
@@ -1120,11 +1127,11 @@ Proxy / capture:
 
 
 
-Clipboard (requires Guest Additions in the guest):
+Clipboard (requires -GuestAdditions + Additions in the guest):
 
-  clipboard hosttoguest   Paste from host into VM (default, one-way)
+  clipboard hosttoguest   Paste from host into VM (one-way)
 
-  clipboard disabled      Turn off clipboard sharing
+  clipboard disabled      Turn off clipboard sharing (default)
 
   clipboard guesttohost   Copy from VM to host only
 
@@ -1136,9 +1143,9 @@ Sample transfer (one-way host inbox):
 
   inbox push <file>       Copy sample(s) to host inbox + SHA256 log
 
-  inbox open              Mount read-only share in running guest
+  inbox open              Copy inbox files into C:\Users\Public\Quarantine\inbox (or \\VBOXSVR with -GuestAdditions)
 
-  inbox close             Remove transient share
+  inbox close             Remove guest inbox / VBOXSVR share
 
   inbox status            List inbox files and mount state
 
@@ -1146,17 +1153,21 @@ Sample transfer (one-way host inbox):
 
 
 
-Guest control (requires Guest Additions + guest credentials):
+Guest control (agent HTTP by default; -GuestAdditions for VBox guestcontrol):
 
-  guest test              Verify guest control connectivity
+  guest test              Verify agent health (or guestcontrol)
 
   guest run <cmd...>      Run cmd.exe /c command in guest
 
   guest ps <script>       Run PowerShell -Command in guest
 
-  guest copy <file>       Copy host file(s) into guest (no shared folder)
-  guest provision         Stage agent/network/Sysmon; FirstLogon already ran elevated provision from floppy — finish via Finish-QuarantineProvision.cmd after this stage
+  guest copy <file>       Copy host file(s) into guest
+
+  guest provision         Restage agent/network/Sysmon scripts via the agent
+
   guest gateway-setup     Upload Configure + CA installer + mitm CA for gateway mode
+
+  payload run|ps|copy     Same as guest, as the logged-on payload user
 
 
 
@@ -1193,15 +1204,15 @@ Setup:
 
   Or one shot:
      .\quarantine-vm.ps1 build-windows
-     (when desktop appears: .\quarantine-vm.ps1 guest-additions, install DVD, reboot)
+     (waits for FirstLogon agent /health through the gateway)
 
-  6. After FirstLogon: .\quarantine-vm.ps1 guest-additions, then guest provision
-     Finish agent/Sysmon via Public Desktop Finish-QuarantineProvision.cmd
-       & 'C:\Users\Public\Quarantine\Invoke-QuarantineGuestProvision.ps1'
+  Guest Additions (clipboard/resize) are optional:
+     .\quarantine-vm.ps1 -GuestAdditions build-windows
 
-  7. .\quarantine-vm.ps1 guest disable-autologon   (or baseline does this if the VM is running)
+  6. .\quarantine-vm.ps1 agent health
+     .\quarantine-vm.ps1 guest disable-autologon   (or baseline does this if the VM is running)
 
-  8. .\quarantine-vm.ps1 baseline
+  7. .\quarantine-vm.ps1 baseline
 
 
 

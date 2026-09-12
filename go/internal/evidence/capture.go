@@ -50,14 +50,7 @@ func (s *Service) deployPrivDeps(creds guest.Credentials) error {
 func (s *Service) runGuestPS(creds guest.Credentials, scriptLeaf string, args []string) (string, error) {
 	guestDir := s.guestDir()
 	scriptPath := filepath.Join(guestDir, scriptLeaf)
-	psArgs := append([]string{
-		"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath,
-	}, args...)
-	return s.VBox.GuestControlRun(
-		s.Cfg.VMName, creds.Username, creds.Password,
-		`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`,
-		psArgs, s.captureTimeout(),
-	)
+	return s.Guest.RunPowerShell(scriptPath, args, creds)
 }
 
 func (s *Service) copyFromGuest(guestPath, hostPath string, creds guest.Credentials) error {
@@ -168,12 +161,7 @@ func (s *Service) publishUsnBaselineFromHost(hostBaseline string) error {
 	up := strings.ReplaceAll(uploaded, `'`, `''`)
 	tg := strings.ReplaceAll(target, `'`, `''`)
 	ps := fmt.Sprintf("Move-Item -LiteralPath '%s' -Destination '%s' -Force", up, tg)
-	_, err := s.VBox.GuestControlRun(
-		s.Cfg.VMName, creds.Username, creds.Password,
-		`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`,
-		[]string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps},
-		s.captureTimeout(),
-	)
+	_, err := s.Guest.Run(guest.UserSystem, `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps}, s.captureTimeout())
 	return err
 }
 

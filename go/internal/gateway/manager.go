@@ -483,27 +483,20 @@ func (m *Manager) AttachLabGuest() error {
 	state := nicMachineField(info, "VMState")
 	running := strings.EqualFold(state, "running") || strings.EqualFold(state, "paused")
 
-	if running && nic1OK && nic2Gone {
-		m.Cfg.Network.Mode = "gateway"
-		m.Cfg.Network.GuestGateway = g.LANGateway
-		m.Cfg.Network.GuestDNS = g.LANGateway
-		return nil
-	}
-
-	if running && nic1OK && !nic2Gone {
-		// Soft-disable leftover NIC without reboot when possible.
-		_, _ = m.VBox.RunWithTimeout(30*time.Second, "controlvm", vm, "setlinkstate2", "off")
-		m.Cfg.Network.Mode = "gateway"
-		m.Cfg.Network.GuestGateway = g.LANGateway
-		m.Cfg.Network.GuestDNS = g.LANGateway
-		return nil
+	if running {
+		if nic1OK {
+			if !nic2Gone {
+				_, _ = m.VBox.RunWithTimeout(30*time.Second, "controlvm", vm, "setlinkstate2", "off")
+			}
+			m.Cfg.Network.Mode = "gateway"
+			m.Cfg.Network.GuestGateway = g.LANGateway
+			m.Cfg.Network.GuestDNS = g.LANGateway
+			return nil
+		}
+		return fmt.Errorf("lab VM %q is running with nic1=%s; not powering it off to attach intnet. Stop the VM first, or leave it (Setup already uses the gateway LAN)", vm, nicMachineValue(info, 1))
 	}
 
 	if !nic1OK || !nic2Gone {
-		if running {
-			_, _ = m.VBox.RunWithTimeout(2*time.Minute, "controlvm", vm, "poweroff")
-			time.Sleep(2 * time.Second)
-		}
 		if _, err := m.VBox.RunWithTimeout(time.Minute, "modifyvm", vm,
 			"--nic1", "intnet",
 			"--intnet1", g.IntnetName,
@@ -684,8 +677,10 @@ systemctl try-restart quarantine-mitm-explicit quarantine-mitm-transparent 2>/de
 	return err
 }
 
-// SyncGuestClock sets the gateway wall clock from the host (UTC) so proxy/pcap
-// timestamps align with snapshot capturedAt used by network evidence enrichment.
+// SyncGuestClock sets the Linux *gateway* wall clock from the host (UTC) so
+// proxy/pcap timestamps align with host time. The Windows analysis guest is
+// synced separately via the agent on Launch (SyncWindowsGuestClock).
+// NTP is disabled on the gateway for a one-shot set.
 func (m *Manager) SyncGuestClock() error {
 	stamp := time.Now().UTC().Format("2006-01-02 15:04:05")
 	script := fmt.Sprintf(`set -e
@@ -705,6 +700,17 @@ date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ
 	return nil
 }
 
+// truncateProxyLogs clears rotating mitm/proxy logs on the gateway so the next
+// StopCapture package matches the PCAP session (not leftover traffic from earlier).
+func (m *Manager) truncateProxyLogs() {
+	script := `mkdir -p /var/log/quarantine/proxy
+for f in access.log errors.log access-transparent.log flows.jsonl flows-transparent.jsonl flows.mitm flows-transparent.mitm; do
+  truncate -s 0 "/var/log/quarantine/proxy/$f" 2>/dev/null || : > "/var/log/quarantine/proxy/$f" 2>/dev/null || true
+done
+true`
+	_, _ = m.linuxRunWithTimeout(30*time.Second, "sudo", "bash", "-c", script)
+}
+
 // StartCapture starts tcpdump on the gateway LAN.
 func (m *Manager) StartCapture() (string, error) {
 	if err := m.Start(); err != nil {
@@ -716,6 +722,10 @@ func (m *Manager) StartCapture() (string, error) {
 	// Stop a crash-looping unit so the next start picks up the refreshed unit/scripts.
 	_, _ = m.linuxRunWithTimeout(30*time.Second, "sudo", "systemctl", "stop", "quarantine-capture")
 	_, _ = m.linuxRunWithTimeout(30*time.Second, "sudo", "systemctl", "reset-failed", "quarantine-capture")
+	// Reset proxy/mitm logs so preserve does not attach pre-session traffic.
+	// (Previously truncated only after StopCapture, so IgnoreTimeWindow packages
+	// included hours of leftover flows — inflated DNS/HTTP overview counts.)
+	m.truncateProxyLogs()
 	if _, err := m.linuxRunWithTimeout(30*time.Second, "sudo", "systemctl", "start", "quarantine-capture"); err != nil {
 		return "", err
 	}

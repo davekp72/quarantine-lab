@@ -145,3 +145,24 @@ ssh_pwauth: false
 		t.Fatal("placeholder left in unattend")
 	}
 }
+
+func TestUnattendStageExtrasRequiresAgentBinary(t *testing.T) {
+	dir := t.TempDir()
+	c := &Config{
+		Agent: AgentConfig{
+			Enabled:   true,
+			TokenFile: filepath.Join(dir, "agent-token.txt"),
+		},
+	}
+	if err := c.SaveAgentToken("aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"); err != nil {
+		t.Fatal(err)
+	}
+	notes := []string{}
+	_, err := c.unattendStageExtras(dir, &notes)
+	if err == nil {
+		t.Fatal("expected missing agent exe to fail")
+	}
+	if !strings.Contains(err.Error(), "quarantine-agent.exe") {
+		t.Fatalf("err=%v", err)
+	}
+}

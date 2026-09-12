@@ -1,52 +1,115 @@
 package inbox
 
 import (
+	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
 
+	"github.com/quarantine-lab/quarantine/internal/agent/guestpaths"
 	"github.com/quarantine-lab/quarantine/internal/config"
+	"github.com/quarantine-lab/quarantine/internal/guest"
 	"github.com/quarantine-lab/quarantine/internal/vbox"
 )
 
-// Service manages transient inbox shared folder.
+// Service manages sample delivery into the guest.
 type Service struct {
-	Cfg  *config.Config
-	VBox *vbox.Client
-	open bool
+	Cfg   *config.Config
+	VBox  *vbox.Client
+	Guest *guest.Client
+	mode  string // agent | vboxshare | ""
 }
 
-// New creates inbox service.
+// New creates an inbox service.
 func New(cfg *config.Config, vb *vbox.Client) *Service {
-	return &Service{Cfg: cfg, VBox: vb}
+	return &Service{Cfg: cfg, VBox: vb, Guest: guest.New(cfg, vb)}
 }
 
-// Open mounts read-only inbox share.
+// GuestDir is the agent-delivered inbox path inside Windows.
+func GuestDir() string {
+	return guestpaths.InboxDir()
+}
+
+// Open delivers inbox files (agent) or mounts a transient VBOXSVR share (Guest Additions).
 func (s *Service) Open() error {
-	if s.open {
+	if s.Cfg.UseGuestAdditions() {
+		if s.mode == "vboxshare" {
+			return nil
+		}
+		if err := s.VBox.SharedFolderAdd(s.Cfg.VMName, s.Cfg.Inbox.ShareName, s.Cfg.Inbox.HostPath, s.Cfg.Inbox.ReadOnly); err != nil {
+			return fmt.Errorf("open inbox: %w", err)
+		}
+		s.mode = "vboxshare"
 		return nil
 	}
-	if err := s.VBox.SharedFolderAdd(s.Cfg.VMName, s.Cfg.Inbox.ShareName, s.Cfg.Inbox.HostPath, s.Cfg.Inbox.ReadOnly); err != nil {
-		return fmt.Errorf("open inbox: %w", err)
+	host := strings.TrimSpace(s.Cfg.Inbox.HostPath)
+	if host == "" {
+		return fmt.Errorf("inbox.hostPath is empty")
 	}
-	s.open = true
+	entries, err := os.ReadDir(host)
+	if err != nil {
+		if os.IsNotExist(err) {
+			if mkErr := os.MkdirAll(host, 0o755); mkErr != nil {
+				return mkErr
+			}
+			entries = nil
+		} else {
+			return err
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	destDir := guestpaths.InboxDir()
+	_ = s.Guest.Transport().Mkdir(ctx, destDir)
+	copied := 0
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		src := filepath.Join(host, e.Name())
+		dest := guestpaths.GuestJoin(destDir, e.Name())
+		if err := s.Guest.CopyToDest(src, dest); err != nil {
+			return fmt.Errorf("deliver %s: %w", e.Name(), err)
+		}
+		copied++
+	}
+	s.mode = "agent"
+	if copied == 0 {
+		return nil
+	}
 	return nil
 }
 
-// Close removes inbox share.
+// Close removes the VBOXSVR share or deletes the guest inbox directory.
 func (s *Service) Close() error {
-	if !s.open {
+	if s.mode == "vboxshare" || s.Cfg.UseGuestAdditions() {
+		if err := s.VBox.SharedFolderRemove(s.Cfg.VMName, s.Cfg.Inbox.ShareName); err != nil {
+			if s.mode == "" {
+				return err
+			}
+		}
+		s.mode = ""
 		return nil
 	}
-	if err := s.VBox.SharedFolderRemove(s.Cfg.VMName, s.Cfg.Inbox.ShareName); err != nil {
+	if err := s.Guest.Remove(guestpaths.InboxDir()); err != nil {
 		return err
 	}
-	s.open = false
+	s.mode = ""
 	return nil
 }
 
-// Status returns open/closed.
+// Status returns open/closed plus transport.
 func (s *Service) Status() string {
-	if s.open {
-		return "open"
+	if s.mode == "vboxshare" {
+		return "open (vboxshare \\\\VBOXSVR\\" + s.Cfg.Inbox.ShareName + ")"
 	}
-	return "closed"
+	if s.mode == "agent" {
+		return "open (agent " + guestpaths.InboxDir() + ")"
+	}
+	if s.Cfg.UseGuestAdditions() {
+		return "closed (vboxshare)"
+	}
+	return "closed (agent " + guestpaths.InboxDir() + ")"
 }

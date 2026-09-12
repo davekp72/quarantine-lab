@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/quarantine-lab/quarantine/internal/config"
 	"github.com/quarantine-lab/quarantine/internal/httpbody"
@@ -15,10 +16,13 @@ import (
 
 var accessLogLine = regexp.MustCompile(`^(\S+)\s+(\S+)\s+(.+)$`)
 
+const networkClockSkew = 30 * time.Minute
+
 // attachSnapshotHTTP replaces Network.Requests with rows parsed from the To
 // snapshot's evidence-network package. Avoids PowerShell ConvertTo-Json, which
 // emits invalid `\a`/`\v` escapes when mitm bodies contain control bytes.
-func attachSnapshotHTTP(cfgPath string, result *Result) {
+// Rows are clipped to the CleanSession→Evidence window (with skew / duration fallback).
+func attachSnapshotHTTP(cfgPath string, result *Result, fromCaptured, toCaptured string) {
 	if result == nil {
 		return
 	}
@@ -32,6 +36,7 @@ func attachSnapshotHTTP(cfgPath string, result *Result) {
 	}
 	dir := filepath.Join(logDir, config.SafeSnapshotFileName(snap)+"-network")
 	reqs, sources := ReadNetworkHTTP(dir)
+	reqs = FilterHTTPBySnapshotWindow(reqs, fromCaptured, toCaptured)
 	if len(reqs) == 0 {
 		return
 	}
@@ -53,13 +58,220 @@ func attachSnapshotHTTP(cfgPath string, result *Result) {
 		result.Network.Message == "" {
 		result.Network.Message = "Decrypted HTTPS from mitmproxy flows.jsonl (click a request for bodies)."
 	}
-	if t, _ := reqs[0]["t"].(string); t != "" && result.Network.WindowFrom == "" {
+	if t, _ := reqs[0]["t"].(string); t != "" {
 		result.Network.WindowFrom = t
 	}
-	if t, _ := reqs[len(reqs)-1]["t"].(string); t != "" && result.Network.WindowTo == "" {
+	if t, _ := reqs[len(reqs)-1]["t"].(string); t != "" {
 		result.Network.WindowTo = t
 	}
 	result.Summary.NetworkRequests = len(reqs)
+}
+
+// FilterHTTPBySnapshotWindow keeps HTTP rows for the guest snapshot interval.
+// Prefer absolute From/To with clock skew; if that window is empty (guest vs
+// gateway clock far apart) or spans far longer than the snapshot gap (skew
+// pulled in leftover package traffic), keep only the tail matching the gap.
+func FilterHTTPBySnapshotWindow(reqs []map[string]any, fromCaptured, toCaptured string) []map[string]any {
+	if len(reqs) == 0 {
+		return reqs
+	}
+	fromT, fromOK := parseNetworkInstant(fromCaptured)
+	toT, toOK := parseNetworkInstant(toCaptured)
+	if !fromOK || !toOK {
+		return reqs
+	}
+	if toT.Before(fromT) {
+		fromT, toT = toT, fromT
+	}
+	session := toT.Sub(fromT)
+	if session < 2*time.Minute {
+		session = 2 * time.Minute
+	}
+
+	looseFrom := fromT.Add(-networkClockSkew)
+	looseTo := toT.Add(networkClockSkew)
+	var abs []map[string]any
+	var parsed []struct {
+		row map[string]any
+		t   time.Time
+	}
+	var maxT time.Time
+	for _, r := range reqs {
+		t, ok := parseNetworkInstant(stringFromMap(r, "t"))
+		if !ok {
+			continue
+		}
+		parsed = append(parsed, struct {
+			row map[string]any
+			t   time.Time
+		}{r, t})
+		if maxT.IsZero() || t.After(maxT) {
+			maxT = t
+		}
+		if !t.Before(looseFrom) && !t.After(looseTo) {
+			abs = append(abs, r)
+		}
+	}
+	if len(parsed) == 0 {
+		return reqs
+	}
+	if len(abs) > 0 {
+		absSpan := httpTimeSpan(abs)
+		// Skew can admit ~hour of pre-session junk; clip to session-sized tail.
+		if absSpan <= session+2*networkClockSkew && absSpan <= session+10*time.Minute {
+			return abs
+		}
+	}
+	pad := 2 * time.Minute
+	if session/4 > pad {
+		pad = session / 4
+	}
+	cut := maxT.Add(-(session + pad))
+	out := make([]map[string]any, 0, len(parsed))
+	for _, p := range parsed {
+		if !p.t.Before(cut) {
+			out = append(out, p.row)
+		}
+	}
+	if len(out) == 0 {
+		return reqs
+	}
+	return out
+}
+
+func httpTimeSpan(reqs []map[string]any) time.Duration {
+	var minT, maxT time.Time
+	for _, r := range reqs {
+		t, ok := parseNetworkInstant(stringFromMap(r, "t"))
+		if !ok {
+			continue
+		}
+		if minT.IsZero() || t.Before(minT) {
+			minT = t
+		}
+		if maxT.IsZero() || t.After(maxT) {
+			maxT = t
+		}
+	}
+	if minT.IsZero() || maxT.IsZero() {
+		return 0
+	}
+	return maxT.Sub(minT)
+}
+
+// FilterDNSBySnapshotWindow mirrors FilterHTTPBySnapshotWindow for DNS rows.
+func FilterDNSBySnapshotWindow(rows []map[string]any, fromCaptured, toCaptured string) []map[string]any {
+	return FilterHTTPBySnapshotWindow(rows, fromCaptured, toCaptured)
+}
+
+// DedupDNSByQuery keeps one row per query name (prefer sysmon > pcap > mitm/proxy)
+// and drops IP-literal "queries" inferred from HTTP hosts.
+func DedupDNSByQuery(rows []map[string]any) []map[string]any {
+	if len(rows) == 0 {
+		return rows
+	}
+	priority := func(src string) int {
+		switch strings.ToLower(strings.TrimSpace(src)) {
+		case "sysmon":
+			return 4
+		case "pcap":
+			return 3
+		case "sni":
+			return 2
+		case "mitm", "proxy":
+			return 1
+		default:
+			return 0
+		}
+	}
+	best := map[string]map[string]any{}
+	order := []string{}
+	for _, r := range rows {
+		q := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(stringFromMap(r, "query")), "."))
+		if q == "" {
+			q = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(stringFromMap(r, "qname")), "."))
+		}
+		if q == "" || looksLikeIP(q) {
+			continue
+		}
+		src, _ := r["source"].(string)
+		prev, ok := best[q]
+		if !ok {
+			best[q] = r
+			order = append(order, q)
+			continue
+		}
+		prevSrc, _ := prev["source"].(string)
+		if priority(src) > priority(prevSrc) {
+			best[q] = r
+			continue
+		}
+		// Merge answers onto the preferred row.
+		if priority(src) == priority(prevSrc) {
+			mergeDNSAnswers(prev, r)
+		} else {
+			mergeDNSAnswers(best[q], r)
+		}
+	}
+	out := make([]map[string]any, 0, len(order))
+	for _, q := range order {
+		out = append(out, best[q])
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		ti, _ := out[i]["t"].(string)
+		tj, _ := out[j]["t"].(string)
+		if ti != tj {
+			return ti < tj
+		}
+		qi, _ := out[i]["query"].(string)
+		qj, _ := out[j]["query"].(string)
+		return qi < qj
+	})
+	return out
+}
+
+func mergeDNSAnswers(dst, src map[string]any) {
+	if dst == nil || src == nil {
+		return
+	}
+	var existing []string
+	switch v := dst["answers"].(type) {
+	case []string:
+		existing = append([]string{}, v...)
+	case []any:
+		for _, x := range v {
+			if s, ok := x.(string); ok && s != "" {
+				existing = append(existing, s)
+			}
+		}
+	}
+	seen := map[string]bool{}
+	for _, s := range existing {
+		seen[s] = true
+	}
+	add := func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] {
+			return
+		}
+		seen[s] = true
+		existing = append(existing, s)
+	}
+	switch v := src["answers"].(type) {
+	case []string:
+		for _, s := range v {
+			add(s)
+		}
+	case []any:
+		for _, x := range v {
+			if s, ok := x.(string); ok {
+				add(s)
+			}
+		}
+	}
+	if len(existing) > 0 {
+		dst["answers"] = existing
+	}
 }
 
 // ReadNetworkHTTP loads HTTP/proxy rows from an evidence-network directory.
@@ -108,10 +320,7 @@ func readFlowsJSONL(path string) []map[string]any {
 		if isNetworkNoiseURL(rec.URL) {
 			continue
 		}
-		host := strings.TrimSpace(rec.Host)
-		if host == "" {
-			host = hostFromURL(rec.URL)
-		}
+		host := httpDisplayHost(rec.Host, rec.URL)
 		out = append(out, map[string]any{
 			"t":           rec.T,
 			"method":      rec.Method,
@@ -193,9 +402,29 @@ func hostFromURL(raw string) string {
 		if j := strings.IndexAny(rest, "/:"); j >= 0 {
 			rest = rest[:j]
 		}
+		// Strip IPv6 brackets if present.
+		rest = strings.TrimPrefix(rest, "[")
+		rest = strings.TrimSuffix(rest, "]")
 		return rest
 	}
 	return ""
+}
+
+// httpDisplayHost prefers the URL hostname over mitm's request.host.
+// Transparent MITM often stores the peer IP in host while pretty_url has the domain.
+func httpDisplayHost(recHost, url string) string {
+	fromURL := hostFromURL(url)
+	host := strings.TrimSpace(recHost)
+	if fromURL != "" && !looksLikeIP(fromURL) {
+		return fromURL
+	}
+	if host != "" && !looksLikeIP(host) {
+		return host
+	}
+	if fromURL != "" {
+		return fromURL
+	}
+	return host
 }
 
 func sortHTTPRequests(rows []map[string]any) {

@@ -55,12 +55,17 @@ type UIConfig struct {
 }
 
 const (
-	DefaultFilePreviewMaxKB  = 512
-	minFilePreviewMaxKB      = 64
-	maxFilePreviewMaxKB      = 16384
-	DefaultGuestUsername     = "Administrator"
-	DefaultPayloadUsername   = "analyst"
+	DefaultFilePreviewMaxKB = 512
+	minFilePreviewMaxKB     = 64
+	maxFilePreviewMaxKB     = 16384
+	DefaultGuestUsername    = "Administrator"
+	DefaultPayloadUsername  = "analyst"
+	TransportAgent          = "agent"
+	TransportGuestControl   = "guestcontrol"
 )
+
+// GuestAdditionsCLI is set by --guest-additions / -GuestAdditions and forces guestcontrol.
+var GuestAdditionsCLI bool
 
 // defaultHomeISPPatterns is empty: operators opt in with ui.homeIspPatterns.
 var defaultHomeISPPatterns = []string{}
@@ -361,7 +366,7 @@ type IsolationConfig struct {
 }
 
 // StealthConfig blunts common VirtualBox guest fingerprints without removing Guest Additions.
-// Graphics (VBoxSVGA) and VBox* drivers remain by design — required for guestcontrol/clipboard/resize.
+// Graphics (VBoxSVGA) remains; Guest Additions are optional (--guest-additions).
 type StealthConfig struct {
 	Enabled          *bool             `json:"enabled"` // nil/absent = on when stealth object present with defaults from Apply
 	CPUProfile       string            `json:"cpuProfile"`
@@ -388,6 +393,36 @@ type AccountConfig struct {
 	CopyTargetDir string `json:"copyTargetDir"`
 	TimeoutMs     int    `json:"timeoutMs"`
 	Role          string `json:"role"`
+	// Transport is agent (default) or guestcontrol (Guest Additions fallback).
+	Transport string `json:"transport,omitempty"`
+}
+
+// EffectiveTransport is agent unless config or --guest-additions selects guestcontrol.
+func (c *Config) EffectiveTransport() string {
+	if c == nil {
+		return TransportAgent
+	}
+	if GuestAdditionsCLI {
+		return TransportGuestControl
+	}
+	t := strings.ToLower(strings.TrimSpace(c.Guest.Transport))
+	if t == TransportGuestControl {
+		return TransportGuestControl
+	}
+	return TransportAgent
+}
+
+func (c *Config) UseGuestAdditions() bool {
+	return c.EffectiveTransport() == TransportGuestControl
+}
+
+// AgentUnreachableHint is appended when agent HTTP fails and guestcontrol was not selected.
+func AgentUnreachableHint(err error) string {
+	msg := "agent is unreachable"
+	if err != nil {
+		msg = err.Error()
+	}
+	return msg + ". FirstLogon must finish (gateway LAN + agent service). To use Guest Additions instead: .\\quarantine-vm.ps1 -GuestAdditions <command>  or  quarantine --guest-additions ..."
 }
 
 type SysmonConfig struct {
@@ -446,6 +481,12 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Guest.CopyTargetDir == "" {
 		cfg.Guest.CopyTargetDir = `C:\Users\Public\Quarantine`
+	}
+	if strings.TrimSpace(cfg.Guest.Transport) == "" {
+		cfg.Guest.Transport = TransportAgent
+	}
+	if strings.TrimSpace(cfg.Isolation.ClipboardMode) == "" {
+		cfg.Isolation.ClipboardMode = "disabled"
 	}
 	if cfg.Payload.CopyTargetDir == "" {
 		cfg.Payload.CopyTargetDir = cfg.Guest.CopyTargetDir

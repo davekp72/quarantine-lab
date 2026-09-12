@@ -37,6 +37,9 @@ export function DeleteSnapshotWails(name, force) {
 export function GetAppLogWails() {
   return window.go.app.App.GetAppLogWails();
 }
+export function GetAppLogFilteredWails(minLevel) {
+  return window.go.app.App.GetAppLogFilteredWails(minLevel);
+}
 export function ClearAppLogWails() {
   return window.go.app.App.ClearAppLogWails();
 }

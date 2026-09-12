@@ -214,3 +214,35 @@ func TestResolveSnapshotName(t *testing.T) {
 		t.Fatalf("got %q want Evidence-hostfile", got)
 	}
 }
+
+func TestDefaultTransportAndClipboard(t *testing.T) {
+	t.Cleanup(func() { GuestAdditionsCLI = false })
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cfg.json")
+	raw := `{
+		"vmName": "TestVM",
+		"vmDataDir": "` + strings.ReplaceAll(dir, `\`, `\\`) + `"
+	}`
+	if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.EffectiveTransport() != TransportAgent {
+		t.Fatalf("transport=%q", cfg.EffectiveTransport())
+	}
+	if cfg.Isolation.ClipboardMode != "disabled" {
+		t.Fatalf("clipboardMode=%q", cfg.Isolation.ClipboardMode)
+	}
+	GuestAdditionsCLI = true
+	if cfg.EffectiveTransport() != TransportGuestControl {
+		t.Fatal("CLI flag should force guestcontrol")
+	}
+	GuestAdditionsCLI = false
+	cfg.Guest.Transport = TransportGuestControl
+	if cfg.EffectiveTransport() != TransportGuestControl {
+		t.Fatal("config guestcontrol")
+	}
+}

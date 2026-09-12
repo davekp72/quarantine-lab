@@ -63,12 +63,30 @@ var noisePathParts = []string{
 	`\windows\cbstemp\`,
 	`\windows\winsxs\temp\`,
 	`\windows\appcompat\`,
+	`\windows\catroot\`,
+	`\windows\catroot2\`,
+	`\windows\system32\catroot\`,
+	`\windows\system32\catroot2\`,
+	`\windows\system32\driverstore\`,
+	`\windows\system32\sru\`,
+	`\windows\system32\sleepstudy\`,
+	`\windows\system32\logfiles\`,
+	`\windows\system32\config\txf\`,
+	`\windows\system32\config\txr\`,
+	`\windows\servicing\`,
+	`\windows\logs\`,
+	`\programdata\microsoft\windows\apprepository\`,
+	`\programdata\microsoft\windows\clip\`,
 	`\programdata\microsoft\windows\wer\`,
 	`\programdata\microsoft\diagnosis\`,
 	`\programdata\microsoft\search\`,
 	`\programdata\microsoft\windows defender\scans\`,
 	`\programdata\microsoft\windows defender\support\`,
 	`\programdata\microsoft\windows\caches\`,
+	`\appdata\local\connecteddevicesplatform\`,
+	`\appdata\local\microsoft\windowsapps\`,
+	`\appdata\local\packages\`,
+	`\appdata\local\microsoft\clr_v`,
 	`\users\public\quarantine\`,
 	`\programdata\quarantinelab\`,
 	`\program files\quarantinelab\`,
@@ -264,6 +282,10 @@ func isAlwaysSignal(p, n string) bool {
 		if ext == ".lnk" && strings.Contains(p, `\recent\`) {
 			return false
 		}
+		// DriverStore / CatRoot churn often uses .inf/.cat — treat as noise by path later.
+		if strings.Contains(p, `\driverstore\`) || strings.Contains(p, `\catroot`) {
+			return false
+		}
 		return true
 	}
 	if strings.Contains(p, `\windows\system32\drivers\etc\`) {
@@ -298,16 +320,41 @@ func isSystem32SignalPath(p string) bool {
 	if rest == "" {
 		return false
 	}
-	// Hide known telemetry under System32; keep anything else (root files, drivers, etc).
-	if strings.HasPrefix(rest, `config\systemprofile\`) ||
-		strings.HasPrefix(rest, `spp\store\`) ||
-		strings.HasPrefix(rest, `winevt\logs\`) ||
-		strings.HasPrefix(rest, `wbem\repository\`) ||
-		strings.HasPrefix(rest, `config\journal\`) ||
-		strings.HasPrefix(rest, `config\txr\`) {
-		return false
+	// Nested OS churn under System32 — keep only via signal extension, not by path.
+	noisePrefixes := []string{
+		`config\systemprofile\`,
+		`spp\store\`,
+		`winevt\logs\`,
+		`wbem\repository\`,
+		`config\journal\`,
+		`config\txr\`,
+		`config\txf\`,
+		`catroot\`,
+		`catroot2\`,
+		`driverstore\`,
+		`sru\`,
+		`sleepstudy\`,
+		`logfiles\`,
+		`ias\`,
+		`microsoft\`,
+		`oobe\`,
 	}
-	return true
+	for _, pref := range noisePrefixes {
+		if strings.HasPrefix(rest, pref) {
+			return false
+		}
+	}
+	// Root of System32 (no further dir) — treat as signal (dropped tools/scripts).
+	if !strings.Contains(rest, `\`) {
+		return true
+	}
+	// Persistence / driver locations.
+	if strings.HasPrefix(rest, `drivers\`) ||
+		strings.HasPrefix(rest, `tasks\`) ||
+		strings.HasPrefix(rest, `grouppolicy\`) {
+		return true
+	}
+	return false
 }
 
 // FilePriority ranks a path for inclusion when a list must be capped (lower = keep first).
@@ -332,7 +379,7 @@ func FilePriority(path string) int {
 	if strings.Contains(p, `\users\`) &&
 		(strings.Contains(p, `\desktop\`) || strings.Contains(p, `\documents\`) ||
 			strings.Contains(p, `\downloads\`) || strings.Contains(p, `\pictures\`)) {
-		return 3
+		return 2
 	}
 	return 4
 }

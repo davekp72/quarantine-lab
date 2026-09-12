@@ -143,7 +143,7 @@ func StageFiles(projectRoot, mediaDir, renderedAutounattend, windowsISO string, 
 	}
 	notes = append(notes, "staged Quarantine/guest-provision.json")
 
-	binNotes, binErr := stageGuestBinaries(qDir, payloadUser, extras)
+	binNotes, binErr := stageGuestBinaries(qDir, payloadUser, labAdmin, extras)
 	notes = append(notes, binNotes...)
 	if binErr != nil {
 		return "", notes, binErr
@@ -190,7 +190,7 @@ func StageFiles(projectRoot, mediaDir, renderedAutounattend, windowsISO string, 
 	return floppyPath, notes, nil
 }
 
-func stageGuestBinaries(qDir, payloadUser string, extras StageExtras) (notes []string, err error) {
+func stageGuestBinaries(qDir, payloadUser, labAdmin string, extras StageExtras) (notes []string, err error) {
 	if strings.TrimSpace(extras.AgentExe) != "" {
 		if _, err := os.Stat(extras.AgentExe); err != nil {
 			notes = append(notes, "skip quarantine-agent.exe: "+err.Error())
@@ -217,6 +217,7 @@ func stageGuestBinaries(qDir, payloadUser string, extras StageExtras) (notes []s
 				"binary":      `C:\Users\Public\Quarantine\agent-staging\quarantine-agent.exe`,
 				"port":        port,
 				"payloadUser": payloadUser,
+				"labAdmin":    labAdmin,
 			}, "", "  ")
 			if mErr != nil {
 				return notes, mErr

@@ -47,12 +47,12 @@ if ($iso) {
     if ($iso.disableUsb -ne $true) { Add-Issue 'isolation.disableUsb should be true' }
     if ($iso.disableSharedFolders -ne $true) { Add-Issue 'isolation.disableSharedFolders should be true (inbox is temporary)' }
     $clip = [string]$iso.clipboardMode
-    if ($iso.disableClipboard -eq $true) {
-        Add-Note 'Clipboard disabled (safer; host-to-guest paste unavailable)'
-    } elseif ($clip -and $clip -ne 'hosttoguest') {
-        Add-Issue "Clipboard mode is '$clip'; prefer hosttoguest or disableClipboard"
+    if ($iso.disableClipboard -eq $true -or $clip -eq 'disabled' -or [string]::IsNullOrWhiteSpace($clip)) {
+        Add-Note 'Clipboard disabled (default; host-to-guest paste needs -GuestAdditions)'
+    } elseif ($clip -ne 'hosttoguest') {
+        Add-Issue "Clipboard mode is '$clip'; prefer disabled (default) or hosttoguest with -GuestAdditions"
     } else {
-        Add-Note 'Residual surface: host-to-guest clipboard is enabled'
+        Add-Note 'Residual surface: host-to-guest clipboard is enabled (Guest Additions fallback)'
     }
 } else {
     Add-Issue 'isolation section missing from config'
@@ -62,7 +62,7 @@ $inbox = $cfg.inbox
 if ($inbox -and $inbox.readOnly -ne $true) {
     Add-Issue 'inbox.readOnly should be true'
 } else {
-    Add-Note 'Residual surface: temporary read-only inbox share'
+    Add-Note 'Inbox: agent copies samples to C:\Users\Public\Quarantine\inbox (VBOXSVR only with -GuestAdditions)'
 }
 
 $gw = $null
