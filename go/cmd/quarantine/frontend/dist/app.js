@@ -1226,6 +1226,7 @@ function buildFileTreeLocal(diff) {
       if (i === parts.length - 1) {
         node.change = change;
         if (file?.size) node.size = file.size;
+        if (file?.noise) node.noise = file.noise;
         if (change === 'added' && isEphemeralTempPath(path)) node.previewUnavailable = true;
       }
     }

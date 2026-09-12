@@ -36,8 +36,9 @@ func TestChangedFilesKeepsSystem32DropsCache(t *testing.T) {
 	if !strings.Contains(s, `hosts`) {
 		t.Fatalf("missing hosts: %s", s)
 	}
-	if strings.Contains(s, `noise.txt`) {
-		t.Fatalf("temp noise should be filtered: %s", s)
+	// Temp paths stay in the list (tagged noise) so the UI toggle can change counts.
+	if !strings.Contains(s, `noise.txt`) || !strings.Contains(s, `"noise"`) {
+		t.Fatalf("expected noise-tagged temp file: %s", s)
 	}
 	if strings.Contains(s, `HKLM\Software\Run`) {
 		t.Fatalf("registry event must not be a file: %s", s)

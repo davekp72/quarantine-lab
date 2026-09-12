@@ -29,7 +29,25 @@
         <TargetFilename condition="begin with">C:\Users\</TargetFilename>
         <TargetFilename condition="begin with">C:\ProgramData\</TargetFilename>
         <TargetFilename condition="begin with">C:\Windows\Temp\</TargetFilename>
+        <TargetFilename condition="begin with">C:\Windows\System32\</TargetFilename>
+        <TargetFilename condition="begin with">C:\Program Files\</TargetFilename>
+        <TargetFilename condition="begin with">C:\Program Files (x86)\</TargetFilename>
       </FileCreate>
+    </RuleGroup>
+    <RuleGroup name="" groupRelation="or">
+      <FileDelete onmatch="include">
+        <TargetFilename condition="begin with">C:\Users\</TargetFilename>
+        <TargetFilename condition="begin with">C:\ProgramData\</TargetFilename>
+        <TargetFilename condition="begin with">C:\Windows\System32\</TargetFilename>
+        <TargetFilename condition="begin with">C:\Program Files\</TargetFilename>
+        <TargetFilename condition="begin with">C:\Program Files (x86)\</TargetFilename>
+      </FileDelete>
+    </RuleGroup>
+    <RuleGroup name="" groupRelation="or">
+      <FileDeleteDetected onmatch="include">
+        <TargetFilename condition="begin with">C:\Users\</TargetFilename>
+        <TargetFilename condition="begin with">C:\ProgramData\</TargetFilename>
+      </FileDeleteDetected>
     </RuleGroup>
   </EventFiltering>
 </Sysmon>

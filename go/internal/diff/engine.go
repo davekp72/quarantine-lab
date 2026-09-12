@@ -78,6 +78,7 @@ type FileDetail struct {
 	Mtime  string `json:"mtime,omitempty"`
 	Src    string `json:"src,omitempty"`
 	Change string `json:"change,omitempty"`
+	Noise  string `json:"noise,omitempty"`
 }
 
 type FileModified struct {
@@ -172,7 +173,7 @@ func Compare(fromPath, toPath string, left, right *evidence.Manifest) (*Result, 
 	}
 
 	added, removed, modified = filterUSNLeafFiles(added, removed, modified)
-	added, removed, modified = filterNoisyDiffFiles(added, removed, modified)
+	// Do not strip routine noise here — the UI "Hide routine noise" toggle owns that.
 
 	compareMode := "baseline-to-evidence"
 	if left.Snapshot != "" && right.Snapshot != "" {
@@ -387,7 +388,7 @@ func diffFiles(left, right map[string]evidence.FileEntry) (added []FileDetail, r
 func fileDetail(f evidence.FileEntry) FileDetail {
 	return FileDetail{
 		Path: f.PathValue(), Size: f.S, Hash: f.H, Mtime: f.M,
-		Src: f.Src, Change: f.Change,
+		Src: f.Src, Change: f.Change, Noise: f.Noise,
 	}
 }
 
@@ -406,9 +407,6 @@ func filesFromCapturedChanges(files []evidence.FileEntry) (added []FileDetail, r
 	for _, f := range files {
 		p := f.PathValue()
 		if p == "" {
-			continue
-		}
-		if collectors.ClassifyFileNoise(p, "") != "" {
 			continue
 		}
 		d := fileDetail(f)
@@ -771,18 +769,17 @@ func diffEventFiles(left, right *evidence.Manifest) (added []FileDetail, removed
 		collectors.MergeFileChangeKind(pathKinds, path, kind)
 	}
 	for path, kind := range pathKinds {
-		if collectors.ClassifyFileNoise(path, "") != "" {
-			continue
-		}
+		noiseClass := collectors.ClassifyFileNoise(path, "")
+		d := FileDetail{Path: path, Change: kind, Src: "events", Noise: noiseClass}
 		switch kind {
 		case "added":
-			added = append(added, FileDetail{Path: path, Change: kind, Src: "events"})
+			added = append(added, d)
 		case "removed":
-			removed = append(removed, FileDetail{Path: path, Change: kind, Src: "events"})
+			removed = append(removed, d)
 		default:
 			modified = append(modified, FileModified{
 				Path:  path,
-				After: FileDetail{Path: path, Change: kind, Src: "events"},
+				After: d,
 			})
 		}
 	}

@@ -82,13 +82,11 @@ func TestFinalizeUSNEventsDropsOldAndNoise(t *testing.T) {
 	if noise["os_telemetry"] < 1 {
 		t.Fatalf("noise=%v", noise)
 	}
-	if noise["close_only"] < 1 {
-		t.Fatalf("close not counted: %v", noise)
-	}
 	got := map[string]string{}
 	for _, ev := range kept {
 		p, _ := ev["path"].(string)
-		got[p] = ev["change"].(string)
+		ch, _ := ev["change"].(string)
+		got[p] = ch
 	}
 	if got[`C:\Windows\System32\dodge.txt`] != "added" {
 		t.Fatalf("missing dodge.txt: %+v", got)
@@ -96,8 +94,16 @@ func TestFinalizeUSNEventsDropsOldAndNoise(t *testing.T) {
 	if got[`C:\Windows\System32\drivers\etc\hosts`] != "modified" {
 		t.Fatalf("missing hosts: %+v", got)
 	}
+	// Close-only on a non-noise path is kept (payload edits often look like CLOSE).
+	if got[`C:\tmp\cache`] == "" {
+		t.Fatalf("close-only signal path should be kept: %+v", got)
+	}
 	if _, ok := got[`C:\Windows\System32\old.txt`]; ok {
 		t.Fatal("pre-baseline event should be dropped")
+	}
+	// NTUSER.DAT stays in the sidecar tagged as noise for the UI toggle.
+	if _, ok := got[`C:\Users\analyst\NTUSER.DAT`]; !ok {
+		t.Fatalf("noise path should remain tagged in USN sidecar: %+v", got)
 	}
 }
 

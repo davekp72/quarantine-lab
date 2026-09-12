@@ -48,6 +48,7 @@ type FileEntry struct {
 	Change string `json:"change,omitempty"`
 	C      string `json:"c,omitempty"`
 	D      string `json:"d,omitempty"`
+	Noise  string `json:"noise,omitempty"`
 }
 
 func (f FileEntry) PathValue() string {
@@ -76,6 +77,9 @@ func fileEntryFromChangedMap(fm map[string]any) FileEntry {
 	}
 	if ch, ok := fm["change"].(string); ok {
 		fe.Change = ch
+	}
+	if n, ok := fm["noise"].(string); ok {
+		fe.Noise = n
 	}
 	return fe
 }

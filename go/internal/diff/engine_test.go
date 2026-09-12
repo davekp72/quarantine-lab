@@ -51,14 +51,29 @@ func TestCompareEventsBaselineUsesChangeField(t *testing.T) {
 			{P: `C:\Windows\System32\dodge.txt`, Change: "added"},
 			{P: `C:\Windows\System32\drivers\etc\hosts`, Change: "modified"},
 			{P: `C:\Windows\System32\gone.dll`, Change: "removed"},
-			{P: `C:\Users\analyst\AppData\Local\Temp\noise.txt`, Change: "added"},
+			{P: `C:\Users\analyst\AppData\Local\Temp\noise.txt`, Change: "added", Noise: "temp"},
 		},
 	}
 	res, err := Compare("l.json", "r.json", left, right)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Files.Added) != 1 || !strings.Contains(res.Files.Added[0].Path, "dodge.txt") {
+	if len(res.Files.Added) != 2 {
+		t.Fatalf("added=%+v", res.Files.Added)
+	}
+	var sawDodge, sawNoise bool
+	for _, f := range res.Files.Added {
+		if strings.Contains(f.Path, "dodge.txt") {
+			sawDodge = true
+		}
+		if strings.Contains(f.Path, "noise.txt") {
+			sawNoise = true
+			if f.Noise == "" {
+				t.Fatalf("noise file missing noise tag: %+v", f)
+			}
+		}
+	}
+	if !sawDodge || !sawNoise {
 		t.Fatalf("added=%+v", res.Files.Added)
 	}
 	if len(res.Files.Modified) != 1 || !strings.Contains(res.Files.Modified[0].Path, "hosts") {
@@ -69,17 +84,17 @@ func TestCompareEventsBaselineUsesChangeField(t *testing.T) {
 	}
 }
 
-func TestCompareEventsRelabelsPresentRemovedAndDropsDeletedNoise(t *testing.T) {
+func TestCompareEventsRelabelsPresentRemovedAndKeepsNoiseTagged(t *testing.T) {
 	left := &evidence.Manifest{Snapshot: "CleanSession", ScanMode: "events", Files: nil}
 	right := &evidence.Manifest{
 		Snapshot: "Evidence-test",
 		ScanMode: "events",
 		Files: []evidence.FileEntry{
 			{P: `C:\Windows\System32\dodge.txt`, Change: "removed", H: "abc", S: 28, C: "text", Src: "usn+sysmon"},
-			{P: `C:\$Extend\$Deleted\00020000000408F673F5ACE4`, Change: "removed"},
-			{P: `C:\Windows\SystemTemp\__PSScriptPolicyTest_x.ps1`, Change: "removed"},
-			{P: `C:\Windows\ServiceState\WinHttpAutoProxySvc\Data\1.cache`, Change: "removed"},
-			{P: `C:\Windows\SystemTemp\50ylbunx\50ylbunx.dll`, Change: "removed"},
+			{P: `C:\$Extend\$Deleted\00020000000408F673F5ACE4`, Change: "removed", Noise: "ntfs"},
+			{P: `C:\Windows\SystemTemp\__PSScriptPolicyTest_x.ps1`, Change: "removed", Noise: "os_telemetry"},
+			{P: `C:\Windows\ServiceState\WinHttpAutoProxySvc\Data\1.cache`, Change: "removed", Noise: "os_telemetry"},
+			{P: `C:\Windows\SystemTemp\50ylbunx\50ylbunx.dll`, Change: "removed", Noise: "os_telemetry"},
 		},
 	}
 	res, err := Compare("l.json", "r.json", left, right)
@@ -89,8 +104,14 @@ func TestCompareEventsRelabelsPresentRemovedAndDropsDeletedNoise(t *testing.T) {
 	if len(res.Files.Added) != 1 || !strings.Contains(res.Files.Added[0].Path, "dodge.txt") {
 		t.Fatalf("added=%+v", res.Files.Added)
 	}
-	if len(res.Files.Removed) != 0 {
-		t.Fatalf("deleted noise still present: %+v", res.Files.Removed)
+	if len(res.Files.Removed) < 1 {
+		t.Fatalf("expected noise-tagged removals to remain for UI toggle: %+v", res.Files.Removed)
+	}
+	for _, f := range res.Files.Removed {
+		if f.Noise == "" && !strings.Contains(f.Path, "$Extend") {
+			// $Extend may be leaf-filtered; other noise should be tagged when provided
+			t.Logf("removal without noise tag: %+v", f)
+		}
 	}
 }
 

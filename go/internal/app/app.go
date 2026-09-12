@@ -567,6 +567,9 @@ func (a *App) FileTreeFromDiff(diffJSON string) (any, error) {
 		if f.Size > 0 {
 			meta["size"] = f.Size
 		}
+		if f.Noise != "" {
+			meta["noise"] = f.Noise
+		}
 		if diff.IsEphemeralTempPath(f.Path) {
 			meta["previewUnavailable"] = true
 		}
@@ -580,6 +583,9 @@ func (a *App) FileTreeFromDiff(diffJSON string) (any, error) {
 		if f.Size > 0 {
 			meta["size"] = f.Size
 		}
+		if f.Noise != "" {
+			meta["noise"] = f.Noise
+		}
 		addPath(f.Path, meta)
 	}
 	for _, f := range d.Files.Modified {
@@ -591,6 +597,11 @@ func (a *App) FileTreeFromDiff(diffJSON string) (any, error) {
 			meta["size"] = f.After.Size
 		} else if f.Before.Size > 0 {
 			meta["size"] = f.Before.Size
+		}
+		if f.After.Noise != "" {
+			meta["noise"] = f.After.Noise
+		} else if f.Before.Noise != "" {
+			meta["noise"] = f.Before.Noise
 		}
 		addPath(f.Path, meta)
 	}

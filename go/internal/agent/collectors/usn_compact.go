@@ -31,17 +31,7 @@ func FinalizeUSNEvents(volume string, events []map[string]any, startUsn uint64, 
 			}
 		}
 		reasons := reasonStringsFromEvent(ev)
-		if isCloseOnlyReason(reasons, reasonCodeFromEvent(ev)) {
-			noise["close_only"]++
-			continue
-		}
-
 		fileName, _ := ev["fileName"].(string)
-		if class := ClassifyFileNoise("", fileName); class != "" {
-			noise[class]++
-			continue
-		}
-
 		fileRef, _ := ev["fileRef"].(string)
 		parentRef, _ := ev["parentRef"].(string)
 		path, _ := ev["path"].(string)
@@ -56,6 +46,15 @@ func FinalizeUSNEvents(volume string, events []map[string]any, startUsn uint64, 
 		}
 
 		if path == "" {
+			// Filename-only noise (no path yet) — drop known always-noise names.
+			if class := ClassifyFileNoise("", fileName); class != "" {
+				noise[class]++
+				continue
+			}
+			if isCloseOnlyReason(reasons, reasonCodeFromEvent(ev)) {
+				noise["close_only"]++
+				continue
+			}
 			noise["unresolved"]++
 			continue
 		}
@@ -63,8 +62,10 @@ func FinalizeUSNEvents(volume string, events []map[string]any, startUsn uint64, 
 		class := ClassifyFileNoise(path, fileName)
 		if class != "" {
 			noise[class]++
-			continue
+			ev["noise"] = class
 		}
+		// Keep noise paths in the sidecar so the UI "Hide routine noise" toggle
+		// can change counts; ChangedFiles tags them and skips content embed.
 
 		key := strings.ToLower(path)
 		kind := usnChangeKind(reasons)

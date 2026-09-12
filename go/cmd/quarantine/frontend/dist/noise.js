@@ -113,7 +113,8 @@ function normalizeFile(item) {
 
 export function isFileNoise(fileOrPath) {
   const f = typeof fileOrPath === 'string' ? { path: fileOrPath } : normalizeFile(fileOrPath);
-  const path = f.path || fileOrPath?.fileName || '';
+  if (f.noise || fileOrPath?.noise || f.after?.noise) return true;
+  const path = f.path || f.after?.path || fileOrPath?.fileName || '';
   if (!path) return false;
   if (isEphemeralTempPath(path)) return true;
   if (isCompilerTempNoise(path)) return true;

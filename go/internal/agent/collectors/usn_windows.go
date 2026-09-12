@@ -61,8 +61,9 @@ var usnReasonLabels = map[uint32]string{
 	0x00010000: "hard_link_change",
 	0x00020000: "compression_change",
 	0x00080000: "reparse_point_change",
-	0x00100000: "stream_change",
-	0x00200000: "close",
+	0x00100000: "reparse_point_change",
+	0x00200000: "stream_change",
+	0x80000000: "close",
 }
 
 // File content / identity changes. Excludes close-only and low-signal chatter.

@@ -53,6 +53,7 @@ func ChangedFiles(usnRaw json.RawMessage, sysmonRaw json.RawMessage, hashMaxMB, 
 
 	pathKinds := map[string]string{}
 	pathSrc := map[string]string{}
+	pathNoise := map[string]string{}
 	noise := map[string]int{}
 
 	add := func(path, kind, src string) {
@@ -62,7 +63,7 @@ func ChangedFiles(usnRaw json.RawMessage, sysmonRaw json.RawMessage, hashMaxMB, 
 		}
 		if class := ClassifyFileNoise(path, filepath.Base(path)); class != "" {
 			noise[class]++
-			return
+			pathNoise[path] = class
 		}
 		mergeFileChangeKind(pathKinds, path, kind)
 		if existing, ok := pathSrc[path]; ok && existing != src {
@@ -125,6 +126,11 @@ func ChangedFiles(usnRaw json.RawMessage, sysmonRaw json.RawMessage, hashMaxMB, 
 		items = append(items, fileChange{path: path, kind: kind, src: pathSrc[path]})
 	}
 	sort.Slice(items, func(i, j int) bool {
+		// Signal paths first so truncation keeps them; noise last.
+		ni, nj := pathNoise[items[i].path] != "", pathNoise[items[j].path] != ""
+		if ni != nj {
+			return !ni && nj
+		}
 		pi, pj := FilePriority(items[i].path), FilePriority(items[j].path)
 		if pi != pj {
 			return pi < pj
@@ -134,9 +140,8 @@ func ChangedFiles(usnRaw json.RawMessage, sysmonRaw json.RawMessage, hashMaxMB, 
 
 	truncated := false
 	if len(items) > maxChangedFileEntries {
-		// Never drop priority 0–2 (System32/etc, Program Files, executables).
 		cut := maxChangedFileEntries
-		for cut < len(items) && FilePriority(items[cut].path) <= 2 {
+		for cut < len(items) && pathNoise[items[cut].path] == "" && FilePriority(items[cut].path) <= 2 {
 			cut++
 		}
 		if cut < len(items) {
@@ -157,12 +162,20 @@ func ChangedFiles(usnRaw json.RawMessage, sysmonRaw json.RawMessage, hashMaxMB, 
 			"change": kind,
 			"src":    item.src,
 		}
+		if nc := pathNoise[item.path]; nc != "" {
+			entry["noise"] = nc
+		}
 		if err != nil || info.IsDir() {
 			files = append(files, entry)
 			continue
 		}
 		entry["s"] = info.Size()
 		entry["m"] = info.ModTime().UTC().Format("2006-01-02T15:04:05Z")
+		// Skip hash/embed for noise — keep sidecar small; UI can still list them.
+		if pathNoise[item.path] != "" {
+			files = append(files, entry)
+			continue
+		}
 		wantHash := FilePriority(item.path) <= 2 && hashed < maxFileHashesPerCapture && info.Size() <= hashMax
 		if wantHash {
 			if h, err := hashFile(item.path); err == nil {
@@ -170,9 +183,6 @@ func ChangedFiles(usnRaw json.RawMessage, sysmonRaw json.RawMessage, hashMaxMB, 
 				hashed++
 			}
 		}
-		// Match PowerShell Export-QuarantineGuestChangedFiles: embed every small
-		// changed file (not only high-priority paths). Priority still orders which
-		// bodies win when the total embed budget is exhausted.
 		if info.Size() <= contentMax && embedBytes+info.Size() <= totalBudget {
 			if c := fileContentPayload(item.path, contentMax); c != nil {
 				if v, ok := c["c"]; ok {
