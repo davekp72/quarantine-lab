@@ -33,6 +33,7 @@ func TestReadSnapshotFileSkipsDiskWhenSidecarTooLarge(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := &App{
+		Cfg: &config.Config{UI: config.UIConfig{FilePreviewMaxKB: 512}},
 		Evidence: &evidence.Service{Cfg: &config.Config{
 			Manifest: config.ManifestConfig{LogDir: dir},
 		}},
@@ -54,11 +55,14 @@ func TestReadSnapshotFileSkipsDiskWhenSidecarTooLarge(t *testing.T) {
 
 	a.Cfg = &config.Config{UI: config.UIConfig{FilePreviewMaxKB: 1024}}
 	res, err = a.ReadSnapshotFile(name, path)
-	if err == nil {
-		t.Fatal("expected disk-unavailable once size is under the raised limit")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(err.Error(), "disk reader unavailable") {
-		t.Fatalf("got %v", err)
+	if res["reason"] != "sidecar_no_content" && res["source"] != "sidecar-meta" {
+		t.Fatalf("expected sidecar-meta without disk, got %v", res)
+	}
+	if res["unavailable"] != true {
+		t.Fatalf("expected unavailable: %v", res)
 	}
 }
 
@@ -103,7 +107,7 @@ func TestSetUISettingsPersists(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := &App{ConfigPath: path, Cfg: &config.Config{}}
-	res, err := a.SetUISettingsWails(1024, false, false, false, "Virgin Media")
+	res, err := a.SetUISettingsWails(1024, false, false, false, "Virgin Media", 51200, 100, 256)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,6 +120,15 @@ func TestSetUISettingsPersists(t *testing.T) {
 	}
 	if loaded.FilePreviewMaxKBResolved() != 1024 {
 		t.Fatalf("disk preview=%d", loaded.FilePreviewMaxKBResolved())
+	}
+	if loaded.ContentMaxKBResolved() != 51200 {
+		t.Fatalf("content=%d", loaded.ContentMaxKBResolved())
+	}
+	if loaded.HashMaxMBResolved() != 100 {
+		t.Fatalf("hash=%d", loaded.HashMaxMBResolved())
+	}
+	if loaded.TotalEmbedMaxMBResolved() != 256 {
+		t.Fatalf("total=%d", loaded.TotalEmbedMaxMBResolved())
 	}
 	if loaded.HideRoutineNoiseEnabled() || loaded.RefreshOnCompareEnabled() || loaded.WarnPublicIPBeforeLaunchEnabled() {
 		t.Fatalf("bools not saved: %#v", loaded.UI)

@@ -33,3 +33,15 @@ func TestFileSidecarContentBase64(t *testing.T) {
 		t.Fatal("too_large should not return bytes")
 	}
 }
+
+func TestFileSidecarBeforeContent(t *testing.T) {
+	entry := map[string]any{}
+	AttachSidecarBeforeContent(entry, []byte(`{"filter_list":[]}`))
+	got, ok := FileSidecarBeforeContent(entry)
+	if !ok || string(got) != `{"filter_list":[]}` {
+		t.Fatalf("got %#v ok=%v entry=%#v", got, ok, entry)
+	}
+	if _, ok := FileSidecarContent(entry); ok {
+		t.Fatal("before payload must not satisfy FileSidecarContent")
+	}
+}

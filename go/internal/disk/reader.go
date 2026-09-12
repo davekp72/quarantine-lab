@@ -49,13 +49,20 @@ func ParseVBoxIndex(cfg *config.Config) (*Index, error) {
 	return idx, nil
 }
 
+type flattenWait struct {
+	done chan struct{}
+	path string
+	err  error
+}
+
 // Reader reads files from snapshot disks via cached flatten.
 type Reader struct {
-	Cfg   *config.Config
-	VBox  *vbox.Client
-	Index *Index
-	mu    sync.Mutex
-	cache map[string]string // snapshot UUID -> flattened vdi path
+	Cfg      *config.Config
+	VBox     *vbox.Client
+	Index    *Index
+	mu       sync.Mutex
+	cache    map[string]string // snapshot UUID -> flattened vdi path
+	inflight map[string]*flattenWait
 }
 
 // NewReader creates a disk reader.
@@ -64,7 +71,13 @@ func NewReader(cfg *config.Config, vb *vbox.Client) (*Reader, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Reader{Cfg: cfg, VBox: vb, Index: idx, cache: map[string]string{}}, nil
+	return &Reader{
+		Cfg:      cfg,
+		VBox:     vb,
+		Index:    idx,
+		cache:    map[string]string{},
+		inflight: map[string]*flattenWait{},
+	}, nil
 }
 
 // CacheDir returns temp cache directory for flattened VDIs.
@@ -97,22 +110,33 @@ func (r *Reader) EnsureFlattened(snapshotName string) (string, error) {
 			}
 		}
 	}
+	uuidClean := strings.Trim(entry.UUID, "{}")
+	out := filepath.Join(r.CacheDir(), uuidClean+".raw")
+
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if cached, ok := r.cache[entry.UUID]; ok {
 		if _, err := os.Stat(cached); err == nil && isUsableFlattenCache(cached) {
+			r.mu.Unlock()
 			return cached, nil
 		}
 	}
-	uuidClean := strings.Trim(entry.UUID, "{}")
-	out := filepath.Join(r.CacheDir(), uuidClean+".raw")
 	if _, err := os.Stat(out); err == nil {
 		if isUsableFlattenCache(out) {
 			r.cache[entry.UUID] = out
+			r.mu.Unlock()
 			return out, nil
 		}
 		_ = os.Remove(out)
 	}
+	if wait, ok := r.inflight[entry.UUID]; ok {
+		r.mu.Unlock()
+		<-wait.done
+		return wait.path, wait.err
+	}
+	wait := &flattenWait{done: make(chan struct{})}
+	r.inflight[entry.UUID] = wait
+	r.mu.Unlock()
+
 	// Legacy dynamic VDI caches are not linear and cannot be read by go-ntfs.
 	legacyVDI := filepath.Join(r.CacheDir(), uuidClean+".vdi")
 	if _, err := os.Stat(legacyVDI); err == nil {
@@ -122,13 +146,25 @@ func (r *Reader) EnsureFlattened(snapshotName string) (string, error) {
 	if medium == "" && len(entry.VDIPaths) > 0 {
 		medium = entry.VDIPaths[0]
 	}
+	var flattenErr error
 	if medium == "" {
-		return "", fmt.Errorf("snapshot %q: no disk medium found in .vbox (re-parse VM config)", snapshotName)
+		flattenErr = fmt.Errorf("snapshot %q: no disk medium found in .vbox (re-parse VM config)", snapshotName)
+	} else if err := r.VBox.CloneMedium(medium, out); err != nil {
+		flattenErr = fmt.Errorf("flatten snapshot disk: %w", err)
 	}
-	if err := r.VBox.CloneMedium(medium, out); err != nil {
-		return "", fmt.Errorf("flatten snapshot disk: %w", err)
+
+	r.mu.Lock()
+	delete(r.inflight, entry.UUID)
+	wait.path = out
+	wait.err = flattenErr
+	if flattenErr == nil {
+		r.cache[entry.UUID] = out
 	}
-	r.cache[entry.UUID] = out
+	close(wait.done)
+	r.mu.Unlock()
+	if flattenErr != nil {
+		return "", flattenErr
+	}
 	return out, nil
 }
 

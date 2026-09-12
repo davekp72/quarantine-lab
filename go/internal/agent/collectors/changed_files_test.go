@@ -22,7 +22,7 @@ func TestChangedFilesKeepsSystem32DropsCache(t *testing.T) {
 			map[string]any{"eid": float64(12), "t": "RegistryEvent", "target": `HKLM\Software\Run`},
 		},
 	})
-	raw, n, err := ChangedFiles(usn, sysmon, 1, 64)
+	raw, n, err := ChangedFiles(usn, sysmon, 1, 64, 32)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestChangedFilesEmbedsDesktopContent(t *testing.T) {
 			map[string]any{"path": marker, "change": "added", "fileName": "marker.txt"},
 		},
 	})
-	raw, n, err := ChangedFiles(usn, nil, 50, 256)
+	raw, n, err := ChangedFiles(usn, nil, 50, 256, 32)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,5 +79,39 @@ func TestChangedFilesEmbedsDesktopContent(t *testing.T) {
 	}
 	if entry["d"] != body {
 		t.Fatalf("body=%v", entry["d"])
+	}
+}
+
+func TestChangedFilesEmbedsLowPriorityAppData(t *testing.T) {
+	dir := filepath.Join(`C:\Users\Public`, "QuarantineLabAppDataEmbed")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Skip(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	// Public\... is priority 4 (not Desktop/Downloads), matching AppData-style paths.
+	marker := filepath.Join(dir, "RecommendationsFilterList.json")
+	body := `{"filter_list":[]}`
+	if err := os.WriteFile(marker, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	usn, _ := json.Marshal(map[string]any{
+		"events": []any{
+			map[string]any{"path": marker, "change": "modified", "fileName": "RecommendationsFilterList.json"},
+		},
+	})
+	raw, n, err := ChangedFiles(usn, nil, 50, 256, 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("n=%d %s", n, raw)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	entry, _ := out["files"].([]any)[0].(map[string]any)
+	if entry["c"] != "text" || entry["d"] != body {
+		t.Fatalf("expected low-priority embed, got %#v", entry)
 	}
 }

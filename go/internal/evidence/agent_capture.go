@@ -218,10 +218,11 @@ func (s *Service) MarkLiveSnapshot(snapshotName string) (string, error) {
 	baselineName := strings.TrimSpace(s.Cfg.Manifest.SessionBaselineSnapshot)
 
 	req := types.CaptureRequest{
-		Snapshot:     snap,
-		PayloadUser:  s.Cfg.Payload.Username,
-		HashMaxMB:    s.Cfg.Manifest.HashMaxMB,
-		ContentMaxKB: s.Cfg.Manifest.ContentMaxKB,
+		Snapshot:        snap,
+		PayloadUser:     s.Cfg.Payload.Username,
+		HashMaxMB:       s.Cfg.HashMaxMBResolved(),
+		ContentMaxKB:    s.Cfg.ContentMaxKBResolved(),
+		TotalEmbedMaxMB: s.Cfg.TotalEmbedMaxMBResolved(),
 	}
 
 	if isEvidence && baselineName != "" {

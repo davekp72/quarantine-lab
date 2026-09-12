@@ -113,7 +113,7 @@ func Run(req types.CaptureRequest, cfg types.AgentConfig) (*types.CaptureRespons
 	resp.ServiceInstalls = svc
 	resp.Stats.ServiceInstallEvents = svcCount
 
-	changed, fileCount, err := collectors.ChangedFiles(resp.USN, sysmon, req.HashMaxMB, req.ContentMaxKB)
+	changed, fileCount, err := collectors.ChangedFiles(resp.USN, sysmon, req.HashMaxMB, req.ContentMaxKB, req.TotalEmbedMaxMB)
 	if err != nil {
 		resp.Warnings = append(resp.Warnings, "changed files: "+err.Error())
 	} else {

@@ -13,6 +13,9 @@ export function BuildRegistryTreeWails(json) {
 export function ReadSnapshotFileWails(snap, path) {
   return window.go.app.App.ReadSnapshotFileWails(snap, path);
 }
+export function DiffSnapshotFileWails(fromSnap, toSnap, path) {
+  return window.go.app.App.DiffSnapshotFileWails(fromSnap, toSnap, path);
+}
 export function LoadDiffFile(path) {
   return window.go.app.App.LoadDiffFile(path);
 }
@@ -91,6 +94,6 @@ export function ShouldWarnPublicIPBeforeLaunchWails() {
 export function UISettingsWails() {
   return window.go.app.App.UISettingsWails();
 }
-export function SetUISettingsWails(filePreviewMaxKb, hideRoutineNoise, refreshOnCompare, warnPublicIP, homeIspPatterns) {
-  return window.go.app.App.SetUISettingsWails(filePreviewMaxKb, hideRoutineNoise, refreshOnCompare, warnPublicIP, homeIspPatterns);
+export function SetUISettingsWails(filePreviewMaxKb, hideRoutineNoise, refreshOnCompare, warnPublicIP, homeIspPatterns, contentMaxKb, hashMaxMb, totalEmbedMaxMb) {
+  return window.go.app.App.SetUISettingsWails(filePreviewMaxKb, hideRoutineNoise, refreshOnCompare, warnPublicIP, homeIspPatterns, contentMaxKb, hashMaxMb, totalEmbedMaxMb);
 }

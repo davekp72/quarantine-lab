@@ -15,8 +15,13 @@ import (
 
 const (
 	maxChangedFileEntries   = 4000
-	maxFileHashesPerCapture = 150
-	maxContentEmbedBytes    = 256 * 1024
+	maxFileHashesPerCapture = 500
+	// Absolute ceilings (request values are clamped to these).
+	maxContentEmbedBytes = 64 * 1024 * 1024
+	maxTotalEmbedBytes   = 512 * 1024 * 1024 // agent HTTP decode limit
+	defaultContentMaxKB  = 51200             // 50 MiB
+	defaultHashMaxMB     = 100
+	defaultTotalEmbedMB  = 256
 )
 
 type fileChange struct {
@@ -26,17 +31,24 @@ type fileChange struct {
 }
 
 // ChangedFiles builds file entries from USN + Sysmon (create, delete, modify).
-func ChangedFiles(usnRaw json.RawMessage, sysmonRaw json.RawMessage, hashMaxMB, contentMaxKB int) (json.RawMessage, int, error) {
+func ChangedFiles(usnRaw json.RawMessage, sysmonRaw json.RawMessage, hashMaxMB, contentMaxKB, totalEmbedMaxMB int) (json.RawMessage, int, error) {
 	if hashMaxMB <= 0 {
-		hashMaxMB = 50
+		hashMaxMB = defaultHashMaxMB
 	}
 	if contentMaxKB <= 0 {
-		contentMaxKB = 256
+		contentMaxKB = defaultContentMaxKB
+	}
+	if totalEmbedMaxMB <= 0 {
+		totalEmbedMaxMB = defaultTotalEmbedMB
 	}
 	hashMax := int64(hashMaxMB) * 1024 * 1024
 	contentMax := int64(contentMaxKB) * 1024
 	if contentMax > maxContentEmbedBytes {
 		contentMax = maxContentEmbedBytes
+	}
+	totalBudget := int64(totalEmbedMaxMB) * 1024 * 1024
+	if totalBudget > maxTotalEmbedBytes {
+		totalBudget = maxTotalEmbedBytes
 	}
 
 	pathKinds := map[string]string{}
@@ -135,6 +147,7 @@ func ChangedFiles(usnRaw json.RawMessage, sysmonRaw json.RawMessage, hashMaxMB, 
 
 	var files []map[string]any
 	hashed := 0
+	var embedBytes int64
 	for _, item := range items {
 		info, err := os.Stat(item.path)
 		exists := err == nil && info != nil && !info.IsDir()
@@ -157,19 +170,20 @@ func ChangedFiles(usnRaw json.RawMessage, sysmonRaw json.RawMessage, hashMaxMB, 
 				hashed++
 			}
 		}
-		// Embed small bodies for priority ≤2 (System32 / Program Files / Desktop /
-		// Downloads / Documents / signal exts). Priority-2 user files used to be
-		// metadata-only, so the UI fell through to a slow VDI flatten for every click.
-		if info.Size() <= contentMax && FilePriority(item.path) <= 2 {
+		// Match PowerShell Export-QuarantineGuestChangedFiles: embed every small
+		// changed file (not only high-priority paths). Priority still orders which
+		// bodies win when the total embed budget is exhausted.
+		if info.Size() <= contentMax && embedBytes+info.Size() <= totalBudget {
 			if c := fileContentPayload(item.path, contentMax); c != nil {
 				if v, ok := c["c"]; ok {
 					entry["c"] = v
 				}
 				if v, ok := c["d"]; ok {
 					entry["d"] = v
+					embedBytes += info.Size()
 				}
 			}
-		} else if info.Size() > hashMax {
+		} else if info.Size() > contentMax {
 			entry["c"] = "too_large"
 		}
 		files = append(files, entry)

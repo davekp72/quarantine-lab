@@ -2,20 +2,21 @@ package types
 
 import "encoding/json"
 
-const Version = "1.0.17"
+const Version = "1.0.20"
 
 // FileMaxBytes is the /v1/files PUT/GET cap (64 MiB).
 const FileMaxBytes = 64 << 20
 
 // CaptureRequest is POST /v1/capture body.
 type CaptureRequest struct {
-	Snapshot     string          `json:"snapshot"`
-	Mode         string          `json:"mode"` // baseline | evidence
-	Baseline     json.RawMessage `json:"baseline,omitempty"`
-	BaselineAt   string          `json:"baselineAt,omitempty"`
-	HashMaxMB    int             `json:"hashMaxMb,omitempty"`
-	ContentMaxKB int             `json:"contentMaxKb,omitempty"`
-	PayloadUser  string          `json:"payloadUser,omitempty"`
+	Snapshot        string          `json:"snapshot"`
+	Mode            string          `json:"mode"` // baseline | evidence
+	Baseline        json.RawMessage `json:"baseline,omitempty"`
+	BaselineAt      string          `json:"baselineAt,omitempty"`
+	HashMaxMB       int             `json:"hashMaxMb,omitempty"`
+	ContentMaxKB    int             `json:"contentMaxKb,omitempty"`
+	TotalEmbedMaxMB int             `json:"totalEmbedMaxMb,omitempty"`
+	PayloadUser     string          `json:"payloadUser,omitempty"`
 }
 
 // CaptureResponse is returned by capture endpoints.

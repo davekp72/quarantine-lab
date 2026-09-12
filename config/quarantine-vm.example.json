@@ -116,8 +116,9 @@
     "scanMode": "events",
     "registryEngine": "hive",
     "registryDiskFlatten": false,
-    "hashMaxMb": 50,
-    "contentMaxKb": 51200,
+    "hashMaxMb": 100,
+    "contentMaxKb": 65536,
+    "totalEmbedMaxMb": 256,
     "sessionBaselineSnapshot": "CleanSession"
   },
   "agent": {
@@ -131,7 +132,7 @@
   "ui": {
     "warnPublicIpBeforeLaunch": true,
     "homeIspPatterns": [],
-    "filePreviewMaxKb": 512,
+    "filePreviewMaxKb": 4096,
     "hideRoutineNoise": true,
     "refreshOnCompare": true
   }

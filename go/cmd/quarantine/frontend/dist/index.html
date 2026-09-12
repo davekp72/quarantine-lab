@@ -68,22 +68,6 @@
           </div>
         </div>
       </section>
-
-      <section class="side-block defaults-block">
-        <h2>Defaults</h2>
-        <p class="muted snap-hint">Runtime GUI settings. Saved to config and applied immediately.</p>
-        <label>File preview max (KiB)
-          <input id="ui-preview-max-kb" type="number" min="64" max="16384" step="64" value="512" />
-        </label>
-        <label class="check"><input type="checkbox" id="ui-hide-noise" checked /> Hide routine noise</label>
-        <label class="check"><input type="checkbox" id="ui-refresh-compare" checked /> Refresh on Compare</label>
-        <label class="check"><input type="checkbox" id="ui-warn-ip" checked /> Warn on launch if home ISP</label>
-        <label>Home ISP match
-          <input id="ui-home-isp" type="text" spellcheck="false" placeholder="Your home ISP name" />
-        </label>
-        <button id="btn-ui-save" type="button">Save defaults</button>
-        <p id="ui-save-msg" class="muted action-msg"></p>
-      </section>
     </aside>
 
     <div class="main-col">
@@ -98,6 +82,7 @@
         <label class="check"><input type="checkbox" id="hideNoise" checked /> Hide routine noise</label>
         <button id="btn-compare" type="button">Compare</button>
         <button id="btn-load-file" type="button">Load diff file</button>
+        <button id="btn-settings" type="button" title="Settings">Settings</button>
         <button id="btn-toggle-log" type="button" class="btn-log-toggle">Log</button>
       </section>
       <nav class="tabs">
@@ -163,6 +148,51 @@
         </div>
         <pre id="log-view" class="log-view"></pre>
       </section>
+    </div>
+  </div>
+  <div id="settings-overlay" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div class="modal settings-modal">
+      <div class="settings-head">
+        <h2 id="settings-title">Settings</h2>
+        <button id="btn-settings-close" type="button" class="log-close" title="Close">×</button>
+      </div>
+      <p class="muted snap-hint">Saved to quarantine-vm.json. Capture limits apply on the next Preserve (sent to the agent each time).</p>
+      <div class="settings-grid">
+        <fieldset>
+          <legend>Compare defaults</legend>
+          <label class="check"><input type="checkbox" id="ui-hide-noise" checked /> Hide routine noise</label>
+          <label class="check"><input type="checkbox" id="ui-refresh-compare" checked /> Refresh on Compare</label>
+          <label class="check"><input type="checkbox" id="ui-warn-ip" checked /> Warn on launch if home ISP</label>
+          <label>Home ISP match
+            <input id="ui-home-isp" type="text" spellcheck="false" placeholder="Your home ISP name" />
+          </label>
+        </fieldset>
+        <fieldset>
+          <legend>File preview</legend>
+          <label>Preview max (KiB)
+            <input id="ui-preview-max-kb" type="number" min="64" max="65536" step="64" value="4096" />
+          </label>
+          <p class="muted snap-hint">UI pane only — how much of a file to show when you click it.</p>
+        </fieldset>
+        <fieldset>
+          <legend>Preserve / agent capture</legend>
+          <label>Content embed max (KiB)
+            <input id="ui-content-max-kb" type="number" min="64" max="65536" step="64" value="51200" />
+          </label>
+          <label>Total embed budget (MiB)
+            <input id="ui-total-embed-max-mb" type="number" min="16" max="512" step="16" value="256" />
+          </label>
+          <label>Hash max (MiB)
+            <input id="ui-hash-max-mb" type="number" min="1" max="512" step="1" value="100" />
+          </label>
+          <p class="muted snap-hint">Per-file embed + total budget for changed-files sidecars. Hash max is the largest file hashed during Preserve.</p>
+        </fieldset>
+      </div>
+      <div class="modal-actions">
+        <button id="btn-ui-save" type="button" class="btn-primary">Save</button>
+        <button id="btn-settings-cancel" type="button">Cancel</button>
+        <p id="ui-save-msg" class="muted action-msg"></p>
+      </div>
     </div>
   </div>
   <script src="wailsjs/runtime/runtime.js"></script>

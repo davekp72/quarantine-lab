@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/quarantine-lab/quarantine/internal/config"
 	"github.com/quarantine-lab/quarantine/internal/guest"
@@ -161,11 +162,21 @@ func (s *Service) FileContentFromSidecar(snapshotName, guestPath string) ([]byte
 
 // FileSidecarContent returns captured bytes from a changed-files sidecar row.
 func FileSidecarContent(entry map[string]any) ([]byte, bool) {
+	return fileSidecarPayload(entry, "c", "d")
+}
+
+// FileSidecarBeforeContent returns baseline/before bytes stored on an Evidence
+// changed-files row (bc/bd), used for Modified diffs without flattening CleanSession.
+func FileSidecarBeforeContent(entry map[string]any) ([]byte, bool) {
+	return fileSidecarPayload(entry, "bc", "bd")
+}
+
+func fileSidecarPayload(entry map[string]any, codingKey, dataKey string) ([]byte, bool) {
 	if entry == nil {
 		return nil, false
 	}
-	d, _ := entry["d"].(string)
-	switch strings.ToLower(stringField(entry, "c")) {
+	d, _ := entry[dataKey].(string)
+	switch strings.ToLower(stringField(entry, codingKey)) {
 	case "base64":
 		if d == "" {
 			return nil, false
@@ -177,13 +188,99 @@ func FileSidecarContent(entry map[string]any) ([]byte, bool) {
 		return raw, true
 	case "text":
 		return []byte(d), true
-	case "too_large", "access_denied":
+	case "too_large", "access_denied", "missing":
 		return nil, false
 	}
 	if d != "" {
 		return []byte(d), true
 	}
 	return nil, false
+}
+
+// AttachSidecarBeforeContent stores before-bytes on a changed-files row.
+func AttachSidecarBeforeContent(entry map[string]any, data []byte) {
+	if entry == nil {
+		return
+	}
+	payload := encodeSidecarPayload(data)
+	for k, v := range payload {
+		switch k {
+		case "c":
+			entry["bc"] = v
+		case "d":
+			entry["bd"] = v
+		}
+	}
+}
+
+func encodeSidecarPayload(data []byte) map[string]any {
+	for _, b := range data {
+		if b == 0 {
+			return map[string]any{"c": "base64", "d": base64.StdEncoding.EncodeToString(data)}
+		}
+	}
+	if utf8.Valid(data) {
+		text := string(data)
+		bad := 0
+		for _, ch := range text {
+			if ch < 9 || (ch > 13 && ch < 32) {
+				bad++
+			}
+		}
+		if len(text) == 0 || float64(bad)/float64(len(text)) < 0.05 {
+			return map[string]any{"c": "text", "d": text}
+		}
+	}
+	return map[string]any{"c": "base64", "d": base64.StdEncoding.EncodeToString(data)}
+}
+
+// PersistFileSidecarBefore writes before-content onto the Evidence changed-files sidecar.
+func (s *Service) PersistFileSidecarBefore(snapshotName, guestPath string, data []byte) error {
+	if s == nil || s.Cfg == nil || len(data) == 0 {
+		return nil
+	}
+	snap := s.Cfg.ResolveSnapshotName(snapshotName)
+	path := s.Cfg.SidecarPath(snap, "-changed-files.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var sc map[string]any
+	if err := json.Unmarshal(raw, &sc); err != nil {
+		return err
+	}
+	files, _ := sc["files"].([]any)
+	want := strings.ToLower(filepath.Clean(guestPath))
+	updated := false
+	for i, f := range files {
+		entry, ok := f.(map[string]any)
+		if !ok {
+			continue
+		}
+		p := stringField(entry, "p")
+		if p == "" {
+			p = stringField(entry, "path")
+		}
+		if strings.ToLower(filepath.Clean(p)) != want {
+			continue
+		}
+		if _, ok := FileSidecarBeforeContent(entry); ok {
+			return nil
+		}
+		AttachSidecarBeforeContent(entry, data)
+		files[i] = entry
+		updated = true
+		break
+	}
+	if !updated {
+		return nil
+	}
+	sc["files"] = files
+	out, err := json.MarshalIndent(sc, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, out, 0o644)
 }
 
 // FileSidecarSize returns the guest file size recorded on a changed-files sidecar row.

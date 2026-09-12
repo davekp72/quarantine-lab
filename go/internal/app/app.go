@@ -277,72 +277,6 @@ func (a *App) filePreviewMaxBytes() int64 {
 	return a.Cfg.FilePreviewMaxBytes()
 }
 
-// ReadSnapshotFile reads file content from sidecar capture or snapshot disk.
-func (a *App) ReadSnapshotFile(snapshotName, guestPath string) (map[string]any, error) {
-	max := a.filePreviewMaxBytes()
-	var expectSize int64
-	if a.Evidence != nil {
-		if entry, ok := a.Evidence.FileSidecarEntry(snapshotName, guestPath); ok {
-			if data, ok := evidence.FileSidecarContent(entry); ok {
-				return filePreviewResult(guestPath, data, evidence.FileSidecarSize(entry), "sidecar", max), nil
-			}
-			expectSize = evidence.FileSidecarSize(entry)
-			if expectSize > max {
-				return tooLargeFilePreview(guestPath, expectSize, max), nil
-			}
-			// Metadata-only sidecar (common for older Desktop/Downloads captures):
-			// try the live agent before an expensive VDI flatten.
-			if data, ok := a.tryAgentFilePreview(guestPath, expectSize, max); ok {
-				return filePreviewResult(guestPath, data, expectSize, "agent", max), nil
-			}
-		}
-	}
-	if a.Disk == nil {
-		return nil, fmt.Errorf("disk reader unavailable")
-	}
-	data, info, err := a.Disk.ReadFile(snapshotName, guestPath, max)
-	if err != nil {
-		if isDiskFileNotFound(err) {
-			return unavailableFilePreview(a.Evidence, snapshotName, guestPath, "deleted_before_snapshot"), nil
-		}
-		if isDiskFileTooLarge(err) {
-			size := int64(0)
-			if info != nil {
-				size = info.Size
-			}
-			return tooLargeFilePreview(guestPath, size, max), nil
-		}
-		return nil, err
-	}
-	full := int64(len(data))
-	if info != nil && info.Size > 0 {
-		full = info.Size
-	}
-	return filePreviewResult(guestPath, data, full, "disk", max), nil
-}
-
-// tryAgentFilePreview reads a small guest file via the agent when the sidecar
-// has size/metadata but no embedded body. Rejects when live size disagrees with
-// the sidecar (guest likely restored to a different snapshot).
-func (a *App) tryAgentFilePreview(guestPath string, expectSize, max int64) ([]byte, bool) {
-	if a == nil || a.Evidence == nil || a.Cfg == nil || !a.Cfg.Agent.Enabled {
-		return nil, false
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	data, err := a.Evidence.ReadGuestFileBytes(ctx, guestPath, max)
-	if err != nil || len(data) == 0 {
-		return nil, false
-	}
-	if expectSize > 0 && int64(len(data)) != expectSize {
-		// Allow truncation at the preview cap.
-		if !(expectSize > max && int64(len(data)) == max) {
-			return nil, false
-		}
-	}
-	return data, true
-}
-
 func isDiskFileNotFound(err error) bool {
 	if err == nil {
 		return false
@@ -992,10 +926,7 @@ func (a *App) AgentHealthWails() (map[string]any, error) {
 	return out, nil
 }
 
-// ReadSnapshotFileWails reads guest file for preview panel.
-func (a *App) ReadSnapshotFileWails(snapshotName, guestPath string) (map[string]any, error) {
-	return a.ReadSnapshotFile(snapshotName, guestPath)
-}
+// ReadSnapshotFileWails — see file_preview.go
 
 // BuildRegistryTreeWails builds registry tree from diff JSON string.
 func (a *App) BuildRegistryTreeWails(diffJSON string) (any, error) {
@@ -1252,6 +1183,7 @@ func (a *App) PreserveEvidenceWails(label string) (string, error) {
 	if capErr := a.captureLiveManifest(name, false); capErr != nil {
 		return "", capErr
 	}
+	a.enrichChangedFilesBefore(name)
 	a.stopCaptureAndAttach(name, "preserve")
 	a.logInfo(fmt.Sprintf("Taking snapshot %q…", name))
 	if err := a.VM.SaveSnapshot(ctx, name, "Evidence preserve", false, true); err != nil {

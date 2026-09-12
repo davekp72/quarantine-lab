@@ -118,7 +118,7 @@ func TestFilePreviewMaxKB(t *testing.T) {
 		t.Fatalf("min clamp: %d", c.FilePreviewMaxKBResolved())
 	}
 	c.UI.FilePreviewMaxKB = 999999
-	if c.FilePreviewMaxKBResolved() != 16384 {
+	if c.FilePreviewMaxKBResolved() != 65536 {
 		t.Fatalf("max clamp: %d", c.FilePreviewMaxKBResolved())
 	}
 }
@@ -141,12 +141,19 @@ func TestPersistUI(t *testing.T) {
 		t.Fatal(err)
 	}
 	off := false
-	c := &Config{UI: UIConfig{
-		FilePreviewMaxKB:         1024,
-		HideRoutineNoise:         &off,
-		WarnPublicIPBeforeLaunch: &off,
-		HomeISPPatterns:          []string{"Virgin Media"},
-	}}
+	c := &Config{
+		UI: UIConfig{
+			FilePreviewMaxKB:         1024,
+			HideRoutineNoise:         &off,
+			WarnPublicIPBeforeLaunch: &off,
+			HomeISPPatterns:          []string{"Virgin Media"},
+		},
+		Manifest: ManifestConfig{
+			ContentMaxKB:    8192,
+			HashMaxMB:       80,
+			TotalEmbedMaxMB: 128,
+		},
+	}
 	if err := c.PersistUI(path); err != nil {
 		t.Fatal(err)
 	}
@@ -156,6 +163,15 @@ func TestPersistUI(t *testing.T) {
 	}
 	if loaded.UI.FilePreviewMaxKB != 1024 {
 		t.Fatalf("preview=%d", loaded.UI.FilePreviewMaxKB)
+	}
+	if loaded.ContentMaxKBResolved() != 8192 {
+		t.Fatalf("content=%d", loaded.ContentMaxKBResolved())
+	}
+	if loaded.HashMaxMBResolved() != 80 {
+		t.Fatalf("hash=%d", loaded.HashMaxMBResolved())
+	}
+	if loaded.TotalEmbedMaxMBResolved() != 128 {
+		t.Fatalf("total=%d", loaded.TotalEmbedMaxMBResolved())
 	}
 	if loaded.HideRoutineNoiseEnabled() {
 		t.Fatal("hide noise should be false")

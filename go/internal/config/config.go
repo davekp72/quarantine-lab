@@ -46,7 +46,7 @@ type UIConfig struct {
 	// also means nothing is treated as home. Set substrings of your ISP/org to
 	// flag non-VPN egress in the launch prompt.
 	HomeISPPatterns []string `json:"homeIspPatterns"`
-	// FilePreviewMaxKB is the Files-tab content preview cap (default 512).
+	// FilePreviewMaxKB is the Files-tab content preview cap (default 4096 = 4 MiB).
 	FilePreviewMaxKB int `json:"filePreviewMaxKb"`
 	// HideRoutineNoise is the default for the compare-bar checkbox (default true).
 	HideRoutineNoise *bool `json:"hideRoutineNoise"`
@@ -55,9 +55,9 @@ type UIConfig struct {
 }
 
 const (
-	DefaultFilePreviewMaxKB = 512
+	DefaultFilePreviewMaxKB = 4096
 	minFilePreviewMaxKB     = 64
-	maxFilePreviewMaxKB     = 16384
+	maxFilePreviewMaxKB     = 65536 // 64 MiB — align with agent file / embed caps
 	DefaultGuestUsername    = "Administrator"
 	DefaultPayloadUsername  = "analyst"
 	TransportAgent          = "agent"
@@ -442,6 +442,74 @@ type ManifestConfig struct {
 	SessionBaselineSnapshot string `json:"sessionBaselineSnapshot"`
 	HashMaxMB               int    `json:"hashMaxMb"`
 	ContentMaxKB            int    `json:"contentMaxKb"`
+	// TotalEmbedMaxMB caps sum of embedded file bodies per Preserve (default 256).
+	TotalEmbedMaxMB int `json:"totalEmbedMaxMb"`
+}
+
+const (
+	DefaultContentMaxKB   = 51200
+	DefaultHashMaxMB      = 100
+	DefaultTotalEmbedMaxMB = 256
+	minContentMaxKB       = 64
+	maxContentMaxKB       = 65536
+	minHashMaxMB          = 1
+	maxHashMaxMB          = 512
+	minTotalEmbedMaxMB    = 16
+	maxTotalEmbedMaxMB    = 512
+)
+
+// ContentMaxKBResolved is the per-file body embed cap sent to the agent on Preserve.
+func (c *Config) ContentMaxKBResolved() int {
+	n := 0
+	if c != nil {
+		n = c.Manifest.ContentMaxKB
+	}
+	if n <= 0 {
+		n = DefaultContentMaxKB
+	}
+	if n < minContentMaxKB {
+		return minContentMaxKB
+	}
+	if n > maxContentMaxKB {
+		return maxContentMaxKB
+	}
+	return n
+}
+
+// HashMaxMBResolved is the max file size hashed during Preserve.
+func (c *Config) HashMaxMBResolved() int {
+	n := 0
+	if c != nil {
+		n = c.Manifest.HashMaxMB
+	}
+	if n <= 0 {
+		n = DefaultHashMaxMB
+	}
+	if n < minHashMaxMB {
+		return minHashMaxMB
+	}
+	if n > maxHashMaxMB {
+		return maxHashMaxMB
+	}
+	return n
+}
+
+// TotalEmbedMaxMBResolved is the total embedded-body budget per Preserve.
+func (c *Config) TotalEmbedMaxMBResolved() int {
+	n := 0
+	if c != nil {
+		n = c.Manifest.TotalEmbedMaxMB
+	}
+	if n <= 0 {
+		n = DefaultTotalEmbedMaxMB
+	}
+	if n < minTotalEmbedMaxMB {
+		return minTotalEmbedMaxMB
+	}
+	if n > maxTotalEmbedMaxMB {
+		return maxTotalEmbedMaxMB
+	}
+	return n
 }
 
 // Load reads and validates quarantine-vm.json.
@@ -605,6 +673,14 @@ func (c *Config) PersistUI(cfgPath string) error {
 	ui["refreshOnCompare"] = c.RefreshOnCompareEnabled()
 	ui["warnPublicIpBeforeLaunch"] = c.WarnPublicIPBeforeLaunchEnabled()
 	ui["homeIspPatterns"] = c.HomeISPPatterns()
+	manifest, _ := doc["manifest"].(map[string]any)
+	if manifest == nil {
+		manifest = map[string]any{}
+		doc["manifest"] = manifest
+	}
+	manifest["contentMaxKb"] = c.ContentMaxKBResolved()
+	manifest["hashMaxMb"] = c.HashMaxMBResolved()
+	manifest["totalEmbedMaxMb"] = c.TotalEmbedMaxMBResolved()
 	out, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return err

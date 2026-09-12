@@ -16,7 +16,7 @@ let snapshotNames = [];
 let logDrawerOpen = false;
 let fileChangeTab = 'added';
 let regChangeTab = 'added';
-let FILE_PREVIEW_MAX_BYTES = 512 * 1024;
+let FILE_PREVIEW_MAX_BYTES = 4096 * 1024;
 
 function formatByteSize(n) {
   n = Number(n) || 0;
@@ -729,10 +729,16 @@ function showTab(name) {
 
 function applyUISettings(st, applySession) {
   if (!st) return;
-  const kb = Number(st.filePreviewMaxKb) || 512;
+  const kb = Number(st.filePreviewMaxKb) || 4096;
   FILE_PREVIEW_MAX_BYTES = Number(st.filePreviewMaxBytes) || kb * 1024;
   const previewEl = $('#ui-preview-max-kb');
   if (previewEl) previewEl.value = String(kb);
+  const contentEl = $('#ui-content-max-kb');
+  if (contentEl) contentEl.value = String(Number(st.contentMaxKb) || 51200);
+  const hashEl = $('#ui-hash-max-mb');
+  if (hashEl) hashEl.value = String(Number(st.hashMaxMb) || 100);
+  const totalEl = $('#ui-total-embed-max-mb');
+  if (totalEl) totalEl.value = String(Number(st.totalEmbedMaxMb) || 256);
   const hide = st.hideRoutineNoise !== false;
   const refresh = st.refreshOnCompare !== false;
   const warn = st.warnPublicIpBeforeLaunch !== false;
@@ -752,6 +758,19 @@ function applyUISettings(st, applySession) {
   }
 }
 
+function openSettings() {
+  const overlay = $('#settings-overlay');
+  if (!overlay) return;
+  overlay.classList.remove('hidden');
+  const msg = $('#ui-save-msg');
+  if (msg) msg.textContent = '';
+  $('#ui-preview-max-kb')?.focus();
+}
+
+function closeSettings() {
+  $('#settings-overlay')?.classList.add('hidden');
+}
+
 async function loadUISettings() {
   const api = await backend();
   if (!api?.UISettingsWails) return;
@@ -765,7 +784,10 @@ async function saveUISettings() {
     if (msg) msg.textContent = 'Restart the UI after this update (SetUISettingsWails missing).';
     return;
   }
-  const kb = Number($('#ui-preview-max-kb')?.value) || 512;
+  const kb = Number($('#ui-preview-max-kb')?.value) || 4096;
+  const contentKb = Number($('#ui-content-max-kb')?.value) || 51200;
+  const hashMb = Number($('#ui-hash-max-mb')?.value) || 100;
+  const totalMb = Number($('#ui-total-embed-max-mb')?.value) || 256;
   const btn = $('#btn-ui-save');
   setBusy(btn, true, 'Saving…');
   try {
@@ -775,14 +797,18 @@ async function saveUISettings() {
       !!$('#ui-refresh-compare')?.checked,
       !!$('#ui-warn-ip')?.checked,
       $('#ui-home-isp')?.value || '',
+      contentKb,
+      hashMb,
+      totalMb,
     );
     applyUISettings(st, true);
     if (msg) msg.textContent = 'Saved';
     if (diffData) await rerenderDiff();
+    setTimeout(() => closeSettings(), 400);
   } catch (e) {
     if (msg) msg.textContent = String(e);
   } finally {
-    setBusy(btn, false, 'Save defaults');
+    setBusy(btn, false, 'Save');
   }
 }
 
@@ -1109,11 +1135,40 @@ async function renderFileTree() {
     }
     preview.textContent = 'Loading...';
     toSnapshot = diffData.meta?.toSnapshot || $('#to-snap').value;
+    const fromSnapshot = diffData.meta?.fromSnapshot || $('#from-snap')?.value || '';
+    const change = node.change || fileChangeTab;
     try {
-      if (api?.ReadSnapshotFileWails) {
+      if (change === 'modified' && fromSnapshot && api?.DiffSnapshotFileWails) {
+        const res = await api.DiffSnapshotFileWails(fromSnapshot, toSnapshot, node.path);
+        const unavailable = !!(res.unavailable || res.toUnavailable);
+        preview.classList.toggle('preview-unavailable', unavailable);
+        if (unavailable && !res.fromContent && !res.toContent) {
+          preview.textContent = res.content || res.toError || res.fromError || '(unavailable)';
+        } else {
+          const note = res.fromNote
+            ? `<div class="muted preview-note">${escapeHtml(String(res.fromNote))}</div>`
+            : '';
+          const src = res.toSource || res.source
+            ? `<div class="muted preview-note">source: ${escapeHtml(String(res.toSource || res.source))}` +
+              (res.fromSource ? ` / before: ${escapeHtml(String(res.fromSource))}` : '') +
+              `</div>`
+            : '';
+          preview.innerHTML = src + note + renderFileLineDiff(
+            String(res.fromContent || ''),
+            String(res.toContent || '')
+          );
+        }
+      } else if (change === 'removed' && api?.ReadSnapshotFileWails) {
+        // Removed rows live on the Evidence (To) sidecar — do not flatten CleanSession.
         const res = await api.ReadSnapshotFileWails(toSnapshot, node.path);
         preview.classList.toggle('preview-unavailable', !!res.unavailable);
-        preview.textContent = res.content || '(empty)';
+        const src = res.source ? `source: ${res.source}\n\n` : '';
+        preview.textContent = src + (res.content || '(deleted — no embedded content)');
+      } else if (api?.ReadSnapshotFileWails) {
+        const res = await api.ReadSnapshotFileWails(toSnapshot, node.path);
+        preview.classList.toggle('preview-unavailable', !!res.unavailable);
+        const src = res.source ? `source: ${res.source}\n\n` : '';
+        preview.textContent = src + (res.content || '(empty)');
       } else {
         preview.textContent = node.path;
       }
@@ -1122,6 +1177,32 @@ async function renderFileTree() {
       preview.textContent = String(e);
     }
   });
+}
+
+function simpleLineDiff(before, after) {
+  const a = String(before || '').split('\n');
+  const b = String(after || '').split('\n');
+  const max = Math.max(a.length, b.length);
+  const lines = [];
+  for (let i = 0; i < max; i++) {
+    const left = a[i];
+    const right = b[i];
+    if (left === right) {
+      if (left !== undefined) lines.push({ kind: 'same', text: left });
+    } else {
+      if (left !== undefined) lines.push({ kind: 'del', text: left });
+      if (right !== undefined) lines.push({ kind: 'add', text: right });
+    }
+  }
+  return lines;
+}
+
+function renderFileLineDiff(before, after) {
+  return simpleLineDiff(before, after).map((line) => {
+    const cls = line.kind === 'add' ? 'diff-line-add' : line.kind === 'del' ? 'diff-line-del' : 'diff-line-same';
+    const prefix = line.kind === 'add' ? '+ ' : line.kind === 'del' ? '- ' : '  ';
+    return `<span class="${cls}">${escapeHtml(prefix + line.text)}</span>`;
+  }).join('');
 }
 
 function buildFileTreeLocal(diff) {
@@ -1754,6 +1835,19 @@ document.querySelectorAll('.reg-tabs button[data-reg-tab]').forEach((b) => {
 });
 $('#btn-compare').addEventListener('click', () => compare().catch((e) => alert(e)));
 $('#hideNoise').addEventListener('change', () => rerenderDiff().catch((e) => alert(e)));
+$('#btn-settings')?.addEventListener('click', () => {
+  loadUISettings().then(() => openSettings()).catch((e) => alert(e));
+});
+$('#btn-settings-close')?.addEventListener('click', () => closeSettings());
+$('#btn-settings-cancel')?.addEventListener('click', () => closeSettings());
+$('#settings-overlay')?.addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) closeSettings();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !$('#settings-overlay')?.classList.contains('hidden')) {
+    closeSettings();
+  }
+});
 $('#btn-ui-save')?.addEventListener('click', () => saveUISettings().catch((e) => {
   const el = $('#ui-save-msg');
   if (el) el.textContent = String(e);
