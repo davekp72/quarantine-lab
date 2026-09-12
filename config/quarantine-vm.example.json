@@ -39,7 +39,7 @@
       "intnetName": "quarantine-net",
       "uplink": "nat",
       "username": "quarantine",
-      "passwordFile": "C:\\QuarantineLab\\secrets\\gateway-password.txt",
+      "password": "",
       "sshPrivateKey": "C:\\QuarantineLab\\secrets\\gateway-id_ed25519",
       "sshPublicKey": "C:\\QuarantineLab\\secrets\\gateway-id_ed25519.pub",
       "sshHostPort": 2222,
@@ -83,19 +83,17 @@
     "logDir": "C:\\QuarantineLab\\logs\\inbox"
   },
   "guest": {
-    "username": "quarantine",
+    "username": "Administrator",
     "password": "",
-    "passwordFile": "C:\\QuarantineLab\\secrets\\guest-password.txt",
     "domain": "",
     "defaultExe": "C:\\Windows\\System32\\cmd.exe",
     "copyTargetDir": "C:\\Users\\Public\\Quarantine",
     "timeoutMs": 60000,
-    "role": "Lab admin account (local Administrators)"
+    "role": "Built-in Windows Administrator (RID 500) for guest control / Sysmon. Password in this gitignored config."
   },
   "payload": {
     "username": "analyst",
     "password": "",
-    "passwordFile": "C:\\QuarantineLab\\secrets\\payload-password.txt",
     "domain": "",
     "defaultExe": "C:\\Windows\\System32\\cmd.exe",
     "copyTargetDir": "C:\\Users\\Public\\Quarantine",

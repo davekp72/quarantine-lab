@@ -47,7 +47,9 @@ copy config\quarantine-vm.example.json config\quarantine-vm.json
 ```
 
 `setup secrets` writes unique passwords and gateway SSH keys under
-`{vmDataDir}\secrets\` (never commit that directory).
+`{vmDataDir}\secrets\` (never commit that directory). It also renders
+`{vmDataDir}\unattend\autounattend.xml` and packs
+`{vmDataDir}\unattend\unattend.img` (floppy with FirstLogon scripts).
 
 ### 4. Create the gateway
 
@@ -63,22 +65,31 @@ Default traffic mode is **FakeNet** (no real WAN). Details:
 
 ### 5. Create the Windows VM
 
+One command (secrets + create + unattend install). The lab NIC is on the
+**gateway intnet from create**. FirstLogon (from the remastered setup ISO)
+installs the agent and static `10.66.0.15` addressing:
+
 ```powershell
-.\quarantine-vm.ps1 create
-.\quarantine-vm.ps1 install
+.\quarantine-vm.ps1 build-windows
 ```
 
-Finish Windows setup in the VirtualBox window. Autologon runs once; disable it
-before the Clean baseline (`.\quarantine-vm.ps1 guest disable-autologon` while
-the VM is running, or `baseline` does this if the guest is up).
+The Linux gateway must already exist (`gateway create` / `gateway provision`).
+`build-windows` starts it before Windows Setup.
 
-**Stuck on “Let’s connect you to a network”?**  
-Press **Shift+F10**, run `oobe\bypassnro`, reboot, then finish with a **local
-account**.
+Guest Additions are optional for **agent health** (host → gateway NAT → guest
+:9443). They are still needed for host guestcontrol (clipboard / later file
+copy).
+
+Useful flags:
+- `-Force` — destroy/recreate the VM named in config (renamed VMs are untouched)
+- `-NoWait` — return after starting Setup; later: `.\quarantine-vm.ps1 build-windows -Continue`
+- `-WaitMinutes 120` — custom guestcontrol wait
+
+Manual equivalent: `setup secrets` → `create` → `install` (same NIC/unattend).
 
 ### 6. Install and harden the guest
 
-1. Guest Additions (paste, guest control, resize):
+1. Guest Additions (optional; paste, guest control, resize):
 
    ```powershell
    .\quarantine-vm.ps1 guest-additions
@@ -86,32 +97,21 @@ account**.
 
    In the guest: run the installer from the DVD, then reboot.
 
-2. Accounts from config:
-   - **`quarantine`** — admin (lab tooling, Sysmon, guest control)
+2. Accounts from config (also created by unattend):
+   - **`Administrator`** — built-in admin (lab tooling, Sysmon, guest control); password from `guest.password`
    - **`analyst`** (or `payload.username`) — standard user for samples
 
-3. Put the guest on the gateway LAN:
+3. FirstLogon already put the guest on the gateway LAN (`10.66.0.15` → `10.66.0.1`)
+   and installed the agent from the setup ISO. Confirm on the host:
 
    ```powershell
-   .\quarantine-vm.ps1 network gateway
+   .\quarantine-vm.ps1 agent health
    ```
 
-4. One elevated provision (agent, guestcontrol ACLs, gateway NIC/proxy/CA,
-   Sysmon, event-log grant, disable autologon):
+   If health fails after a Force rebuild, re-run `setup secrets` (needs
+   `go\quarantine-agent.exe`) so the remastered ISO contains the binary.
 
-   ```powershell
-   .\quarantine-vm.ps1 guest provision
-   ```
-
-   In the guest (elevated PowerShell as `quarantine`), run **only**:
-
-   ```powershell
-   & 'C:\Users\Public\Quarantine\Invoke-QuarantineGuestProvision.ps1'
-   ```
-
-   Then on the host: `.\quarantine-vm.ps1 agent health`
-
-5. Optional fingerprint softening (VM powered off):
+4. Optional fingerprint softening (VM powered off):
 
    ```powershell
    .\quarantine-vm.ps1 stealth
@@ -364,8 +364,8 @@ The live file is gitignored.
 | `vmName` / `vmDataDir` | VM name and disk location |
 | `cleanSnapshotName` | Disk baseline name (default `Clean`) |
 | `manifest.sessionBaselineSnapshot` | Live clean name (default `CleanSession`) |
-| `guest` / `payload` | Usernames plus `passwordFile` under `{vmDataDir}/secrets` (never commit passwords). Payload default in the sample is `analyst`. |
-| `network.gateway.passwordFile` / `sshPrivateKey` | Unique gateway password (guestcontrol/sudo) and ed25519 key. Password SSH is off. |
+| `guest` / `payload` | Usernames and passwords in gitignored `config/quarantine-vm.json` (`setup secrets` generates missing passwords). Payload default in the sample is `analyst`. |
+| `network.gateway.password` / `sshPrivateKey` | Gateway password in config JSON; ed25519 key under `{vmDataDir}/secrets`. Password SSH is off. |
 | `network.mode` | Always `gateway` for analysis (Linux VM). |
 | `network.gateway.trafficMode` | Default `fakenet`. `permissive` is allowlisted real internet. |
 | `network.gateway.permissive` | WAN allowlist: `tcpPorts` (default 80,443), `udpPorts`, `forceDnsToGateway`, `allowIcmp`. |

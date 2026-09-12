@@ -30,7 +30,7 @@ param(
 
     [Parameter(Position = 0)]
 
-    [ValidateSet('create', 'install', 'start', 'stop', 'snapshot', 'snapshots', 'delete-snapshot', 'baseline', 'preserve', 'reset', 'status', 'mount-iso', 'guest-additions', 'relocate', 'consolidate', 'network', 'proxy', 'capture', 'clipboard', 'inbox', 'guest', 'payload', 'sysmon', 'manifest', 'ui', 'agent', 'setup', 'gateway', 'stealth', 'help')]
+    [ValidateSet('create', 'install', 'build-windows', 'start', 'stop', 'snapshot', 'snapshots', 'delete-snapshot', 'baseline', 'preserve', 'reset', 'status', 'mount-iso', 'guest-additions', 'relocate', 'consolidate', 'network', 'proxy', 'capture', 'clipboard', 'inbox', 'guest', 'payload', 'sysmon', 'manifest', 'ui', 'agent', 'setup', 'gateway', 'stealth', 'help')]
 
     [string]$Action = 'help',
 
@@ -190,7 +190,19 @@ param(
 
     [Parameter()]
 
-    [string]$DiffJsonPath
+    [string]$DiffJsonPath,
+
+    [Parameter()]
+    [int]$WaitMinutes = -1,
+
+    [Parameter()]
+    [switch]$NoWait,
+
+    [Parameter()]
+    [switch]$Wait,
+
+    [Parameter()]
+    [switch]$Continue
 
 )
 
@@ -337,6 +349,7 @@ function Test-QuarantinePreferGo {
     $psOnly = @{
         'create'           = $true
         'install'          = $true
+        'build-windows'    = $true
         'mount-iso'        = $true
         'guest-additions'  = $true
         'relocate'         = $true
@@ -464,6 +477,27 @@ switch ($Action) {
 
         New-QuarantineVM -ConfigPath $ConfigPath -Force:$Force
 
+    }
+
+    'build-windows' {
+        Ensure-QuarantineCliBinary
+        $waitMin = 0
+        if ($WaitMinutes -ge 0) {
+            $waitMin = $WaitMinutes
+        } elseif ($Wait -or $Continue) {
+            $waitMin = 90
+        } elseif (-not $NoWait) {
+            # Default: start install and wait so one command covers FirstLogon + GA.
+            $waitMin = 90
+        }
+        Invoke-QuarantineWindowsBuild `
+            -ConfigPath $ConfigPath `
+            -ProjectRoot $PSScriptRoot `
+            -CliExe $script:CliExe `
+            -Force:$Force `
+            -WaitMinutes $waitMin `
+            -NoWait:$NoWait `
+            -Continue:$Continue
     }
 
     'install' {
@@ -1022,6 +1056,8 @@ Quarantine VM utility (VirtualBox)
 
   create     Create the isolated VM (requires config + Windows ISO)
 
+  build-windows  Secrets + create + unattend install; wait for GA/guestcontrol; stage provision (-Force/-NoWait/-Continue/-WaitMinutes)
+
   install    Start VM for first-time Windows installation
 
   start      Start the quarantine VM (-Fresh, -SkipProxy)
@@ -1119,7 +1155,7 @@ Guest control (requires Guest Additions + guest credentials):
   guest ps <script>       Run PowerShell -Command in guest
 
   guest copy <file>       Copy host file(s) into guest (no shared folder)
-  guest provision         Stage agent/network/Sysmon scripts; run Invoke-QuarantineGuestProvision.ps1 elevated in the guest
+  guest provision         Stage agent/network/Sysmon; FirstLogon already ran elevated provision from floppy — finish via Finish-QuarantineProvision.cmd after this stage
   guest gateway-setup     Upload Configure + CA installer + mitm CA for gateway mode
 
 
@@ -1148,14 +1184,19 @@ Setup:
   2. Set windowsIsoPath to your Windows ISO
 
   3. .\quarantine-vm.ps1 setup secrets
+     (renders unattend + packs {vmDataDir}\unattend\unattend.img floppy)
 
   4. .\quarantine-vm.ps1 create
+     (attaches Windows ISO + unattend floppy)
 
   5. .\quarantine-vm.ps1 install
 
-  6. .\quarantine-vm.ps1 guest provision
-     Then in elevated guest PowerShell:
-       Set-ExecutionPolicy -Scope Process Bypass -Force
+  Or one shot:
+     .\quarantine-vm.ps1 build-windows
+     (when desktop appears: .\quarantine-vm.ps1 guest-additions, install DVD, reboot)
+
+  6. After FirstLogon: .\quarantine-vm.ps1 guest-additions, then guest provision
+     Finish agent/Sysmon via Public Desktop Finish-QuarantineProvision.cmd
        & 'C:\Users\Public\Quarantine\Invoke-QuarantineGuestProvision.ps1'
 
   7. .\quarantine-vm.ps1 guest disable-autologon   (or baseline does this if the VM is running)

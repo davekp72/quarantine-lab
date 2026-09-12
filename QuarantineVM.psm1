@@ -677,7 +677,22 @@ function Set-QuarantineVMStealth {
 
     $cpuProfile = 'Intel Core i7-6700K'
     if ($stealth.cpuProfile) { $cpuProfile = [string]$stealth.cpuProfile }
-    if ($cpuProfile -and $cpuProfile -notin @('host', 'none', '')) {
+
+    # Detect firmware early — EFI + forced Skylake (etc.) profiles often triple-fault
+    # during Windows Setup / early boot (Guru Meditation VINF_EM_TRIPLE_FAULT).
+    $firmware = 'bios'
+    try {
+        $infoFw = Invoke-VBoxManage -Arguments @('showvminfo', $VmName, '--machinereadable') -AllowFailure
+        $infoFwText = ($infoFw | Out-String)
+        if ($infoFwText -match 'firmware="?([^"\r\n]+)"?') {
+            $firmware = $Matches[1].ToLowerInvariant()
+        }
+    } catch { }
+
+    if ($firmware -eq 'efi') {
+        Invoke-VBoxManage -Arguments @('modifyvm', $VmName, '--cpu-profile', 'host') -AllowFailure | Out-Null
+        Write-Host 'Stealth: EFI guest uses host CPU profile (custom profiles break Win11 Setup).'
+    } elseif ($cpuProfile -and $cpuProfile -notin @('host', 'none', '')) {
         Invoke-VBoxManage -Arguments @('modifyvm', $VmName, '--cpu-profile', $cpuProfile) -AllowFailure | Out-Null
     }
 
@@ -771,17 +786,9 @@ function Set-QuarantineVMStealth {
 
     # EFI guests: any VBoxInternal/Devices/pcbios/0/Config/* replaces the CFGM
     # tree and drops BootDevice0 → start fails with VERR_CFGM_VALUE_NOT_FOUND.
-    # Keep MAC/CPU/ACPI only; clear leftover pcbios Config keys if present.
-    $firmware = 'bios'
-    try {
-        $infoFw = Invoke-VBoxManage -Arguments @('showvminfo', $VmName, '--machinereadable') -AllowFailure
-        $infoFwText = ($infoFw | Out-String)
-        if ($infoFwText -match 'firmware="?([^"\r\n]+)"?') {
-            $firmware = $Matches[1].ToLowerInvariant()
-        }
-    } catch { }
-
-    $dmiNote = 'acpi only (EFI — pcbios DMI skipped)'
+    # Keep MAC/ACPI only; clear leftover pcbios Config keys if present.
+    # ($firmware already resolved above for cpu-profile)
+    $dmiNote = 'acpi only (EFI - pcbios DMI skipped)'
     if ($firmware -eq 'efi') {
         try {
             $extra = Invoke-VBoxManage -Arguments @('getextradata', $VmName, 'enumerate') -AllowFailure
@@ -813,7 +820,8 @@ function Set-QuarantineVMStealth {
         $mac.Substring(0, 2), $mac.Substring(2, 2), $mac.Substring(4, 2),
         $mac.Substring(6, 2), $mac.Substring(8, 2), $mac.Substring(10, 2)
     )
-    Write-Host "Stealth applied: cpu-profile=$cpuProfile; mac=$macPretty; $dmiNote (Guest Additions / VBoxSVGA kept)"
+    $cpuNote = if ($firmware -eq 'efi') { 'host (EFI)' } else { $cpuProfile }
+    Write-Host "Stealth applied: cpu-profile=$cpuNote; mac=$macPretty; $dmiNote (Guest Additions / VBoxSVGA kept)"
 }
 
 function Get-QuarantineVMInboxSettings {
@@ -2091,7 +2099,7 @@ function New-QuarantineVM {
             Invoke-VBoxManage -Arguments @('modifyvm', $vmName, '--firmware', 'efi') | Out-Null
         }
 
-        Set-QuarantineVMNetwork -VmName $vmName | Out-Null
+        Set-QuarantineVMInstallNat -VmName $vmName -ConfigPath $ConfigPath
         Set-QuarantineVMIsolation -VmName $vmName | Out-Null
 
         $diskSizeMb = [int]$script:Config.diskSizeGb * 1024
@@ -2106,7 +2114,7 @@ function New-QuarantineVM {
             '--name', 'SATA',
             '--add', 'sata',
             '--controller', 'IntelAhci',
-            '--portcount', '2',
+            '--portcount', '3',
             '--hostiocache', 'on'
         ) | Out-Null
 
@@ -2130,13 +2138,191 @@ function New-QuarantineVM {
 
         Invoke-VBoxManage -Arguments @('modifyvm', $vmName, '--tpm-type', 'x2') -AllowFailure | Out-Null
 
-        if ($script:Config.autounattendPath -and (Test-Path -LiteralPath $script:Config.autounattendPath)) {
-            Write-Verbose 'autounattend.xml is configured; attach manually after creating a floppy image (see README).'
-        }
+        Mount-QuarantineUnattendMedia -VmName $vmName -ConfigPath $ConfigPath
 
-        Write-Host "VM '$vmName' created with isolation defaults."
+        Write-Host "VM '$vmName' created with isolation defaults (NAT for Setup; switch to gateway after)."
         Write-Host "Next: run '.\quarantine-vm.ps1 install' to start Windows setup, then '.\quarantine-vm.ps1 snapshot' after hardening."
     }
+}
+
+function Get-QuarantineUnattendFloppyPath {
+    <#
+    .SYNOPSIS
+      Path to the 1.44MB unattend floppy built by setup secrets ({vmDataDir}\unattend\unattend.img).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [string]$ConfigPath
+    )
+
+    if ($ConfigPath) {
+        $script:Config = Get-QuarantineVMConfig -ConfigPath $ConfigPath
+    }
+    $dataDir = Get-QuarantineVMDataDir -Config $script:Config
+    return (Join-Path $dataDir 'unattend\unattend.img')
+}
+
+function Get-QuarantineWindowsSetupIsoPath {
+    <#
+    .SYNOPSIS
+      Bootable remastered Win11 ISO with autounattend.xml in the root ({vmDataDir}\unattend\Win11-setup.iso).
+    #>
+    [CmdletBinding()]
+    param([string]$ConfigPath)
+    if ($ConfigPath) {
+        $script:Config = Get-QuarantineVMConfig -ConfigPath $ConfigPath
+    }
+    $dataDir = Get-QuarantineVMDataDir -Config $script:Config
+    return (Join-Path $dataDir 'unattend\Win11-setup.iso')
+}
+
+function Get-QuarantineUnattendIsoPath {
+    <#
+    .SYNOPSIS
+      Sidecar answer-file ISO (fallback). Prefer Win11-setup.iso as the install DVD.
+    #>
+    [CmdletBinding()]
+    param([string]$ConfigPath)
+    if ($ConfigPath) {
+        $script:Config = Get-QuarantineVMConfig -ConfigPath $ConfigPath
+    }
+    $dataDir = Get-QuarantineVMDataDir -Config $script:Config
+    return (Join-Path $dataDir 'unattend\unattend.iso')
+}
+
+function Mount-QuarantineUnattendMedia {
+    <#
+    .SYNOPSIS
+      Attach unattend.img floppy (+ optional sidecar ISO) for answer file / FirstLogon helpers.
+      Prefer booting from Win11-setup.iso (Set-QuarantineVMInstallMedia) so Setup sees autounattend.xml.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$VmName,
+
+        [Parameter()]
+        [string]$ConfigPath
+    )
+
+    if ($ConfigPath) {
+        $script:Config = Get-QuarantineVMConfig -ConfigPath $ConfigPath
+    }
+
+    $state = Get-QuarantineVMState -VmName $VmName
+    if ($state -in @('running', 'paused', 'starting')) {
+        throw "VM '$VmName' must be powered off to attach unattend media (state: $state)."
+    }
+
+    $setupIso = Get-QuarantineWindowsSetupIsoPath -ConfigPath $ConfigPath
+    $iso = Get-QuarantineUnattendIsoPath -ConfigPath $ConfigPath
+    # Only attach sidecar on port 2 when the remastered boot ISO is missing.
+    if (-not (Test-Path -LiteralPath $setupIso) -and (Test-Path -LiteralPath $iso)) {
+        Invoke-VBoxManage -Arguments @(
+            'storagectl', $VmName,
+            '--name', 'SATA',
+            '--portcount', '3'
+        ) -AllowFailure | Out-Null
+
+        Invoke-VBoxManage -Arguments @(
+            'storageattach', $VmName,
+            '--storagectl', 'SATA',
+            '--port', '2',
+            '--device', '0',
+            '--type', 'dvddrive',
+            '--medium', (Format-VBoxPath -Path $iso)
+        ) | Out-Null
+        Write-Host "Attached unattend sidecar ISO (SATA port 2): $iso"
+    } elseif (-not (Test-Path -LiteralPath $setupIso)) {
+        Write-Warning "Win11-setup.iso not found: $setupIso (run setup secrets). Unattended EFI install will fail."
+    }
+
+    Mount-QuarantineUnattendFloppy -VmName $VmName -ConfigPath $ConfigPath
+}
+
+function Mount-QuarantineUnattendFloppy {
+    <#
+    .SYNOPSIS
+      Attach {vmDataDir}\unattend\unattend.img as the VM floppy (Windows Setup + FirstLogon).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$VmName,
+
+        [Parameter()]
+        [string]$ConfigPath
+    )
+
+    if ($ConfigPath) {
+        $script:Config = Get-QuarantineVMConfig -ConfigPath $ConfigPath
+    }
+
+    $floppy = Get-QuarantineUnattendFloppyPath -ConfigPath $ConfigPath
+    if (-not (Test-Path -LiteralPath $floppy)) {
+        Write-Warning "Unattend floppy not found: $floppy - run .\quarantine-vm.ps1 setup secrets"
+        return
+    }
+
+    $state = Get-QuarantineVMState -VmName $VmName
+    if ($state -in @('running', 'paused', 'starting')) {
+        throw "VM '$VmName' must be powered off to attach the unattend floppy (state: $state)."
+    }
+
+    Invoke-VBoxManage -Arguments @(
+        'storagectl', $VmName,
+        '--name', 'Floppy',
+        '--add', 'floppy',
+        '--controller', 'I82078',
+        '--portcount', '1'
+    ) -AllowFailure | Out-Null
+
+    Invoke-VBoxManage -Arguments @(
+        'storageattach', $VmName,
+        '--storagectl', 'Floppy',
+        '--port', '0',
+        '--device', '0',
+        '--type', 'fdd',
+        '--medium', (Format-VBoxPath -Path $floppy)
+    ) | Out-Null
+
+    Write-Host "Attached unattend floppy: $floppy"
+}
+
+function Set-QuarantineVMInstallNat {
+    <#
+    .SYNOPSIS
+      Attach NIC1 to the Linux gateway intnet for Windows Setup/OOBE (82540EM inbox driver).
+      Unattend FirstLogon configures 10.66.0.15; WAN is FakeNet or permissive via the gateway.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$VmName,
+        [string]$ConfigPath
+    )
+
+    if ($ConfigPath) {
+        $script:Config = Get-QuarantineVMConfig -ConfigPath $ConfigPath
+    }
+    $intnet = 'quarantine-net'
+    if ($script:Config -and $script:Config.network) {
+        if ($script:Config.network.gateway -and $script:Config.network.gateway.intnetName) {
+            $intnet = [string]$script:Config.network.gateway.intnetName
+        } elseif ($script:Config.network.intnetName) {
+            $intnet = [string]$script:Config.network.intnetName
+        }
+    }
+
+    Invoke-VBoxManage -Arguments @(
+        'modifyvm', $VmName,
+        '--nic1', 'intnet',
+        '--intnet1', $intnet,
+        '--cableconnected1', 'on',
+        '--nictype1', '82540EM',
+        '--nic2', 'none'
+    ) | Out-Null
+    Write-Host "Install network: gateway intnet '$intnet' (82540EM). Start the Linux gateway before Windows Setup."
 }
 
 function Set-QuarantineVMInstallMedia {
@@ -2157,10 +2343,18 @@ function Set-QuarantineVMInstallMedia {
         $script:Config = Get-QuarantineVMConfig -ConfigPath $ConfigPath
     }
 
-    $isoPath = Resolve-WindowsIsoPath `
-        -ConfiguredPath $script:Config.windowsIsoPath `
-        -GuestOsType $script:Config.guestOsType `
-        -ProjectRoot $PSScriptRoot
+    # Prefer remastered ISO with autounattend.xml in the boot volume root (required for EFI).
+    $setupIso = Get-QuarantineWindowsSetupIsoPath -ConfigPath $ConfigPath
+    if (Test-Path -LiteralPath $setupIso) {
+        $isoPath = (Resolve-Path -LiteralPath $setupIso).Path
+        Write-Host "Using remastered setup ISO (answer file baked in): $isoPath"
+    } else {
+        $isoPath = Resolve-WindowsIsoPath `
+            -ConfiguredPath $script:Config.windowsIsoPath `
+            -GuestOsType $script:Config.guestOsType `
+            -ProjectRoot $PSScriptRoot
+        Write-Warning "Win11-setup.iso missing ($setupIso). Falling back to stock ISO; Setup will likely prompt."
+    }
 
     $state = Get-QuarantineVMState -VmName $VmName
     if ($state -in @('running', 'paused', 'starting')) {
@@ -2181,7 +2375,7 @@ function Set-QuarantineVMInstallMedia {
         '--storagectl', 'SATA',
         '--port', '1', '--device', '0',
         '--type', 'dvddrive',
-        '--medium', $isoPath
+        '--medium', (Format-VBoxPath -Path $isoPath)
     ) | Out-Null
 
     Invoke-VBoxManage -Arguments @(
@@ -2194,6 +2388,9 @@ function Set-QuarantineVMInstallMedia {
     ) | Out-Null
 
     Invoke-VBoxManage -Arguments @('modifyvm', $VmName, '--tpm-type', 'x2') -AllowFailure | Out-Null
+
+    Set-QuarantineVMInstallNat -VmName $VmName -ConfigPath $ConfigPath
+    Mount-QuarantineUnattendMedia -VmName $VmName -ConfigPath $ConfigPath
 
     Write-Host "Install media mounted: $isoPath"
 }
@@ -2212,7 +2409,10 @@ function Start-QuarantineVM {
         [switch]$Fresh,
 
         [Parameter()]
-        [switch]$SkipProxy
+        [switch]$SkipProxy,
+
+        [Parameter()]
+        [switch]$KeepInstallMedia
     )
 
     $script:Config = Get-QuarantineVMConfig -ConfigPath $ConfigPath
@@ -2264,9 +2464,17 @@ function Start-QuarantineVM {
         Start-Sleep -Seconds 1
     }
 
-    Set-QuarantineVMNormalBoot -VmName $vmName | Out-Null
-    Set-QuarantineVMIsolation -VmName $vmName | Out-Null
-
+    if ($KeepInstallMedia) {
+        # First-time Windows Setup: keep ISO attached and prefer DVD boot.
+        # (NormalBoot ejects the ISO - that was breaking build-windows / install.)
+        Write-Host 'Keeping install ISO attached (DVD boot for Windows Setup).'
+        # Ensure host CPU profile - stealth Skylake profile causes EFI Win11 triple-fault.
+        Invoke-VBoxManage -Arguments @('modifyvm', $vmName, '--cpu-profile', 'host') -AllowFailure | Out-Null
+        Set-QuarantineVMIsolation -VmName $vmName | Out-Null
+    } else {
+        Set-QuarantineVMNormalBoot -VmName $vmName | Out-Null
+        Set-QuarantineVMIsolation -VmName $vmName | Out-Null
+    }
     $networkMode = if ($script:Config.network.mode) { $script:Config.network.mode.ToLowerInvariant() } else { '' }
     if ($networkMode -eq 'quarantine' -and -not $SkipProxy) {
         $networkModule = Join-Path $PSScriptRoot 'QuarantineNetwork.psm1'
@@ -3323,6 +3531,301 @@ function Get-QuarantineVMStatus {
     }
 }
 
+function Wait-QuarantineVMGuestControlReady {
+    <#
+    .SYNOPSIS
+      Poll guestcontrol until credentials work or timeout.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [string]$ConfigPath,
+
+        [Parameter()]
+        [int]$TimeoutMinutes = 90,
+
+        [Parameter()]
+        [int]$PollSeconds = 20
+    )
+
+    if ($TimeoutMinutes -le 0) {
+        throw 'TimeoutMinutes must be > 0'
+    }
+    $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
+    $cfg = Get-QuarantineVMConfig -ConfigPath $ConfigPath
+    $vmName = $cfg.vmName
+    Write-Host "Waiting up to $TimeoutMinutes min for guest control on '$vmName' (FirstLogon + Guest Additions)..."
+    Write-Host 'When the desktop appears, in a second host terminal run:'
+    Write-Host '  .\quarantine-vm.ps1 guest-additions'
+    Write-Host 'Then in the guest install from the DVD and reboot.'
+    while ((Get-Date) -lt $deadline) {
+        $state = Get-QuarantineVMState -VmName $vmName
+        if ($state -eq 'notfound') {
+            throw "VM '$vmName' disappeared while waiting."
+        }
+        if ($state -notin @('running', 'paused', 'starting')) {
+            Write-Host "  state=$state - start the VM if it powered off after setup."
+            Start-Sleep -Seconds $PollSeconds
+            continue
+        }
+        try {
+            if (Test-QuarantineVMGuestControl -ConfigPath $ConfigPath) {
+                Write-Host 'Guest control is ready.'
+                return
+            }
+        } catch {
+            Write-Host ("  not ready: " + $_.Exception.Message)
+        }
+        Start-Sleep -Seconds $PollSeconds
+    }
+    throw (
+        "Timed out after $TimeoutMinutes minutes waiting for guest control.`n`n" +
+        "Complete in the VM GUI:`n" +
+        "  1. Press a key when prompted to boot from the Windows ISO.`n" +
+        "  2. Wait for unattend + FirstLogon (accounts + elevated provision).`n" +
+        "  3. .\quarantine-vm.ps1 guest-additions  then install from the DVD and reboot.`n" +
+        "  4. Re-run: .\quarantine-vm.ps1 build-windows -Continue"
+    )
+}
+
+function Invoke-QuarantineWindowsBuild {
+    <#
+    .SYNOPSIS
+      One-shot host bootstrap: secrets, create Windows VM, start unattended install,
+      optionally wait for guest control and stage post-GA provision files.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [string]$ConfigPath,
+
+        [Parameter()]
+        [string]$ProjectRoot,
+
+        [Parameter()]
+        [string]$CliExe,
+
+        [Parameter()]
+        [switch]$Force,
+
+        [Parameter()]
+        [int]$WaitMinutes = 90,
+
+        [Parameter()]
+        [switch]$NoWait,
+
+        [Parameter()]
+        [switch]$Continue
+    )
+
+    if (-not $ProjectRoot) { $ProjectRoot = $PSScriptRoot }
+    if (-not $ConfigPath) {
+        $ConfigPath = Join-Path $ProjectRoot 'config\quarantine-vm.json'
+    }
+
+    $example = Join-Path $ProjectRoot 'config\quarantine-vm.example.json'
+    if (-not (Test-Path -LiteralPath $ConfigPath)) {
+        if (-not (Test-Path -LiteralPath $example)) {
+            throw "Missing config and example: $ConfigPath"
+        }
+        $cfgDir = Split-Path -Parent $ConfigPath
+        if (-not (Test-Path -LiteralPath $cfgDir)) {
+            New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
+        }
+        Copy-Item -LiteralPath $example -Destination $ConfigPath
+        Write-Host "Created $ConfigPath from example."
+    }
+
+    $sysmonExe = Join-Path $ProjectRoot 'tools\Sysmon64.exe'
+    if (-not (Test-Path -LiteralPath $sysmonExe)) {
+        $getSysmon = Join-Path $ProjectRoot 'scripts\Get-Sysmon.ps1'
+        if (Test-Path -LiteralPath $getSysmon) {
+            Write-Host 'Downloading Sysmon...'
+            & $getSysmon -ProjectRoot $ProjectRoot
+        } else {
+            Write-Warning 'Sysmon64.exe missing and scripts\Get-Sysmon.ps1 not found.'
+        }
+    }
+
+    if ($CliExe -and (Test-Path -LiteralPath $CliExe)) {
+        Write-Host 'Generating secrets + unattend floppy...'
+        & (Get-Item -LiteralPath $CliExe).FullName --config $ConfigPath setup secrets
+        if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+            throw "setup secrets failed (exit $LASTEXITCODE)"
+        }
+    } else {
+        Write-Warning 'CLI binary not available; run: .\quarantine-vm.ps1 setup secrets'
+    }
+
+    $cfg = Initialize-QuarantineVMContext -ConfigPath $ConfigPath
+    $vmName = $cfg.vmName
+    $floppy = Get-QuarantineUnattendFloppyPath -ConfigPath $ConfigPath
+    $setupIso = Get-QuarantineWindowsSetupIsoPath -ConfigPath $ConfigPath
+    $sidecarIso = Get-QuarantineUnattendIsoPath -ConfigPath $ConfigPath
+    if (-not (Test-Path -LiteralPath $setupIso) -and -not (Test-Path -LiteralPath $floppy) -and -not (Test-Path -LiteralPath $sidecarIso)) {
+        throw "Unattend media missing under $(Split-Path -Parent $floppy) - run setup secrets first."
+    }
+    if (-not (Test-Path -LiteralPath $setupIso)) {
+        Write-Warning "Win11-setup.iso not found ($setupIso). Run setup secrets again so install can be fully unattended."
+    }
+
+    if ($Continue) {
+        Write-Host "Continue mode: stage post-GA provision for '$vmName'..."
+        if (-not (Test-QuarantineVMExists -VmName $vmName)) {
+            throw "VM '$vmName' not found. Run build-windows without -Continue first."
+        }
+        $state = Get-QuarantineVMState -VmName $vmName
+        if ($state -notin @('running', 'paused')) {
+            Start-QuarantineVM -ConfigPath $ConfigPath -Type gui
+            Start-Sleep -Seconds 5
+        }
+        Wait-QuarantineVMGuestControlReady -ConfigPath $ConfigPath -TimeoutMinutes ([Math]::Max(5, $WaitMinutes))
+    } else {
+        if ((Test-QuarantineVMExists -VmName $vmName) -and -not $Force) {
+            throw (
+                "VM '$vmName' already exists.`n" +
+                "  - Keep it and finish provisioning: .\quarantine-vm.ps1 build-windows -Continue`n" +
+                "  - Recreate from scratch (destroys that VM only): .\quarantine-vm.ps1 build-windows -Force`n" +
+                "  - Renamed VMs in VirtualBox are left alone if their name differs from config vmName."
+            )
+        }
+
+        Write-Host "=== build-windows: create '$vmName' ==="
+        New-QuarantineVM -ConfigPath $ConfigPath -Force:$Force
+
+        Write-Host '=== build-windows: start Linux gateway (lab NIC is already intnet) ==='
+        if ($CliExe -and (Test-Path -LiteralPath $CliExe)) {
+            & (Get-Item -LiteralPath $CliExe).FullName --config $ConfigPath gateway start
+            if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+                Write-Warning "gateway start exited $LASTEXITCODE — Windows Setup will have no WAN until the gateway is up"
+            }
+            & (Get-Item -LiteralPath $CliExe).FullName --config $ConfigPath network gateway
+            if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+                Write-Warning "network gateway exited $LASTEXITCODE"
+            }
+        }
+
+        Write-Host '=== build-windows: start Windows Setup (GUI) ==='
+        if (Test-Path -LiteralPath $setupIso) {
+            Write-Host 'Booting remastered Win11-setup.iso (efisys_noprompt when available; no key press expected).'
+        } else {
+            Write-Host 'When you see "Press any key to boot from CD or DVD", press a key.'
+        }
+        Install-QuarantineVM -ConfigPath $ConfigPath
+
+        if ($NoWait -or $WaitMinutes -le 0) {
+            Write-Host @'
+
+Host bootstrap started (NoWait).
+After Windows FirstLogon finishes:
+  1. .\quarantine-vm.ps1 guest-additions   # install from DVD in guest, reboot
+  2. .\quarantine-vm.ps1 build-windows -Continue
+
+'@
+            return
+        }
+
+        Write-Host @'
+
+Windows is installing. In the VM window:
+  - Press a key at the DVD boot prompt if shown (efisys_noprompt skips this)
+  - Leave it alone through OOBE / FirstLogon (elevated provision from the setup ISO)
+
+FirstLogon installs the agent and sets gateway networking. Guest Additions are
+only needed for host guestcontrol (paste / later staging), not agent health.
+
+'@
+        Wait-QuarantineVMGuestControlReady -ConfigPath $ConfigPath -TimeoutMinutes $WaitMinutes
+    }
+
+    Write-Host '=== Mount Guest Additions ISO ==='
+    try {
+        Mount-QuarantineVMGuestAdditions -ConfigPath $ConfigPath
+    } catch {
+        Write-Warning "Guest Additions mount: $($_.Exception.Message)"
+    }
+
+    Write-Host '=== Network: gateway ==='
+    try {
+        Set-QuarantineVMNetworkMode -ConfigPath $ConfigPath -Mode gateway
+    } catch {
+        Write-Warning "network gateway: $($_.Exception.Message)"
+    }
+
+    if ($CliExe -and (Test-Path -LiteralPath $CliExe)) {
+        Write-Host '=== Stage guest provision (agent/Sysmon/scripts) ==='
+        & (Get-Item -LiteralPath $CliExe).FullName --config $ConfigPath guest provision
+        if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+            Write-Warning "guest provision staging exited $LASTEXITCODE"
+        }
+    }
+
+    $pub = if ($cfg.guest.copyTargetDir) { [string]$cfg.guest.copyTargetDir } else { 'C:\Users\Public\Quarantine' }
+    Write-Host @"
+
+=== build-windows: almost done ===
+Unattend FirstLogon should already have installed the agent on the gateway LAN.
+On the host:
+  .\quarantine-vm.ps1 agent health
+  .\quarantine-vm.ps1 baseline
+
+If provision skipped the agent (binary missing from the setup ISO), re-run
+setup secrets after building quarantine-agent.exe, then in the guest:
+  Public Desktop: Finish-QuarantineProvision.cmd
+  or:  & '$pub\Invoke-QuarantineGuestProvision.ps1'
+
+"@
+}
+
+function Set-QuarantineVMPostPeBootOrder {
+    <#
+    .SYNOPSIS
+      After Windows PE has started from DVD, prefer disk for later Setup reboots.
+      Leaving DVD first makes Setup re-enter the installer and show
+      "The computer restarted unexpectedly...".
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$VmName,
+
+        [Parameter()]
+        [int]$DelaySeconds = 45
+    )
+
+    if ($DelaySeconds -gt 0) {
+        Write-Host "Waiting ${DelaySeconds}s for Windows PE to start from DVD, then setting disk-first boot..."
+        Start-Sleep -Seconds $DelaySeconds
+    }
+
+    $state = Get-QuarantineVMState -VmName $VmName
+    if ($state -notin @('running', 'paused')) {
+        Write-Warning "Skip boot-order flip; VM state is '$state'."
+        return
+    }
+
+    Invoke-VBoxManage -Arguments @(
+        'modifyvm', $VmName,
+        '--boot1', 'disk',
+        '--boot2', 'dvd',
+        '--boot3', 'none',
+        '--boot4', 'none'
+    ) -AllowFailure | Out-Null
+
+    $boot1 = (& (Get-VBoxManagePath) showvminfo $VmName --machinereadable 2>$null | Select-String '^boot1=').ToString()
+    if ($boot1 -match 'boot1="disk"') {
+        Write-Host 'Boot order set to disk then DVD (ISO stays attached; next Setup reboot hits the hard disk).'
+    } else {
+        Write-Warning @"
+Could not change boot order while the VM is running (VirtualBox locked it).
+After Windows finishes copying files and reboots, if you see the 'restarted unexpectedly' dialog:
+  1. Power off the VM
+  2. VBoxManage modifyvm $VmName --boot1 disk --boot2 dvd
+  3. Start the VM again (boots into the installed Windows / specialize)
+"@
+    }
+}
+
 function Install-QuarantineVM {
     [CmdletBinding()]
     param(
@@ -3333,17 +3836,18 @@ function Install-QuarantineVM {
     Write-Host @'
 
 Windows install workflow:
-  1. VM boots from ISO (GUI window opens).
-  2. When you see "Press any key to boot from CD or DVD", press a key immediately.
-  3. Complete setup or use templates\autounattend.xml for unattended install.
-  4. Disable Windows Update, Defender cloud sample submission, and OneDrive sync.
-  5. Install your analysis tools (browser, mail client, debugger, etc.).
-  6. Run: .\quarantine-vm.ps1 snapshot
+  1. VM boots from remastered ISO + unattend floppy (GUI window opens).
+  2. Host flips boot order to disk-first after PE starts (avoids re-entering Setup).
+  3. Autounattend creates accounts; FirstLogon runs from floppy A:.
+  4. Install Guest Additions, then: .\quarantine-vm.ps1 build-windows -Continue
+  5. Install analysis tools, then: .\quarantine-vm.ps1 baseline / snapshot
 
 '@
 
-    Set-QuarantineVMInstallMedia -VmName (Get-QuarantineVMConfig -ConfigPath $ConfigPath).vmName -ConfigPath $ConfigPath
-    Start-QuarantineVM -ConfigPath $ConfigPath -Type gui
+    $vmName = (Get-QuarantineVMConfig -ConfigPath $ConfigPath).vmName
+    Set-QuarantineVMInstallMedia -VmName $vmName -ConfigPath $ConfigPath
+    Start-QuarantineVM -ConfigPath $ConfigPath -Type gui -KeepInstallMedia -SkipProxy
+    Set-QuarantineVMPostPeBootOrder -VmName $vmName -DelaySeconds 45
 }
 
 function Move-QuarantineVMDisk {
@@ -3559,6 +4063,15 @@ Export-ModuleMember -Function @(
     'Get-QuarantineVMStatus',
     'Install-QuarantineVM',
     'Set-QuarantineVMInstallMedia',
+    'Set-QuarantineVMPostPeBootOrder',
+    'Get-QuarantineUnattendFloppyPath',
+    'Get-QuarantineUnattendIsoPath',
+    'Get-QuarantineWindowsSetupIsoPath',
+    'Mount-QuarantineUnattendFloppy',
+    'Mount-QuarantineUnattendMedia',
+    'Set-QuarantineVMInstallNat',
+    'Wait-QuarantineVMGuestControlReady',
+    'Invoke-QuarantineWindowsBuild',
     'Set-QuarantineVMNormalBoot',
     'Mount-QuarantineVMGuestAdditions',
     'Set-QuarantineVMNetworkMode',

@@ -1,8 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Minimal Windows 11 unattended install for the quarantine VM.
-  Placeholders are filled by `quarantine setup secrets` into {vmDataDir}/unattend/.
-  Do not put real passwords in this template.
+  Windows 11 unattended install for the quarantine VM (EFI).
+
+  Lab guest control uses the built-in Administrator account (RID 500).
+  A separate local admin username is not created — Win11 ConX often ignores
+  LocalAccounts/Group, and RID 500 is always elevated.
+
+  Payload user remains a standard (non-admin) LocalAccount for samples.
 -->
 <unattend xmlns="urn:schemas-microsoft-com:unattend"
           xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
@@ -13,12 +17,12 @@
                language="neutral"
                versionScope="nonSxS">
       <SetupUILanguage>
-        <UILanguage>en-US</UILanguage>
+        <UILanguage>en-GB</UILanguage>
       </SetupUILanguage>
-      <InputLocale>en-US</InputLocale>
-      <SystemLocale>en-US</SystemLocale>
-      <UILanguage>en-US</UILanguage>
-      <UserLocale>en-US</UserLocale>
+      <InputLocale>en-GB</InputLocale>
+      <SystemLocale>en-GB</SystemLocale>
+      <UILanguage>en-GB</UILanguage>
+      <UserLocale>en-GB</UserLocale>
     </component>
     <component name="Microsoft-Windows-Setup"
                processorArchitecture="amd64"
@@ -27,14 +31,21 @@
                versionScope="nonSxS">
       <DiskConfiguration>
         <Disk wcm:action="add">
+          <DiskID>0</DiskID>
+          <WillWipeDisk>true</WillWipeDisk>
           <CreatePartitions>
             <CreatePartition wcm:action="add">
               <Order>1</Order>
-              <Type>Primary</Type>
-              <Size>300</Size>
+              <Type>EFI</Type>
+              <Size>100</Size>
             </CreatePartition>
             <CreatePartition wcm:action="add">
               <Order>2</Order>
+              <Type>MSR</Type>
+              <Size>16</Size>
+            </CreatePartition>
+            <CreatePartition wcm:action="add">
+              <Order>3</Order>
               <Type>Primary</Type>
               <Extend>true</Extend>
             </CreatePartition>
@@ -44,25 +55,27 @@
               <Order>1</Order>
               <PartitionID>1</PartitionID>
               <Label>System</Label>
-              <Format>NTFS</Format>
+              <Format>FAT32</Format>
             </ModifyPartition>
             <ModifyPartition wcm:action="add">
               <Order>2</Order>
               <PartitionID>2</PartitionID>
+            </ModifyPartition>
+            <ModifyPartition wcm:action="add">
+              <Order>3</Order>
+              <PartitionID>3</PartitionID>
               <Label>Windows</Label>
               <Letter>C</Letter>
               <Format>NTFS</Format>
             </ModifyPartition>
           </ModifyPartitions>
-          <DiskID>0</DiskID>
-          <WillWipeDisk>true</WillWipeDisk>
         </Disk>
       </DiskConfiguration>
       <ImageInstall>
         <OSImage>
           <InstallTo>
             <DiskID>0</DiskID>
-            <PartitionID>2</PartitionID>
+            <PartitionID>3</PartitionID>
           </InstallTo>
           <InstallFrom>
             <MetaData wcm:action="add">
@@ -74,6 +87,10 @@
       </ImageInstall>
       <UserData>
         <AcceptEula>true</AcceptEula>
+        <ProductKey>
+          <Key></Key>
+          <WillShowUI>OnError</WillShowUI>
+        </ProductKey>
       </UserData>
     </component>
   </settings>
@@ -84,48 +101,81 @@
                language="neutral"
                versionScope="nonSxS">
       <ComputerName>QUARANTINE</ComputerName>
+      <RegisteredOwner>Quarantine Lab</RegisteredOwner>
+      <RegisteredOrganization>Quarantine Lab</RegisteredOrganization>
+    </component>
+    <component name="Microsoft-Windows-Deployment"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
+      <RunSynchronous>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Description>Enable built-in Administrator and stage FirstLogon scripts</Description>
+          <Path>cmd.exe /c for %d in (D E F C) do @if exist %d:\Quarantine\Install-LabAdminScripts.cmd call %d:\Quarantine\Install-LabAdminScripts.cmd</Path>
+        </RunSynchronousCommand>
+      </RunSynchronous>
     </component>
   </settings>
   <settings pass="oobeSystem">
+    <component name="Microsoft-Windows-International-Core"
+               processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35"
+               language="neutral"
+               versionScope="nonSxS">
+      <InputLocale>en-GB</InputLocale>
+      <SystemLocale>en-GB</SystemLocale>
+      <UILanguage>en-GB</UILanguage>
+      <UserLocale>en-GB</UserLocale>
+    </component>
     <component name="Microsoft-Windows-Shell-Setup"
                processorArchitecture="amd64"
                publicKeyToken="31bf3856ad364e35"
                language="neutral"
                versionScope="nonSxS">
-      <AutoLogon>
-        <Enabled>true</Enabled>
-        <LogonCount>1</LogonCount>
-        <Username>__GUEST_USERNAME__</Username>
-        <Password>
+      <UserAccounts>
+        <AdministratorPassword>
           <Value>__GUEST_PASSWORD__</Value>
           <PlainText>true</PlainText>
-        </Password>
-      </AutoLogon>
-      <UserAccounts>
+        </AdministratorPassword>
         <LocalAccounts>
           <LocalAccount wcm:action="add">
-            <Name>__GUEST_USERNAME__</Name>
-            <Group>Administrators</Group>
-            <Password>
-              <Value>__GUEST_PASSWORD__</Value>
-              <PlainText>true</PlainText>
-            </Password>
-          </LocalAccount>
-          <LocalAccount wcm:action="add">
-            <Name>__PAYLOAD_USERNAME__</Name>
-            <Group>Users</Group>
             <Password>
               <Value>__PAYLOAD_PASSWORD__</Value>
               <PlainText>true</PlainText>
             </Password>
+            <Description>Non-privileged payload analyst</Description>
+            <DisplayName>__PAYLOAD_USERNAME__</DisplayName>
+            <Group>Users</Group>
+            <Name>__PAYLOAD_USERNAME__</Name>
           </LocalAccount>
         </LocalAccounts>
       </UserAccounts>
+      <AutoLogon>
+        <Password>
+          <Value>__GUEST_PASSWORD__</Value>
+          <PlainText>true</PlainText>
+        </Password>
+        <Enabled>true</Enabled>
+        <LogonCount>3</LogonCount>
+        <Username>Administrator</Username>
+      </AutoLogon>
       <OOBE>
         <HideEULAPage>true</HideEULAPage>
+        <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
         <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
+        <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
         <ProtectYourPC>3</ProtectYourPC>
       </OOBE>
+      <FirstLogonCommands>
+        <SynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Description>Stage Quarantine helpers from media (runs as Administrator)</Description>
+          <CommandLine>cmd.exe /c if exist C:\Windows\Setup\Scripts\Finish-LabAdmin.ps1 (powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Windows\Setup\Scripts\Finish-LabAdmin.ps1) else if exist D:\Quarantine\Finish-LabAdmin.ps1 (powershell.exe -NoProfile -ExecutionPolicy Bypass -File D:\Quarantine\Finish-LabAdmin.ps1) else if exist A:\Quarantine\Finish-LabAdmin.ps1 (powershell.exe -NoProfile -ExecutionPolicy Bypass -File A:\Quarantine\Finish-LabAdmin.ps1)</CommandLine>
+          <RequiresUserInput>false</RequiresUserInput>
+        </SynchronousCommand>
+      </FirstLogonCommands>
     </component>
   </settings>
 </unattend>

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -66,6 +67,18 @@ func TestEnsureSecretsGeneratesAndRenders(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(tmplDir, "autounattend.xml"), unattend, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	firstDir := filepath.Join(tmplDir, "firstlogon")
+	if err := os.MkdirAll(firstDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(firstDir, "Invoke-QuarantineFirstLogon.ps1"), []byte("# firstlogon test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"Finish-LabAdmin.ps1", "SetupComplete.cmd", "Install-LabAdminScripts.cmd"} {
+		if err := os.WriteFile(filepath.Join(firstDir, name), []byte("placeholder __GUEST_USERNAME__\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	userData := []byte(`#cloud-config
 users:
   - name: __GATEWAY_USER__
@@ -101,6 +114,25 @@ ssh_pwauth: false
 	}
 	if IsKnownDefaultPassword(cfg.Guest.Password) || IsKnownDefaultPassword(cfg.Network.Gateway.Password) {
 		t.Fatal("generated a known default")
+	}
+	// Passwords must remain in the gitignored JSON config.
+	saved, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(saved), cfg.Guest.Password) {
+		t.Fatal("guest password was not persisted in config JSON")
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(saved, &doc); err != nil {
+		t.Fatal(err)
+	}
+	guest := doc["guest"].(map[string]any)
+	if strings.TrimSpace(guest["password"].(string)) == "" {
+		t.Fatal("guest password cleared in config JSON")
+	}
+	if guest["username"] != "quarantine" {
+		t.Fatalf("guest username lost: %v", guest["username"])
 	}
 	unattendOut, err := os.ReadFile(cfg.AutounattendPath)
 	if err != nil {

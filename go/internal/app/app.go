@@ -863,12 +863,13 @@ func (a *App) ProvisionGuest() (string, error) {
 Copied:  %s
 Skipped: %s
 
-In elevated guest PowerShell (Run as administrator):
+If FirstLogon already ran, finish agent/Sysmon with Public Desktop
+Finish-QuarantineProvision.cmd (UAC once), or elevated PowerShell:
 
   Set-ExecutionPolicy -Scope Process Bypass -Force
   & '%s\Invoke-QuarantineGuestProvision.ps1'
 
-That one script installs the agent (with guestcontrol ACLs), gateway network, mitm CA, Sysmon, event-log grant, and disables autologon when those files were staged.
+That script installs the agent (with guestcontrol ACLs), gateway network, mitm CA, Sysmon, event-log grant, and disables autologon when those files were staged.
 Then on the host:  .\quarantine-vm.ps1 agent health
 `, dir, copiedText, skippedText, dir)
 	if len(notes) > 0 {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -694,9 +695,11 @@ func setupCmd(cfgPath *string) *cobra.Command {
 				return err
 			}
 			fmt.Println("Credential preflight: ok")
+			fmt.Println("Setup ISO (boot this):", filepath.Join(cfg.DataDir(), "unattend", "Win11-setup.iso"))
+			fmt.Println("Unattend sidecar ISO:", filepath.Join(cfg.DataDir(), "unattend", "unattend.iso"))
+			fmt.Println("Unattend floppy:", filepath.Join(cfg.DataDir(), "unattend", "unattend.img"))
 			fmt.Println("SSH:", fmt.Sprintf("ssh -i %s -p %d %s@127.0.0.1", cfg.Network.Gateway.SSHPrivateKey, cfg.Network.Gateway.WithDefaults(cfg.Network.IntnetName).SSHHostPort, cfg.Network.Gateway.Username))
-			fmt.Println("Disable Windows autologon before baseline (guest, elevated):")
-			fmt.Println("  C:\\Users\\Public\\Quarantine\\Disable-QuarantineAutoLogon.ps1")
+			fmt.Println("FirstLogon runs elevated guest provision from the setup ISO / floppy; disable autologon is included when that script is staged.")
 			return nil
 		},
 	}

@@ -58,7 +58,7 @@ const (
 	DefaultFilePreviewMaxKB  = 512
 	minFilePreviewMaxKB      = 64
 	maxFilePreviewMaxKB      = 16384
-	DefaultGuestUsername     = "quarantine"
+	DefaultGuestUsername     = "Administrator"
 	DefaultPayloadUsername   = "analyst"
 )
 
@@ -440,6 +440,9 @@ func Load(path string) (*Config, error) {
 		strings.EqualFold(cfg.Manifest.RegistryEngine, "legacy") ||
 		strings.EqualFold(cfg.Manifest.RegistryEngine, "powershell") {
 		cfg.Manifest.RegistryEngine = "hive"
+	}
+	if strings.TrimSpace(cfg.Guest.Username) == "" {
+		cfg.Guest.Username = DefaultGuestUsername
 	}
 	if cfg.Guest.CopyTargetDir == "" {
 		cfg.Guest.CopyTargetDir = `C:\Users\Public\Quarantine`

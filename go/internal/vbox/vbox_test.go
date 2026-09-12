@@ -1,6 +1,7 @@
 package vbox
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -32,6 +33,19 @@ func TestSnapshotTreeParse(t *testing.T) {
 	}
 	if len(DescendantUUIDs(tree[2].UUID, tree)) != 0 {
 		t.Fatal("leaf should have no descendants")
+	}
+}
+
+func TestIsNoSnapshotsError(t *testing.T) {
+	err := fmt.Errorf("VBoxManage snapshot Quarantine-Win11 list --machinereadable: exit status 1: This machine does not have any snapshots")
+	if !isNoSnapshotsError(err) {
+		t.Fatal("expected empty snapshot list to be ignored")
+	}
+	if isNoSnapshotsError(fmt.Errorf("VBoxManage snapshot foo take: exit status 1: NS_ERROR_FAILURE")) {
+		t.Fatal("real snapshot errors must not be ignored")
+	}
+	if isNoSnapshotsError(nil) {
+		t.Fatal("nil is not a no-snapshots error")
 	}
 }
 

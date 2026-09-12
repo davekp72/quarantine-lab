@@ -225,6 +225,12 @@ function Test-DependencyStatus {
     } else {
         $issues += 'Autounattend template: MISSING'
     }
+    $FirstLogon = Join-Path $Root 'templates\firstlogon\Invoke-QuarantineFirstLogon.ps1'
+    if (Test-Path -LiteralPath $FirstLogon) {
+        Write-Host "FirstLogon script: OK"
+    } else {
+        $issues += 'FirstLogon script: MISSING'
+    }
 
     return $issues
 }

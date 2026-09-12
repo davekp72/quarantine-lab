@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -12,9 +13,57 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/quarantine-lab/quarantine/internal/unattend"
+
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/crypto/ssh"
 )
+
+func stageUnattendMedia(projectRoot, mediaDir, renderedAutounattend, windowsISO, payloadUser, labAdmin, guestPassword, payloadPassword string, extras unattend.StageExtras) (string, []string, error) {
+	return unattend.StageFiles(projectRoot, mediaDir, renderedAutounattend, windowsISO, payloadUser, labAdmin, guestPassword, payloadPassword, extras)
+}
+
+func (c *Config) resolveWindowsISOFile(projectRoot string) string {
+	p := strings.TrimSpace(c.WindowsISOPath)
+	if p == "" {
+		p = "isos"
+	}
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(projectRoot, p)
+	}
+	st, err := os.Stat(p)
+	if err != nil {
+		return ""
+	}
+	if !st.IsDir() {
+		return p
+	}
+	entries, err := os.ReadDir(p)
+	if err != nil {
+		return ""
+	}
+	var isos []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasSuffix(strings.ToLower(name), ".iso") {
+			isos = append(isos, filepath.Join(p, name))
+		}
+	}
+	if len(isos) == 0 {
+		return ""
+	}
+	// Prefer names that look like Windows install media.
+	for _, iso := range isos {
+		base := strings.ToLower(filepath.Base(iso))
+		if strings.Contains(base, "win11") || strings.Contains(base, "windows") {
+			return iso
+		}
+	}
+	return isos[0]
+}
 
 var knownDefaultPasswords = []string{
 	"quarantine",
@@ -120,9 +169,9 @@ func shuffleBytes(raw []byte) error {
 	return nil
 }
 
-// EnsureSecrets creates missing unique passwords and SSH keys, migrates inline
-// non-default passwords into files, and writes unattend + cloud-init templates.
-// Existing secret files are never overwritten.
+// EnsureSecrets creates missing unique passwords and SSH keys, and writes
+// unattend + cloud-init. Passwords live in the gitignored quarantine-vm.json
+// (passwordFile is only an optional fallback). Existing values are kept.
 func (c *Config) EnsureSecrets(cfgPath, projectRoot string, generate bool) (string, error) {
 	if c == nil {
 		return "", fmt.Errorf("nil config")
@@ -134,12 +183,11 @@ func (c *Config) EnsureSecrets(cfgPath, projectRoot string, generate bool) (stri
 	for _, item := range []struct {
 		name string
 		acc  *AccountConfig
-		def  string
 	}{
-		{"guest", &c.Guest, c.defaultGuestPasswordFile()},
-		{"payload", &c.Payload, c.defaultPayloadPasswordFile()},
+		{"guest", &c.Guest},
+		{"payload", &c.Payload},
 	} {
-		n, err := ensureAccountSecret(item.acc, item.def, generate)
+		n, err := ensureInlinePassword(&item.acc.Password, item.acc.PasswordFile, item.name, generate)
 		if err != nil {
 			return "", fmt.Errorf("%s password: %w", item.name, err)
 		}
@@ -148,15 +196,12 @@ func (c *Config) EnsureSecrets(cfgPath, projectRoot string, generate bool) (stri
 		}
 	}
 	gw := &c.Network.Gateway
-	if strings.TrimSpace(gw.PasswordFile) == "" {
-		gw.PasswordFile = c.defaultGatewayPasswordFile()
-	}
-	n, err := ensurePasswordFile(&gw.Password, gw.PasswordFile, generate)
+	n, err := ensureInlinePassword(&gw.Password, gw.PasswordFile, "gateway", generate)
 	if err != nil {
 		return "", fmt.Errorf("gateway password: %w", err)
 	}
 	if n != "" {
-		notes = append(notes, "gateway "+n)
+		notes = append(notes, n)
 	}
 	if strings.TrimSpace(gw.SSHPrivateKey) == "" {
 		gw.SSHPrivateKey = c.defaultGatewaySSHPrivate()
@@ -171,16 +216,48 @@ func (c *Config) EnsureSecrets(cfgPath, projectRoot string, generate bool) (stri
 		notes = append(notes, "wrote "+gw.SSHPrivateKey)
 	}
 	unattendOut := filepath.Join(c.DataDir(), "unattend", "autounattend.xml")
-	tmpl := strings.TrimSpace(c.AutounattendPath)
-	if tmpl == "" {
-		tmpl = filepath.Join(projectRoot, "templates", "autounattend.xml")
+	// Always prefer the repo template so FirstLogonCommands stay current after upgrades.
+	tmpl := filepath.Join(projectRoot, "templates", "autounattend.xml")
+	if _, err := os.Stat(tmpl); err != nil {
+		tmpl = strings.TrimSpace(c.AutounattendPath)
 	}
-	if _, err := os.Stat(tmpl); err == nil {
-		if err := c.RenderUnattend(tmpl, unattendOut); err != nil {
-			return "", err
+	if tmpl != "" {
+		if _, err := os.Stat(tmpl); err == nil {
+			if err := c.RenderUnattend(tmpl, unattendOut); err != nil {
+				return "", err
+			}
+			c.AutounattendPath = unattendOut
+			notes = append(notes, "rendered "+unattendOut)
+
+			guestUser := strings.TrimSpace(c.Guest.Username)
+			if guestUser == "" {
+				guestUser = DefaultGuestUsername
+			}
+			payloadUser := strings.TrimSpace(c.Payload.Username)
+			if payloadUser == "" {
+				payloadUser = DefaultPayloadUsername
+			}
+			mediaDir := filepath.Join(c.DataDir(), "unattend", "media")
+			winISO := c.resolveWindowsISOFile(projectRoot)
+			extras, extraErr := c.unattendStageExtras(projectRoot, &notes)
+			if extraErr != nil {
+				return strings.Join(notes, "\n"), extraErr
+			}
+			floppyPath, stageNotes, stageErr := stageUnattendMedia(projectRoot, mediaDir, unattendOut, winISO, payloadUser, guestUser, c.Guest.Password, c.Payload.Password, extras)
+			for _, n := range stageNotes {
+				notes = append(notes, n)
+			}
+			if stageErr != nil {
+				return strings.Join(notes, "\n"), fmt.Errorf("unattend media: %w", stageErr)
+			}
+			if floppyPath != "" {
+				notes = append(notes, "floppy ready: "+floppyPath)
+			}
+			setupISO := filepath.Join(c.DataDir(), "unattend", "Win11-setup.iso")
+			if _, err := os.Stat(setupISO); err == nil {
+				notes = append(notes, "install DVD: "+setupISO)
+			}
 		}
-		c.AutounattendPath = unattendOut
-		notes = append(notes, "rendered "+unattendOut)
 	}
 	cloudSrc := filepath.Join(projectRoot, "gateway", "cloud-init", "user-data")
 	cloudOut := filepath.Join(c.DataDir(), "gateway", "user-data")
@@ -190,41 +267,91 @@ func (c *Config) EnsureSecrets(cfgPath, projectRoot string, generate bool) (stri
 		}
 		notes = append(notes, "rendered "+cloudOut)
 	}
-	if err := c.persistSecretPaths(cfgPath); err != nil {
+	if err := c.persistConfigSecrets(cfgPath); err != nil {
 		return strings.Join(notes, "\n"), err
 	}
-	notes = append(notes, "updated config secret paths (passwords not stored in JSON)")
+	notes = append(notes, "updated config (passwords kept in gitignored quarantine-vm.json)")
 	return strings.Join(notes, "\n"), nil
 }
 
-func ensureAccountSecret(acc *AccountConfig, defPath string, generate bool) (string, error) {
-	if strings.TrimSpace(acc.PasswordFile) == "" {
-		acc.PasswordFile = defPath
+func (c *Config) unattendStageExtras(projectRoot string, notes *[]string) (unattend.StageExtras, error) {
+	extras := unattend.StageExtras{
+		AgentPort:    c.Agent.Port,
+		SysmonExe:    firstExistingFile(resolveProjectFile(projectRoot, c.Sysmon.HostSysmonExe), filepath.Join(projectRoot, "tools", "Sysmon64.exe")),
+		SysmonConfig: firstExistingFile(resolveProjectFile(projectRoot, c.Sysmon.HostConfigPath), filepath.Join(projectRoot, "config", "sysmon", "quarantine-lab.xml")),
 	}
-	return ensurePasswordFile(&acc.Password, acc.PasswordFile, generate)
+	if !c.Agent.Enabled {
+		return extras, nil
+	}
+	if strings.TrimSpace(c.Agent.TokenFile) == "" {
+		c.Agent.TokenFile = filepath.Join(c.SecretsDir(), "agent-token.txt")
+	}
+	if _, err := os.Stat(c.Agent.TokenFile); err != nil {
+		if err := c.SaveAgentToken(generateAgentToken()); err != nil {
+			return extras, fmt.Errorf("agent token: %w", err)
+		}
+		*notes = append(*notes, "wrote "+c.Agent.TokenFile)
+	}
+	if tok, err := c.AgentToken(); err == nil {
+		extras.AgentToken = tok
+	} else {
+		return extras, err
+	}
+	bin := c.AgentHostBinary(projectRoot)
+	if _, err := os.Stat(bin); err != nil {
+		*notes = append(*notes, "skip quarantine-agent.exe (build the agent, then re-run setup secrets)")
+		return extras, nil
+	}
+	extras.AgentExe = bin
+	return extras, nil
 }
 
-func ensurePasswordFile(inline *string, path string, generate bool) (string, error) {
-	if path == "" {
-		return "", fmt.Errorf("empty password file path")
+func resolveProjectFile(projectRoot, p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return ""
 	}
-	if raw, err := os.ReadFile(path); err == nil {
-		pw := strings.TrimSpace(string(bytes.TrimPrefix(raw, []byte{0xEF, 0xBB, 0xBF})))
-		if pw != "" && !IsKnownDefaultPassword(pw) {
-			*inline = pw
-			return "", nil
+	if filepath.IsAbs(p) {
+		return p
+	}
+	return filepath.Join(projectRoot, filepath.FromSlash(p))
+}
+
+func firstExistingFile(paths ...string) string {
+	for _, p := range paths {
+		if strings.TrimSpace(p) == "" {
+			continue
 		}
-		if pw != "" && IsKnownDefaultPassword(pw) && !generate {
-			*inline = pw
-			return "", nil
+		if _, err := os.Stat(p); err == nil {
+			return p
 		}
 	}
+	return ""
+}
+
+func generateAgentToken() string {
+	b := make([]byte, 32)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// ensureInlinePassword prefers config JSON password; passwordFile is optional fallback only.
+func ensureInlinePassword(inline *string, filePath, label string, generate bool) (string, error) {
 	pw := strings.TrimSpace(*inline)
 	if pw != "" && !IsKnownDefaultPassword(pw) {
-		if err := writeSecretFile(path, pw); err != nil {
-			return "", err
+		return "", nil
+	}
+	if path := strings.TrimSpace(filePath); path != "" {
+		if raw, err := os.ReadFile(path); err == nil {
+			filePW := strings.TrimSpace(string(bytes.TrimPrefix(raw, []byte{0xEF, 0xBB, 0xBF})))
+			if filePW != "" && !IsKnownDefaultPassword(filePW) {
+				*inline = filePW
+				return "loaded " + label + " password from " + path + " into config", nil
+			}
 		}
-		return "migrated inline password → " + path, nil
+	}
+	if pw != "" && IsKnownDefaultPassword(pw) && !generate {
+		return "", nil
 	}
 	if !generate {
 		return "", nil
@@ -233,11 +360,8 @@ func ensurePasswordFile(inline *string, path string, generate bool) (string, err
 	if err != nil {
 		return "", err
 	}
-	if err := writeSecretFile(path, next); err != nil {
-		return "", err
-	}
 	*inline = next
-	return "generated " + path, nil
+	return "generated " + label + " password in config", nil
 }
 
 func writeSecretFile(path, value string) error {
@@ -278,18 +402,6 @@ func writeEd25519Keypair(privPath, pubPath string) error {
 }
 
 func (c *Config) hydrateSecrets() (dirty bool, err error) {
-	if c.Guest.PasswordFile == "" {
-		c.Guest.PasswordFile = c.defaultGuestPasswordFile()
-		dirty = true
-	}
-	if c.Payload.PasswordFile == "" {
-		c.Payload.PasswordFile = c.defaultPayloadPasswordFile()
-		dirty = true
-	}
-	if c.Network.Gateway.PasswordFile == "" {
-		c.Network.Gateway.PasswordFile = c.defaultGatewayPasswordFile()
-		dirty = true
-	}
 	if c.Network.Gateway.SSHPrivateKey == "" {
 		c.Network.Gateway.SSHPrivateKey = c.defaultGatewaySSHPrivate()
 		dirty = true
@@ -298,11 +410,7 @@ func (c *Config) hydrateSecrets() (dirty bool, err error) {
 		c.Network.Gateway.SSHPublicKey = c.defaultGatewaySSHPublic()
 		dirty = true
 	}
-	if _, err := os.Stat(c.Network.Gateway.SSHPrivateKey); err != nil {
-		if werr := writeEd25519Keypair(c.Network.Gateway.SSHPrivateKey, c.Network.Gateway.SSHPublicKey); werr == nil {
-			dirty = true
-		}
-	}
+	// Optional passwordFile fallback when JSON password is empty (legacy installs).
 	for _, pair := range []struct {
 		pw   *string
 		file string
@@ -311,20 +419,22 @@ func (c *Config) hydrateSecrets() (dirty bool, err error) {
 		{&c.Payload.Password, c.Payload.PasswordFile},
 		{&c.Network.Gateway.Password, c.Network.Gateway.PasswordFile},
 	} {
-		if filePW, rerr := readSecretFile(pair.file); rerr == nil && filePW != "" {
-			*pair.pw = filePW
+		if strings.TrimSpace(*pair.pw) != "" {
 			continue
 		}
-		if strings.TrimSpace(*pair.pw) != "" && !IsKnownDefaultPassword(*pair.pw) {
-			if werr := writeSecretFile(pair.file, *pair.pw); werr == nil {
-				dirty = true
-			}
+		if strings.TrimSpace(pair.file) == "" {
+			continue
+		}
+		if filePW, rerr := readSecretFile(pair.file); rerr == nil && filePW != "" {
+			*pair.pw = filePW
+			dirty = true
 		}
 	}
 	return dirty, nil
 }
 
-func (c *Config) persistSecretPaths(cfgPath string) error {
+// persistConfigSecrets writes passwords + usernames + SSH key paths into the gitignored config JSON.
+func (c *Config) persistConfigSecrets(cfgPath string) error {
 	if strings.TrimSpace(cfgPath) == "" {
 		return nil
 	}
@@ -337,17 +447,22 @@ func (c *Config) persistSecretPaths(cfgPath string) error {
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		return err
 	}
-	stripAccount := func(key string, acc AccountConfig) {
+	writeAccount := func(key string, acc AccountConfig) {
 		obj, _ := doc[key].(map[string]any)
 		if obj == nil {
 			obj = map[string]any{}
 			doc[key] = obj
 		}
-		obj["password"] = ""
-		obj["passwordFile"] = acc.PasswordFile
+		if strings.TrimSpace(acc.Username) != "" {
+			obj["username"] = acc.Username
+		}
+		obj["password"] = acc.Password
+		if strings.TrimSpace(acc.PasswordFile) != "" {
+			obj["passwordFile"] = acc.PasswordFile
+		}
 	}
-	stripAccount("guest", c.Guest)
-	stripAccount("payload", c.Payload)
+	writeAccount("guest", c.Guest)
+	writeAccount("payload", c.Payload)
 	netObj, _ := doc["network"].(map[string]any)
 	if netObj == nil {
 		netObj = map[string]any{}
@@ -358,8 +473,13 @@ func (c *Config) persistSecretPaths(cfgPath string) error {
 		gwObj = map[string]any{}
 		netObj["gateway"] = gwObj
 	}
-	gwObj["password"] = ""
-	gwObj["passwordFile"] = c.Network.Gateway.PasswordFile
+	if strings.TrimSpace(c.Network.Gateway.Username) != "" {
+		gwObj["username"] = c.Network.Gateway.Username
+	}
+	gwObj["password"] = c.Network.Gateway.Password
+	if strings.TrimSpace(c.Network.Gateway.PasswordFile) != "" {
+		gwObj["passwordFile"] = c.Network.Gateway.PasswordFile
+	}
 	gwObj["sshPrivateKey"] = c.Network.Gateway.SSHPrivateKey
 	gwObj["sshPublicKey"] = c.Network.Gateway.SSHPublicKey
 	if c.AutounattendPath != "" {
@@ -370,6 +490,10 @@ func (c *Config) persistSecretPaths(cfgPath string) error {
 		return err
 	}
 	return os.WriteFile(cfgPath, append(out, '\n'), 0o644)
+}
+
+func (c *Config) persistSecretPaths(cfgPath string) error {
+	return c.persistConfigSecrets(cfgPath)
 }
 
 // PreflightCredentials rejects shipped defaults and empty required secrets.

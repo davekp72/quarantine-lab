@@ -182,9 +182,21 @@ func parseSnapshotTree(out string) []SnapshotTreeEntry {
 func (c *Client) ListSnapshotTree(vmName string) ([]SnapshotTreeEntry, error) {
 	out, err := c.RunWithTimeout(2*time.Minute, "snapshot", vmName, "list", "--machinereadable")
 	if err != nil {
+		if isNoSnapshotsError(err) {
+			return nil, nil
+		}
 		return nil, err
 	}
 	return parseSnapshotTree(out), nil
+}
+
+func isNoSnapshotsError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "does not have any snapshots") ||
+		strings.Contains(msg, "this machine does not have any snapshots")
 }
 
 // DescendantUUIDs returns UUIDs of snapshots nested under targetUUID.

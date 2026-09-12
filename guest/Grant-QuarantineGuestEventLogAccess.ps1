@@ -8,7 +8,7 @@
 [CmdletBinding()]
 param(
     [string]$LogName = 'Microsoft-Windows-Sysmon/Operational',
-    [string]$LabAdmin = 'quarantine'
+    [string]$LabAdmin = 'Administrator'
 )
 
 Set-StrictMode -Version Latest

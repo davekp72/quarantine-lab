@@ -5,8 +5,10 @@
   One-time elevated guest provisioning for a new quarantine lab VM.
 
 .DESCRIPTION
-  Host stages files with:  .\quarantine-vm.ps1 guest provision
-  Then run this script in elevated PowerShell inside the guest:
+  Host stages remaining binaries with:  .\quarantine-vm.ps1 guest provision
+  FirstLogon (autounattend floppy) already runs this script elevated once.
+  After host stages agent/Sysmon, finish via Public Desktop
+  Finish-QuarantineProvision.cmd (UAC once) or elevated PowerShell:
 
     Set-ExecutionPolicy -Scope Process Bypass -Force
     & 'C:\Users\Public\Quarantine\Invoke-QuarantineGuestProvision.ps1'
