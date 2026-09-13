@@ -2,6 +2,7 @@ package pcapinspect
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -34,53 +35,107 @@ func FindTshark() (string, error) {
 	return "", fmt.Errorf("tshark not found (install Wireshark)")
 }
 
+func tsharkFastArgs(args []string) []string {
+	if len(args) > 0 && args[0] == "-n" {
+		return args
+	}
+	out := make([]string, 0, len(args)+1)
+	out = append(out, "-n")
+	return append(out, args...)
+}
+
+type lineLimitWriter struct {
+	limit  int
+	lines  int
+	buf    *bytes.Buffer
+	cancel context.CancelFunc
+	hit    bool
+}
+
+func (w *lineLimitWriter) Write(p []byte) (int, error) {
+	if w.hit {
+		return len(p), nil
+	}
+	_, _ = w.buf.Write(p)
+	w.lines += bytes.Count(p, []byte("\n"))
+	if w.limit > 0 && w.lines >= w.limit {
+		w.hit = true
+		if w.cancel != nil {
+			w.cancel()
+		}
+	}
+	return len(p), nil
+}
+
 func runTshark(tshark string, timeout time.Duration, args ...string) ([]byte, error) {
+	return runTsharkLimited(tshark, timeout, 0, args...)
+}
+
+func runTsharkLimited(tshark string, timeout time.Duration, maxLines int, args ...string) ([]byte, error) {
 	if timeout <= 0 {
 		timeout = 45 * time.Second
 	}
-	ctxArgs := append([]string{}, args...)
-	cmd := exec.Command(tshark, ctxArgs...)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, tshark, tsharkFastArgs(args)...)
 	hideConsole(cmd)
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Start(); err != nil {
-		return nil, err
+	limiter := &lineLimitWriter{limit: maxLines, buf: &stdout, cancel: cancel}
+	if maxLines > 0 {
+		cmd.Stdout = limiter
+	} else {
+		cmd.Stdout = &stdout
 	}
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	select {
-	case err := <-done:
-		if err != nil {
-			msg := strings.TrimSpace(stderr.String())
-			if msg == "" {
-				msg = err.Error()
-			}
-			return stdout.Bytes(), fmt.Errorf("tshark: %s", truncate(msg, 300))
-		}
-		return stdout.Bytes(), nil
-	case <-time.After(timeout):
-		_ = cmd.Process.Kill()
+	err := cmd.Run()
+	if ctx.Err() == context.DeadlineExceeded {
 		return nil, fmt.Errorf("tshark timed out after %s", timeout)
 	}
+	if maxLines > 0 && limiter.hit && stdout.Len() > 0 {
+		return stdout.Bytes(), nil
+	}
+	if err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return stdout.Bytes(), fmt.Errorf("tshark: %s", truncate(msg, 300))
+	}
+	return stdout.Bytes(), nil
 }
 
 // ListFlows groups non-HTTP packets from a PCAP into conversations.
 func ListFlows(pcapPath string) ([]Flow, error) {
+	flows, _, err := ListFlowsCached(pcapPath)
+	return flows, err
+}
+
+// ListFlowsCached is ListFlows plus whether the result came from traffic-flows.json.
+func ListFlowsCached(pcapPath string) ([]Flow, bool, error) {
+	pcapPath = filepath.Clean(pcapPath)
+	st, err := os.Stat(pcapPath)
+	if err != nil || st.IsDir() {
+		return nil, false, fmt.Errorf("pcap not found: %s", pcapPath)
+	}
+	if flows, ok := loadFlowCache(pcapPath, st); ok {
+		return flows, true, nil
+	}
 	tshark, err := FindTshark()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	pcapPath = filepath.Clean(pcapPath)
-	if st, err := os.Stat(pcapPath); err != nil || st.IsDir() {
-		return nil, fmt.Errorf("pcap not found: %s", pcapPath)
-	}
+	// Fields + no name resolution. JSON + _ws.col.* on a full gateway
+	// capture is what made the Traffic tab time out.
 	out, err := runTshark(tshark, 90*time.Second,
 		"-r", pcapPath,
 		"-Y", ExcludeHTTPFilter,
-		"-T", "json",
+		"-T", "fields",
+		"-E", "header=n",
+		"-E", "separator=\t",
+		"-E", "occurrence=a",
+		"-E", "aggregator=,",
 		"-e", "frame.time_epoch",
-		"-e", "_ws.col.Protocol",
+		"-e", "frame.protocols",
 		"-e", "ip.src",
 		"-e", "ip.dst",
 		"-e", "ipv6.src",
@@ -93,19 +148,21 @@ func ListFlows(pcapPath string) ([]Flow, error) {
 		"-e", "udp.stream",
 		"-e", "frame.len",
 		"-e", "dns.qry.name",
-		"-e", "_ws.col.Info",
 	)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	pkts, err := parsePacketsJSON(out)
+	pkts, err := parsePacketsFields(out)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return aggregateFlows(pkts), nil
+	flows := aggregateFlows(pkts)
+	saveFlowCache(pcapPath, st, flows)
+	return cloneFlows(flows), false, nil
 }
 
-// InspectFlow returns ascii (and optional hex) payload plus packet info lines.
+// InspectFlow returns ascii, hex, or packet-info for one conversation.
+// format is ascii (default), hex, or summary — only that pass is run.
 func InspectFlow(pcapPath, flowID, format string) (*FollowResult, error) {
 	tshark, err := FindTshark()
 	if err != nil {
@@ -121,51 +178,74 @@ func InspectFlow(pcapPath, flowID, format string) (*FollowResult, error) {
 		Transport: kind,
 		Filter:    filter,
 	}
-
-	sumOut, err := runTshark(tshark, 45*time.Second,
-		"-r", pcapPath,
-		"-Y", filter,
-		"-T", "fields",
-		"-E", "separator=|",
-		"-e", "frame.number",
-		"-e", "_ws.col.Protocol",
-		"-e", "_ws.col.Info",
-	)
-	if err != nil {
-		return nil, err
-	}
-	res.Summary = parseSummaryLines(sumOut, 80)
-	if len(res.Summary) > 0 {
-		parts := strings.SplitN(res.Summary[0], " | ", 3)
-		if len(parts) >= 2 {
-			res.Protocol = parts[1]
-		}
+	format = strings.ToLower(strings.TrimSpace(format))
+	if format == "" {
+		format = "ascii"
 	}
 
-	wantHex := strings.EqualFold(format, "hex") || strings.EqualFold(format, "both")
-	if kind == "tcp" || kind == "udp" {
-		asciiOut, err := runTshark(tshark, 45*time.Second, "-r", pcapPath, "-q", "-z",
-			fmt.Sprintf("follow,%s,ascii,%d", kind, stream))
+	loadSummary := func() error {
+		sumOut, err := runTsharkLimited(tshark, 45*time.Second, 80,
+			"-r", pcapPath,
+			"-Y", filter,
+			"-T", "fields",
+			"-E", "separator=|",
+			"-e", "frame.number",
+			"-e", "frame.protocols",
+			"-e", "dns.qry.name",
+		)
 		if err != nil {
+			return err
+		}
+		res.Summary = parseSummaryLines(sumOut, 80)
+		for i, line := range res.Summary {
+			parts := strings.SplitN(line, " | ", 3)
+			if len(parts) >= 2 {
+				parts[1] = protocolFromFrameProtocols(parts[1])
+				res.Summary[i] = strings.Join(parts, " | ")
+			}
+		}
+		if len(res.Summary) > 0 {
+			parts := strings.SplitN(res.Summary[0], " | ", 3)
+			if len(parts) >= 2 {
+				res.Protocol = parts[1]
+			}
+		}
+		return nil
+	}
+
+	if kind != "tcp" && kind != "udp" {
+		if err := loadSummary(); err != nil {
 			return nil, err
 		}
-		parsed := parseFollow(asciiOut)
-		res.Node0, res.Node1 = parsed.node0, parsed.node1
-		res.Ascii, res.Truncated = capText(parsed.body, maxFollowBytes)
-		if wantHex {
-			hexOut, herr := runTshark(tshark, 45*time.Second, "-r", pcapPath, "-q", "-z",
-				fmt.Sprintf("follow,%s,hex,%d", kind, stream))
-			if herr != nil {
-				return nil, herr
-			}
-			hexParsed := parseFollow(hexOut)
-			res.Hex, res.Truncated = capText(hexParsed.body, maxFollowBytes)
+		res.Ascii, res.Truncated = capText(strings.Join(res.Summary, "\n"), maxFollowBytes)
+		return res, nil
+	}
+
+	if format == "summary" {
+		if err := loadSummary(); err != nil {
+			return nil, err
 		}
 		return res, nil
 	}
 
-	// Non-stream protocols: join info lines as the "payload".
-	res.Ascii, res.Truncated = capText(strings.Join(res.Summary, "\n"), maxFollowBytes)
+	followFmt := "ascii"
+	if format == "hex" || format == "both" {
+		followFmt = "hex"
+	}
+	followOut, err := runTshark(tshark, 45*time.Second, "-r", pcapPath, "-q", "-z",
+		fmt.Sprintf("follow,%s,%s,%d", kind, followFmt, stream))
+	if err != nil {
+		return nil, err
+	}
+	parsed := parseFollow(followOut)
+	res.Node0, res.Node1 = parsed.node0, parsed.node1
+	body, trunc := capText(parsed.body, maxFollowBytes)
+	res.Truncated = trunc
+	if followFmt == "hex" {
+		res.Hex = body
+	} else {
+		res.Ascii = body
+	}
 	return res, nil
 }
 

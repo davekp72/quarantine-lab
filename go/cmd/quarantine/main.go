@@ -872,7 +872,12 @@ func guestCmd(cfgPath *string) *cobra.Command {
 			if path == "" {
 				return fmt.Errorf("usage: quarantine guest copy --host <file>  (or positional path)")
 			}
-			return a.Evidence.Guest.CopyTo(path, a.Cfg.Guest.CopyTargetDir, a.Evidence.Guest.GuestCreds())
+			dest, err := a.CopyHostFileToGuest(path, a.Cfg.Guest.CopyTargetDir)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("Copied %s → %s (%s)\n", path, dest, a.Evidence.Guest.Transport().Name())
+			return nil
 		},
 	}
 	copyC.Flags().StringVar(&hostPath, "host", "", "Host file to copy")

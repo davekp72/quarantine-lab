@@ -247,7 +247,7 @@ async function inspectFlow(detail, snapshot, flow, backend) {
   appendMuted(detail, 'Loading payload…');
   try {
     const api = await backend();
-    const format = payloadMode === 'hex' ? 'hex' : 'ascii';
+    const format = payloadMode === 'hex' ? 'hex' : payloadMode === 'summary' ? 'summary' : 'ascii';
     const res = await api.InspectPcapFlowWails(snapshot, flow.id, format);
     if (!detail.isConnected) return;
     renderInspect(detail, flow, res);

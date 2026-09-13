@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/quarantine-lab/quarantine/internal/config"
+	"github.com/quarantine-lab/quarantine/internal/diff"
 	"github.com/quarantine-lab/quarantine/internal/httpbody"
 	"github.com/quarantine-lab/quarantine/internal/pcapinspect"
 )
@@ -49,6 +50,28 @@ func (a *App) evidencePcapPath(snapshot string) (string, error) {
 	return pcap, nil
 }
 
+func (a *App) warmTrafficFlowCache(result *diff.Result, toSnap string) {
+	var paths []string
+	if result != nil && result.Network != nil && result.Network.Sources != nil {
+		switch pcaps := result.Network.Sources["pcaps"].(type) {
+		case []any:
+			for _, x := range pcaps {
+				if s, ok := x.(string); ok {
+					paths = append(paths, s)
+				}
+			}
+		case []string:
+			paths = append(paths, pcaps...)
+		}
+	}
+	if p, err := a.evidencePcapPath(toSnap); err == nil {
+		paths = append(paths, p)
+	}
+	if n := pcapinspect.WarmFlowCache(paths...); n > 0 {
+		a.logInfo(fmt.Sprintf("Traffic conversations cached for %d PCAP(s)", n))
+	}
+}
+
 func (a *App) pcapAllowRoots() []string {
 	if a == nil || a.Cfg == nil {
 		return nil
@@ -70,7 +93,7 @@ func (a *App) ListPcapFlowsWails(snapshotName string) (map[string]any, error) {
 			"flows":     []any{},
 		}, nil
 	}
-	flows, err := pcapinspect.ListFlows(pcap)
+	flows, cached, err := pcapinspect.ListFlowsCached(pcap)
 	if err != nil {
 		return map[string]any{
 			"available": false,
@@ -93,7 +116,12 @@ func (a *App) ListPcapFlowsWails(snapshotName string) (map[string]any, error) {
 	for _, f := range flows {
 		protos[f.Protocol]++
 	}
-	msg := fmt.Sprintf("%d non-HTTP/S conversation(s) via tshark", len(flows))
+	msg := fmt.Sprintf("%d non-HTTP/S conversation(s)", len(flows))
+	if cached {
+		msg += " (cached)"
+	} else {
+		msg += " via tshark"
+	}
 	if strings.EqualFold(trafficMode, "permissive") {
 		msg += fmt.Sprintf(" · %d policy breach(es)", breachN)
 	} else {

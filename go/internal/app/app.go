@@ -128,6 +128,7 @@ func (a *App) compareSnapshots(ctx context.Context, fromSnap, toSnap string, ref
 		a.logInfo("Hive registry index unavailable, using manifest registry: " + err.Error())
 	}
 	diff.EnrichNetwork(a.ConfigPath, config.ProjectRoot(a.ConfigPath), result, left.CapturedAt, right.CapturedAt, result.Sysmon.Added)
+	a.warmTrafficFlowCache(result, to)
 	outPath := a.Evidence.DiffOutputPath(from, to)
 	raw, _ := json.MarshalIndent(result, "", "  ")
 	if err := os.WriteFile(outPath, raw, 0o644); err != nil {

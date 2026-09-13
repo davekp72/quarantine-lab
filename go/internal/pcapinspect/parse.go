@@ -13,6 +13,117 @@ type jsonPacket struct {
 	} `json:"_source"`
 }
 
+func parsePacketsFields(raw []byte) ([]packet, error) {
+	text := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	if strings.TrimSpace(text) == "" {
+		return nil, nil
+	}
+	out := make([]packet, 0, 256)
+	for _, line := range strings.Split(text, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		cols := strings.Split(line, "\t")
+		for len(cols) < 14 {
+			cols = append(cols, "")
+		}
+		p := packet{
+			protocol: protocolFromFrameProtocols(firstCSV(cols[1])),
+			srcIP:    firstNonEmpty(firstCSV(cols[2]), firstCSV(cols[4])),
+			dstIP:    firstNonEmpty(firstCSV(cols[3]), firstCSV(cols[5])),
+			length:   atoi(firstCSV(cols[12])),
+			names:    splitCSV(cols[13]),
+		}
+		tcpSport := atoi(firstCSV(cols[6]))
+		tcpDport := atoi(firstCSV(cols[7]))
+		udpSport := atoi(firstCSV(cols[8]))
+		udpDport := atoi(firstCSV(cols[9]))
+		tcpStream := firstCSV(cols[10])
+		udpStream := firstCSV(cols[11])
+		switch {
+		case tcpStream != "" || tcpSport > 0 || tcpDport > 0:
+			p.transport = "tcp"
+			p.srcPort = tcpSport
+			p.dstPort = tcpDport
+			p.stream = atoi(tcpStream)
+		case udpStream != "" || udpSport > 0 || udpDport > 0:
+			p.transport = "udp"
+			p.srcPort = udpSport
+			p.dstPort = udpDport
+			p.stream = atoi(udpStream)
+		default:
+			p.transport = transportFromProtocol(p.protocol)
+		}
+		if ts := firstCSV(cols[0]); ts != "" {
+			if f, err := strconvFloat(ts); err == nil {
+				sec := int64(f)
+				nsec := int64((f - float64(sec)) * 1e9)
+				p.t = time.Unix(sec, nsec).UTC()
+			}
+		}
+		if p.protocol == "" && p.transport != "" {
+			p.protocol = strings.ToUpper(p.transport)
+		}
+		if p.protocol != "" || p.srcIP != "" || len(p.names) > 0 {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
+func protocolFromFrameProtocols(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if i := strings.IndexByte(s, ','); i >= 0 {
+		s = s[:i]
+	}
+	parts := strings.Split(s, ":")
+	skip := map[string]bool{
+		"": true, "ETH": true, "ETHTYPE": true, "ETHERTYPE": true,
+		"DATA": true, "IP": true, "IPV4": true, "IPV6": true,
+	}
+	for i := len(parts) - 1; i >= 0; i-- {
+		p := strings.ToUpper(strings.TrimSpace(parts[i]))
+		if skip[p] {
+			continue
+		}
+		return p
+	}
+	return strings.ToUpper(strings.TrimSpace(parts[len(parts)-1]))
+}
+
+func firstCSV(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if i := strings.IndexByte(s, ','); i >= 0 {
+		return strings.TrimSpace(s[:i])
+	}
+	return s
+}
+
+func splitCSV(s string) []string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	seen := map[string]bool{}
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	return out
+}
+
 func parsePacketsJSON(raw []byte) ([]packet, error) {
 	raw = []byte(strings.TrimSpace(string(raw)))
 	if len(raw) == 0 || string(raw) == "[]" {

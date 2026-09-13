@@ -280,7 +280,7 @@ function Get-QuarantinePcapDnsQueries {
         }
     }
 
-    $probe = @(& $TsharkPath -r $PcapPath -c 5 -T fields -e frame.time_epoch 2>$null)
+    $probe = @(& $TsharkPath -n -r $PcapPath -c 5 -T fields -e frame.time_epoch 2>$null)
     $relative = $false
     foreach ($p in $probe) {
         $v = 0.0
@@ -306,6 +306,7 @@ function Get-QuarantinePcapDnsQueries {
             $filter = ('frame.time_epoch >= {0} and frame.time_epoch <= {1} and dns.flags.response == 0' -f $fromEpoch, $toEpoch)
         }
         $argList = @(
+            '-n',
             '-r', $PcapPath,
             '-Y', $filter,
             '-T', 'fields',

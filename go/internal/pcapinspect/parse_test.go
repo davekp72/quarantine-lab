@@ -114,6 +114,62 @@ func TestParseFollow(t *testing.T) {
 	}
 }
 
+func TestParsePacketsFieldsAndAggregate(t *testing.T) {
+	raw := strings.Join([]string{
+		"1789119560.670275000\teth:ethertype:ip:udp:dns\t10.66.0.15\t10.66.0.1\t\t\t\t\t62124\t53\t\t4\t84\texample.test",
+		"1789119560.688000000\teth:ethertype:ip:udp:dns\t10.66.0.1\t10.66.0.15\t\t\t\t\t53\t62124\t\t4\t164\texample.test",
+		"1789119559.155850000\teth:ethertype:ip:tcp\t10.66.0.1\t10.66.0.15\t\t\t57459\t9443\t\t\t7\t\t58\t",
+		"1789119560.340601000\teth:ethertype:arp\t\t\t\t\t\t\t\t\t\t\t42\t",
+	}, "\n")
+	pkts, err := parsePacketsFields([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pkts) != 4 {
+		t.Fatalf("packets %d", len(pkts))
+	}
+	flows := aggregateFlows(pkts)
+	if len(flows) != 3 {
+		t.Fatalf("flows %d: %+v", len(flows), flows)
+	}
+	var dns, agent, arp *Flow
+	for i := range flows {
+		switch flows[i].Protocol {
+		case "DNS":
+			dns = &flows[i]
+		case "Agent":
+			agent = &flows[i]
+		case "ARP":
+			arp = &flows[i]
+		}
+	}
+	if dns == nil || dns.ID != "udp:4" || dns.Packets != 2 || len(dns.Names) != 1 {
+		t.Fatalf("dns: %+v", dns)
+	}
+	if agent == nil || agent.ID != "tcp:7" || agent.DstPort != 9443 {
+		t.Fatalf("agent: %+v", agent)
+	}
+	if arp == nil || arp.Transport != "arp" {
+		t.Fatalf("arp: %+v", arp)
+	}
+}
+
+func TestProtocolFromFrameProtocols(t *testing.T) {
+	cases := map[string]string{
+		"eth:ethertype:ip:udp:dns":  "DNS",
+		"eth:ethertype:ip:udp:mdns": "MDNS",
+		"eth:ethertype:arp":         "ARP",
+		"eth:ethertype:ip:icmp":     "ICMP",
+		"eth:ethertype:ip:tcp":      "TCP",
+		"":                          "",
+	}
+	for in, want := range cases {
+		if got := protocolFromFrameProtocols(in); got != want {
+			t.Fatalf("%q: got %q want %q", in, got, want)
+		}
+	}
+}
+
 func TestParsePacketsJSONEmpty(t *testing.T) {
 	pkts, err := parsePacketsJSON([]byte("[]"))
 	if err != nil || len(pkts) != 0 {
