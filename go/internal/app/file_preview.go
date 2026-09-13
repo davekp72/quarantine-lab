@@ -18,7 +18,7 @@ func (a *App) ReadSnapshotFile(snapshotName, guestPath string) (map[string]any, 
 }
 
 // readSnapshotFile loads a guest path for preview.
-// allowDisk enables VDI only when the path is absent from the changed-files sidecar.
+// allowDisk enables the snapshot VDI chain when sidecar bytes are missing.
 func (a *App) readSnapshotFile(snapshotName, guestPath string, allowAgent, allowDisk bool) (map[string]any, error) {
 	max := a.filePreviewMaxBytes()
 	var expectSize int64
@@ -42,6 +42,11 @@ func (a *App) readSnapshotFile(snapshotName, guestPath string, allowAgent, allow
 			if allowAgent {
 				if data, ok := a.tryAgentFilePreview(guestPath, expectSize, max); ok {
 					return filePreviewResult(guestPath, data, expectSize, "agent", max), nil
+				}
+			}
+			if allowDisk && a.Disk != nil {
+				if res, err := a.readSnapshotFileFromDisk(snapshotName, guestPath, max); err == nil {
+					return res, nil
 				}
 			}
 			reason := "sidecar_no_content"
@@ -75,8 +80,16 @@ func (a *App) readSnapshotFile(snapshotName, guestPath string, allowAgent, allow
 			"source":  "none",
 		}, nil
 	}
+	return a.readSnapshotFileFromDisk(snapshotName, guestPath, max)
+}
+
+func (a *App) readSnapshotFileFromDisk(snapshotName, guestPath string, max int64) (map[string]any, error) {
 	if a.Disk == nil {
-		return nil, fmt.Errorf("disk reader unavailable")
+		return map[string]any{
+			"path":    guestPath,
+			"content": "",
+			"source":  "none",
+		}, nil
 	}
 	data, info, err := a.Disk.ReadFile(snapshotName, guestPath, max)
 	if err != nil {
@@ -110,7 +123,7 @@ func previewHasContent(res map[string]any) bool {
 	return strings.TrimSpace(c) != ""
 }
 
-// DiffSnapshotFile reads From and To contents from sidecars only (no VDI).
+// DiffSnapshotFile reads From and To contents from sidecars, then the VDI chain.
 func (a *App) DiffSnapshotFile(fromSnap, toSnap, guestPath string) (map[string]any, error) {
 	max := a.filePreviewMaxBytes()
 	var (
@@ -121,11 +134,11 @@ func (a *App) DiffSnapshotFile(fromSnap, toSnap, guestPath string) (map[string]a
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		fromRes, fromErr = a.readSnapshotFile(fromSnap, guestPath, false, false)
+		fromRes, fromErr = a.readSnapshotFile(fromSnap, guestPath, false, true)
 	}()
 	go func() {
 		defer wg.Done()
-		toRes, toErr = a.readSnapshotFile(toSnap, guestPath, true, false)
+		toRes, toErr = a.readSnapshotFile(toSnap, guestPath, true, true)
 	}()
 	wg.Wait()
 
@@ -199,10 +212,10 @@ func (a *App) DiffSnapshotFile(fromSnap, toSnap, guestPath string) (map[string]a
 func baselineMissingNote(fromSnap, toSnap string) string {
 	from := strings.ToLower(strings.TrimSpace(fromSnap))
 	if strings.Contains(from, "clean") || from == "baseline" {
-		return "CleanSession has no embedded file bodies (empty changed-files sidecar). Preserve→Preserve diffs work because each Evidence capture embeds content. Clean→Evidence shows the Evidence side only unless a flattened CleanSession RAW cache already exists."
+		return "CleanSession has no embedded file bodies (empty changed-files sidecar). Baseline bytes are read from the snapshot VDI chain when those files are present."
 	}
 	_ = toSnap
-	return "From-side content not in sidecar. Compare two Evidence preserves for edit diffs, or ensure the older snapshot embedded this path."
+	return "From-side content was not embedded in the sidecar and could not be read from the snapshot disk."
 }
 
 // tryAgentFilePreview reads a small guest file via the agent when the sidecar
@@ -226,8 +239,7 @@ func (a *App) tryAgentFilePreview(guestPath string, expectSize, max int64) ([]by
 }
 
 // enrichChangedFilesBefore stores CleanSession bytes as bc/bd on modified Evidence rows.
-// Never starts a CloneMedium flatten — only reads an existing RAW cache. Preserve stays
-// sidecar-first; modified "before" diffs fill in only when baseline was already flattened.
+// Reads the baseline VDI chain (or an existing RAW cache). Never starts CloneMedium.
 func (a *App) enrichChangedFilesBefore(evidenceSnap string) {
 	if a == nil || a.Disk == nil || a.Evidence == nil || a.Cfg == nil {
 		return
@@ -236,9 +248,9 @@ func (a *App) enrichChangedFilesBefore(evidenceSnap string) {
 	if baseline == "" {
 		return
 	}
-	if !a.Disk.HasUsableFlattenCache(baseline) {
+	if !a.Disk.CanReadSnapshot(baseline) {
 		a.logInfo(fmt.Sprintf(
-			"Skip baseline before-content enrich for %s (no cached RAW for %s — avoids multi-GB CloneMedium)",
+			"Skip baseline before-content enrich for %s (no VDI chain or RAW cache for %s)",
 			evidenceSnap, baseline,
 		))
 		return
@@ -301,6 +313,6 @@ func (a *App) DiffSnapshotFileWails(fromSnap, toSnap, guestPath string) (map[str
 
 // ReadSnapshotFileWails reads guest file for preview panel.
 func (a *App) ReadSnapshotFileWails(snapshotName, guestPath string) (map[string]any, error) {
-	// Prefer sidecar; only flatten when the path was never listed in changed-files.
+	// Prefer sidecar; VDI chain when the path was never listed in changed-files.
 	return a.readSnapshotFile(snapshotName, guestPath, true, true)
 }

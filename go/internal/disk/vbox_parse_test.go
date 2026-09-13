@@ -66,11 +66,27 @@ func TestParseSnapshotIndexNested(t *testing.T) {
 	if ev.DiskMediumUUID != "ba6463f7-dabb-4aad-b03d-f040b6e1bd73" {
 		t.Fatalf("medium uuid: %q", ev.DiskMediumUUID)
 	}
-	if len(ev.VDIPaths) != 1 || !strings.Contains(ev.VDIPaths[0], "ba6463f7") {
-		t.Fatalf("vdi paths: %#v", ev.VDIPaths)
+	if len(ev.VDIPaths) != 3 {
+		t.Fatalf("evidence chain: %#v", ev.VDIPaths)
+	}
+	if !strings.Contains(ev.VDIPaths[0], "ba6463f7") {
+		t.Fatalf("leaf: %#v", ev.VDIPaths)
+	}
+	if !strings.Contains(ev.VDIPaths[1], "8015754e") {
+		t.Fatalf("parent: %#v", ev.VDIPaths)
+	}
+	if !strings.HasSuffix(ev.VDIPaths[2], "Quarantine-Win11.vdi") {
+		t.Fatalf("base: %#v", ev.VDIPaths)
 	}
 	clean, ok := idx["cleansession"]
 	if !ok || clean.DiskMediumUUID != "8015754e-afc4-4aea-b8fb-75e100364d28" {
 		t.Fatalf("cleansession: %#v", clean)
+	}
+	if len(clean.VDIPaths) != 2 {
+		t.Fatalf("cleansession chain: %#v", clean.VDIPaths)
+	}
+	base, ok := idx["clean"]
+	if !ok || len(base.VDIPaths) != 1 || !strings.HasSuffix(base.VDIPaths[0], "Quarantine-Win11.vdi") {
+		t.Fatalf("clean: %#v", base)
 	}
 }

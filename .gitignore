@@ -4,6 +4,9 @@ config/quarantine-vm.json
 network/proxy/mitmproxy-ca-cert.cer
 manifest/viewer/session.html
 
+# Local samples (malware URLs, payloads, test artifacts)
+samples/
+
 # Virtual disks / ISOs / Python venv
 .venv/
 isos/*.iso

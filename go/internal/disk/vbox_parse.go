@@ -8,11 +8,11 @@ import (
 )
 
 type snapshotNode struct {
-	UUID      string         `xml:"uuid,attr"`
-	Name      string         `xml:"name,attr"`
-	Time      string         `xml:"timeStamp,attr"`
-	Hardware  hardwareNode   `xml:"Hardware"`
-	Children  []snapshotNode `xml:"Snapshots>Snapshot"`
+	UUID     string         `xml:"uuid,attr"`
+	Name     string         `xml:"name,attr"`
+	Time     string         `xml:"timeStamp,attr"`
+	Hardware hardwareNode   `xml:"Hardware"`
+	Children []snapshotNode `xml:"Snapshots>Snapshot"`
 }
 
 type hardwareNode struct {
@@ -49,6 +49,12 @@ func (s snapshotNode) diskMediumUUID() string {
 	return ""
 }
 
+// mediaInfo is one HardDisk in the .vbox MediaRegistry tree.
+type mediaInfo struct {
+	Path       string
+	ParentUUID string
+}
+
 func parseSnapshotIndex(raw []byte, vmFolder string) map[string]SnapshotEntry {
 	out := map[string]SnapshotEntry{}
 	var doc struct {
@@ -62,13 +68,13 @@ func parseSnapshotIndex(raw []byte, vmFolder string) map[string]SnapshotEntry {
 	if err := xml.Unmarshal(raw, &doc); err != nil {
 		return out
 	}
-	mediaPaths := map[string]string{}
-	walkHardDiskMedia(doc.Machine.MediaRegistry.HardDisks, vmFolder, mediaPaths)
-	walkSnapshotTree(doc.Machine.RootSnapshot, out, mediaPaths)
+	media := map[string]mediaInfo{}
+	walkHardDiskMedia(doc.Machine.MediaRegistry.HardDisks, vmFolder, "", media)
+	walkSnapshotTree(doc.Machine.RootSnapshot, out, media)
 	return out
 }
 
-func walkHardDiskMedia(nodes []hardDiskNode, vmFolder string, out map[string]string) {
+func walkHardDiskMedia(nodes []hardDiskNode, vmFolder, parentUUID string, out map[string]mediaInfo) {
 	for _, n := range nodes {
 		uuid := strings.ToLower(strings.Trim(n.UUID, "{}"))
 		if uuid != "" && n.Location != "" {
@@ -76,16 +82,39 @@ func walkHardDiskMedia(nodes []hardDiskNode, vmFolder string, out map[string]str
 			if !filepath.IsAbs(loc) {
 				loc = filepath.Join(vmFolder, loc)
 			}
-			out[uuid] = loc
+			out[uuid] = mediaInfo{Path: loc, ParentUUID: parentUUID}
 		}
-		walkHardDiskMedia(n.Children, vmFolder, out)
+		nextParent := uuid
+		if nextParent == "" {
+			nextParent = parentUUID
+		}
+		walkHardDiskMedia(n.Children, vmFolder, nextParent, out)
 	}
 }
 
-func walkSnapshotTree(node snapshotNode, out map[string]SnapshotEntry, mediaPaths map[string]string) {
+// mediaChain returns VDI paths from the snapshot leaf toward the base disk.
+func mediaChain(leafUUID string, media map[string]mediaInfo) []string {
+	var paths []string
+	seen := map[string]bool{}
+	uuid := strings.ToLower(strings.Trim(leafUUID, "{}"))
+	for uuid != "" && !seen[uuid] {
+		seen[uuid] = true
+		info, ok := media[uuid]
+		if !ok {
+			break
+		}
+		if info.Path != "" {
+			paths = append(paths, info.Path)
+		}
+		uuid = info.ParentUUID
+	}
+	return paths
+}
+
+func walkSnapshotTree(node snapshotNode, out map[string]SnapshotEntry, media map[string]mediaInfo) {
 	if node.Name == "" {
 		for i := range node.Children {
-			walkSnapshotTree(node.Children[i], out, mediaPaths)
+			walkSnapshotTree(node.Children[i], out, media)
 		}
 		return
 	}
@@ -98,12 +127,10 @@ func walkSnapshotTree(node snapshotNode, out map[string]SnapshotEntry, mediaPath
 		entry.Time = t
 	}
 	if entry.DiskMediumUUID != "" {
-		if p, ok := mediaPaths[strings.ToLower(entry.DiskMediumUUID)]; ok {
-			entry.VDIPaths = []string{p}
-		}
+		entry.VDIPaths = mediaChain(entry.DiskMediumUUID, media)
 	}
 	out[strings.ToLower(node.Name)] = entry
 	for i := range node.Children {
-		walkSnapshotTree(node.Children[i], out, mediaPaths)
+		walkSnapshotTree(node.Children[i], out, media)
 	}
 }

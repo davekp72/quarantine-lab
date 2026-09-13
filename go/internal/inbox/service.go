@@ -64,20 +64,31 @@ func (s *Service) Open() error {
 	destDir := guestpaths.InboxDir()
 	_ = s.Guest.Transport().Mkdir(ctx, destDir)
 	copied := 0
+	var delivered []string
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
 		}
 		src := filepath.Join(host, e.Name())
 		dest := guestpaths.GuestJoin(destDir, e.Name())
+		info, err := os.Stat(src)
+		if err != nil {
+			return fmt.Errorf("deliver %s: %w", e.Name(), err)
+		}
 		if err := s.Guest.CopyToDest(src, dest); err != nil {
 			return fmt.Errorf("deliver %s: %w", e.Name(), err)
 		}
+		delivered = append(delivered, fmt.Sprintf("%s (%d bytes)", e.Name(), info.Size()))
 		copied++
 	}
 	s.mode = "agent"
 	if copied == 0 {
+		fmt.Printf("inbox open: no files in %s (stage with Copy-Item, then inbox open again)\n", host)
 		return nil
+	}
+	fmt.Printf("inbox open: delivered %d file(s) via agent → %s\n", copied, destDir)
+	for _, d := range delivered {
+		fmt.Printf("  - %s\n", d)
 	}
 	return nil
 }

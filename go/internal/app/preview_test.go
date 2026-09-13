@@ -66,6 +66,26 @@ func TestReadSnapshotFileSkipsDiskWhenSidecarTooLarge(t *testing.T) {
 	}
 }
 
+func TestDiffSnapshotFileDegradesWithoutDisk(t *testing.T) {
+	dir := t.TempDir()
+	a := &App{
+		Cfg: &config.Config{UI: config.UIConfig{FilePreviewMaxKB: 512}},
+		Evidence: &evidence.Service{Cfg: &config.Config{
+			Manifest: config.ManifestConfig{LogDir: dir},
+		}},
+	}
+	res, err := a.DiffSnapshotFile("CleanSession", "Evidence-test", `C:\Windows\notepad.exe`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res["fromSource"] != "none" && res["fromSource"] != nil {
+		t.Fatalf("fromSource=%v", res["fromSource"])
+	}
+	if res["toSource"] != "none" && res["toSource"] != nil {
+		t.Fatalf("toSource=%v", res["toSource"])
+	}
+}
+
 func TestDecodePreviewBytesUTF16LE(t *testing.T) {
 	// BOM + "Hi"
 	data := []byte{0xFF, 0xFE, 'H', 0, 'i', 0}

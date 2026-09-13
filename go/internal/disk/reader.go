@@ -22,7 +22,8 @@ type SnapshotEntry struct {
 	Parent         string
 	Time           time.Time
 	DiskMediumUUID string
-	VDIPaths       []string
+	// VDIPaths is the differencing chain, leaf first, then parents toward the base VDI.
+	VDIPaths []string
 }
 
 // Index parses .vbox snapshot tree.
@@ -55,7 +56,7 @@ type flattenWait struct {
 	err  error
 }
 
-// Reader reads files from snapshot disks via cached flatten.
+// Reader reads files from snapshot VDI chains (flatten cache is last-resort).
 type Reader struct {
 	Cfg      *config.Config
 	VBox     *vbox.Client
@@ -113,6 +114,39 @@ func (r *Reader) resolveSnapshotEntry(snapshotName string) (SnapshotEntry, error
 	return entry, nil
 }
 
+func flattenFallbackEnabled() bool {
+	v := strings.TrimSpace(os.Getenv("QUARANTINE_DISK_FLATTEN"))
+	return v == "1" || strings.EqualFold(v, "true")
+}
+
+func (r *Reader) flattenCachePath(entry SnapshotEntry) string {
+	return filepath.Join(r.CacheDir(), strings.Trim(entry.UUID, "{}")+".raw")
+}
+
+// HasSnapshotChain reports whether the snapshot's VDI leaf and parents exist on disk.
+func (r *Reader) HasSnapshotChain(snapshotName string) bool {
+	if r == nil {
+		return false
+	}
+	entry, err := r.resolveSnapshotEntry(snapshotName)
+	if err != nil || len(entry.VDIPaths) == 0 {
+		return false
+	}
+	for _, p := range entry.VDIPaths {
+		st, err := os.Stat(p)
+		if err != nil || st.IsDir() {
+			return false
+		}
+	}
+	return true
+}
+
+// CanReadSnapshot reports whether a VDI chain or an existing RAW flatten can be opened.
+// Never starts CloneMedium.
+func (r *Reader) CanReadSnapshot(snapshotName string) bool {
+	return r.HasSnapshotChain(snapshotName) || r.HasUsableFlattenCache(snapshotName)
+}
+
 // HasUsableFlattenCache reports whether a prior CloneMedium RAW for this snapshot
 // already exists. Never starts a flatten.
 func (r *Reader) HasUsableFlattenCache(snapshotName string) bool {
@@ -120,8 +154,7 @@ func (r *Reader) HasUsableFlattenCache(snapshotName string) bool {
 	if err != nil || entry.UUID == "" {
 		return false
 	}
-	uuidClean := strings.Trim(entry.UUID, "{}")
-	out := filepath.Join(r.CacheDir(), uuidClean+".raw")
+	out := r.flattenCachePath(entry)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if cached, ok := r.cache[entry.UUID]; ok {
@@ -134,6 +167,52 @@ func (r *Reader) HasUsableFlattenCache(snapshotName string) bool {
 		return true
 	}
 	return false
+}
+
+// openSnapshotDisk opens a linear view of the snapshot disk. Chain first; existing
+// RAW cache next; CloneMedium only when allowFlatten is true.
+func (r *Reader) openSnapshotDisk(snapshotName string, allowFlatten bool) (*snapshotView, error) {
+	entry, err := r.resolveSnapshotEntry(snapshotName)
+	if err != nil {
+		return nil, err
+	}
+	var chainErr error
+	if len(entry.VDIPaths) > 0 {
+		view, err := openVDIChain(entry.VDIPaths)
+		if err == nil {
+			return view, nil
+		}
+		chainErr = err
+	}
+	if r.HasUsableFlattenCache(snapshotName) {
+		path := r.flattenCachePath(entry)
+		r.mu.Lock()
+		if cached, ok := r.cache[entry.UUID]; ok {
+			path = cached
+		}
+		r.mu.Unlock()
+		view, err := openVDIChain([]string{path})
+		if err == nil {
+			return view, nil
+		}
+		if chainErr == nil {
+			chainErr = err
+		}
+	}
+	if allowFlatten {
+		path, err := r.EnsureFlattened(snapshotName)
+		if err != nil {
+			if chainErr != nil {
+				return nil, fmt.Errorf("%v; flatten: %w", chainErr, err)
+			}
+			return nil, err
+		}
+		return openVDIChain([]string{path})
+	}
+	if chainErr != nil {
+		return nil, chainErr
+	}
+	return nil, fmt.Errorf("snapshot %q: no VDI chain in .vbox", snapshotName)
 }
 
 // EnsureFlattened returns path to flattened VDI for snapshot name.
@@ -212,16 +291,12 @@ type FileInfo struct {
 // ListDirectory lists immediate children under a guest path.
 func (r *Reader) ListDirectory(snapshotName, guestPath string) ([]FileInfo, error) {
 	guestPath = normalizeGuestPath(guestPath)
-	vdi, err := r.EnsureFlattened(snapshotName)
+	view, err := r.openSnapshotDisk(snapshotName, flattenFallbackEnabled())
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.Open(vdi)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	entries, err := ntfsListDir(f, guestPath)
+	defer view.Close()
+	entries, err := ntfsListDir(view, guestPath)
 	if err != nil {
 		return nil, err
 	}
@@ -231,29 +306,35 @@ func (r *Reader) ListDirectory(snapshotName, guestPath string) ([]FileInfo, erro
 	return entries, nil
 }
 
-// ReadFile reads file bytes from snapshot disk using go-ntfs when available.
+// ReadFile reads file bytes from the snapshot VDI chain using go-ntfs.
+// Does not start CloneMedium unless QUARANTINE_DISK_FLATTEN=1.
 // If maxBytes <= 0, allows up to 512 MiB (for hive extraction). Files larger
 // than maxBytes return the first maxBytes and the full size on FileInfo.
 func (r *Reader) ReadFile(snapshotName, guestPath string, maxBytes int64) ([]byte, *FileInfo, error) {
+	return r.readFile(snapshotName, guestPath, maxBytes, flattenFallbackEnabled())
+}
+
+func (r *Reader) readFile(snapshotName, guestPath string, maxBytes int64, allowFlatten bool) ([]byte, *FileInfo, error) {
 	guestPath = normalizeGuestPath(guestPath)
-	vdi, err := r.EnsureFlattened(snapshotName)
-	if err != nil {
-		return nil, nil, err
-	}
 	if maxBytes <= 0 {
 		maxBytes = 512 * 1024 * 1024
 	}
-	data, info, err := readNTFSFile(vdi, guestPath, maxBytes)
+	view, err := r.openSnapshotDisk(snapshotName, allowFlatten)
 	if err != nil {
 		return nil, nil, err
 	}
-	info.SnapshotName = snapshotName
-	return data, info, nil
+	defer view.Close()
+	data, size, err := tryNTFSRead(view, guestPath, maxBytes)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read %s from snapshot %s: %w", guestPath, snapshotName, err)
+	}
+	return data, &FileInfo{Path: guestPath, Size: size, SnapshotName: snapshotName}, nil
 }
 
 // ExtractFile writes a guest file from the snapshot disk to destPath on the host.
+// Tries the VDI chain first; CloneMedium only if the chain cannot be opened.
 func (r *Reader) ExtractFile(snapshotName, guestPath, destPath string) (int64, error) {
-	data, info, err := r.ReadFile(snapshotName, guestPath, 0)
+	data, info, err := r.readFile(snapshotName, guestPath, 0, true)
 	if err != nil {
 		return 0, err
 	}
