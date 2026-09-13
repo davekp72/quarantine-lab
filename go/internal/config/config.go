@@ -52,6 +52,17 @@ type UIConfig struct {
 	HideRoutineNoise *bool `json:"hideRoutineNoise"`
 	// RefreshOnCompare is the default for the compare-bar Refresh checkbox (default true).
 	RefreshOnCompare *bool `json:"refreshOnCompare"`
+	// NoiseDomains are host suffixes treated as routine network noise (DNS/HTTP/Sysmon).
+	// Omitted/null uses DefaultNoiseDomains. An empty list means no vendor domains
+	// (localhost / .local / home.arpa still count as lab noise).
+	NoiseDomains []string `json:"noiseDomains"`
+	// NoiseFiles are case-insensitive path substrings treated as routine file noise.
+	// Omitted/null uses DefaultNoiseFiles. An empty list means no extra file patterns
+	// (compiler/WER/EBWebView heuristics still apply).
+	NoiseFiles []string `json:"noiseFiles"`
+	// NoiseRegistry are case-insensitive registry-key substrings treated as routine
+	// registry noise. Omitted/null uses DefaultNoiseRegistry. An empty list means none.
+	NoiseRegistry []string `json:"noiseRegistry"`
 }
 
 const (
@@ -69,6 +80,52 @@ var GuestAdditionsCLI bool
 
 // defaultHomeISPPatterns is empty: operators opt in with ui.homeIspPatterns.
 var defaultHomeISPPatterns = []string{}
+
+// DefaultNoiseDomains is the built-in Microsoft / CDN host-suffix list.
+var DefaultNoiseDomains = []string{
+	"msftconnecttest.com", "microsoft.com", "microsoft.net", "msn.com", "bing.com",
+	"windowsupdate.com", "office.com", "office365.com", "live.com", "microsoftpersonalcontent.com",
+	"onedrive.com", "sharepoint.com", "skype.com", "windows.com", "xboxlive.com", "xboxab.com",
+	"azure.com", "azureedge.net", "trafficmanager.net", "msedge.net", "msauth.net", "msidentity.com",
+	"hotmail.com", "outlook.com", "visualstudio.com", "digicert.com", "akamaihd.net", "akamaiedge.net",
+	"akamai.net", "aspnetcdn.com", "windows.net", "officeapps.live.com", "mp.microsoft.com",
+	"events.data.microsoft.com", "data.microsoft.com", "telemetry.microsoft.com", "msftncsi.com",
+	"cloud.microsoft", "office.net", "sfx.ms", "s-microsoft.com", "akamaized.net",
+}
+
+// DefaultNoiseFiles is the built-in guest-path substring list (Hide routine noise).
+var DefaultNoiseFiles = []string{
+	`\Microsoft\EdgeUpdate\`,
+	`\Microsoft\OneDrive\ListSync`,
+	`\AppData\Local\Microsoft\OneDrive\`,
+	`\$Extend\`,
+	`\Windows\ServiceState\`,
+	`\Microsoft\Windows\AppRepository\`,
+	`\Microsoft\InstallService\`,
+	`\Users\Public\Quarantine\`,
+	`\Windows Security Health\`,
+	`\PowerGrid\`,
+	`manifest-capture.json`,
+	`Get-QuarantineGuestManifest.ps1`,
+	`Get-QuarantineGuestSysmonEvents.ps1`,
+	`.etl`,
+	`\Windows\Temp\`,
+	`\Temp\`,
+	`\SearchIndexer.exe`,
+	`\svchost.exe`,
+	`\MsMpEng.exe`,
+	`\SecurityHealthService.exe`,
+}
+
+// DefaultNoiseRegistry is the built-in volatile / cache key substring list.
+var DefaultNoiseRegistry = []string{
+	`\IrisService\Cache\`,
+	`\TaskCache\Tasks\{`,
+	`\Explorer\SessionInfo\`,
+	`\ContentDeliveryManager\`,
+	`\InstallService\State`,
+	`\Volatile Environment\`,
+}
 
 func boolPtrOr(p *bool, def bool) bool {
 	if p == nil {
@@ -94,6 +151,78 @@ func (c *Config) HomeISPPatterns() []string {
 		return out
 	}
 	return c.UI.HomeISPPatterns
+}
+
+// NoiseDomains returns configured host suffixes, or the built-in default list.
+// A non-nil empty slice means no vendor domains.
+func (c *Config) NoiseDomains() []string {
+	if c == nil || c.UI.NoiseDomains == nil {
+		out := make([]string, len(DefaultNoiseDomains))
+		copy(out, DefaultNoiseDomains)
+		return out
+	}
+	return append([]string{}, c.UI.NoiseDomains...)
+}
+
+// ParseNoiseDomains splits a comma/newline list into lowercase host suffixes.
+func ParseNoiseDomains(s string) []string {
+	raw := ParseHomeISPPatterns(s)
+	out := make([]string, 0, len(raw))
+	for _, d := range raw {
+		d = strings.ToLower(strings.TrimSpace(d))
+		d = strings.TrimPrefix(d, ".")
+		if d == "" {
+			continue
+		}
+		out = append(out, d)
+	}
+	if out == nil {
+		return []string{}
+	}
+	return out
+}
+
+// NoiseFiles returns configured path substrings, or the built-in default list.
+func (c *Config) NoiseFiles() []string {
+	if c == nil || c.UI.NoiseFiles == nil {
+		out := make([]string, len(DefaultNoiseFiles))
+		copy(out, DefaultNoiseFiles)
+		return out
+	}
+	return append([]string{}, c.UI.NoiseFiles...)
+}
+
+// ParseNoiseFiles splits a comma/newline list into path substrings.
+func ParseNoiseFiles(s string) []string {
+	raw := ParseHomeISPPatterns(s)
+	out := make([]string, 0, len(raw))
+	for _, p := range raw {
+		p = strings.TrimSpace(p)
+		p = strings.ReplaceAll(p, `/`, `\`)
+		if p == "" {
+			continue
+		}
+		out = append(out, p)
+	}
+	if out == nil {
+		return []string{}
+	}
+	return out
+}
+
+// NoiseRegistry returns configured registry-key substrings, or the built-in default list.
+func (c *Config) NoiseRegistry() []string {
+	if c == nil || c.UI.NoiseRegistry == nil {
+		out := make([]string, len(DefaultNoiseRegistry))
+		copy(out, DefaultNoiseRegistry)
+		return out
+	}
+	return append([]string{}, c.UI.NoiseRegistry...)
+}
+
+// ParseNoiseRegistry splits a comma/newline list into key substrings.
+func ParseNoiseRegistry(s string) []string {
+	return ParseNoiseFiles(s)
 }
 
 // HideRoutineNoiseEnabled is true unless explicitly disabled in config.
@@ -447,15 +576,15 @@ type ManifestConfig struct {
 }
 
 const (
-	DefaultContentMaxKB   = 51200
-	DefaultHashMaxMB      = 100
+	DefaultContentMaxKB    = 51200
+	DefaultHashMaxMB       = 100
 	DefaultTotalEmbedMaxMB = 256
-	minContentMaxKB       = 64
-	maxContentMaxKB       = 65536
-	minHashMaxMB          = 1
-	maxHashMaxMB          = 512
-	minTotalEmbedMaxMB    = 16
-	maxTotalEmbedMaxMB    = 512
+	minContentMaxKB        = 64
+	maxContentMaxKB        = 65536
+	minHashMaxMB           = 1
+	maxHashMaxMB           = 512
+	minTotalEmbedMaxMB     = 16
+	maxTotalEmbedMaxMB     = 512
 )
 
 // ContentMaxKBResolved is the per-file body embed cap sent to the agent on Preserve.
@@ -673,6 +802,9 @@ func (c *Config) PersistUI(cfgPath string) error {
 	ui["refreshOnCompare"] = c.RefreshOnCompareEnabled()
 	ui["warnPublicIpBeforeLaunch"] = c.WarnPublicIPBeforeLaunchEnabled()
 	ui["homeIspPatterns"] = c.HomeISPPatterns()
+	ui["noiseDomains"] = c.NoiseDomains()
+	ui["noiseFiles"] = c.NoiseFiles()
+	ui["noiseRegistry"] = c.NoiseRegistry()
 	manifest, _ := doc["manifest"].(map[string]any)
 	if manifest == nil {
 		manifest = map[string]any{}

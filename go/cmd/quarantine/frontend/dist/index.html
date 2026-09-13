@@ -71,6 +71,10 @@
     </aside>
 
     <div class="main-col">
+      <div id="case-banner" class="case-banner hidden" role="status">
+        <span id="case-banner-text">Archived compare — snapshots not required</span>
+        <button id="btn-case-live" type="button">Back to live</button>
+      </div>
       <section class="controls">
         <label>From
           <select id="from-snap"></select>
@@ -83,6 +87,7 @@
         <button id="btn-compare" type="button">Compare</button>
         <button id="btn-load-file" type="button">Load diff file</button>
         <button id="btn-settings" type="button" title="Settings">Settings</button>
+        <button id="btn-cases" type="button" title="Saved compare cases">Cases</button>
         <button id="btn-toggle-log" type="button" class="btn-log-toggle">Log</button>
       </section>
       <nav class="tabs">
@@ -103,6 +108,10 @@
             <button data-file-tab="removed" type="button">Deleted <span id="file-count-removed" class="tab-count"></span></button>
             <button data-file-tab="modified" type="button">Changed <span id="file-count-modified" class="tab-count"></span></button>
           </nav>
+          <div class="file-toolbar">
+            <button id="btn-download-file" type="button" disabled>Download</button>
+            <p id="file-download-msg" class="muted action-msg"></p>
+          </div>
           <div class="split">
             <div id="file-tree" class="tree"></div>
             <pre id="file-preview" class="preview">Select a file path</pre>
@@ -166,6 +175,11 @@
           <label>Home ISP match
             <input id="ui-home-isp" type="text" spellcheck="false" placeholder="Your home ISP name" />
           </label>
+          <div class="btn-row">
+            <button id="btn-open-noise-domains" type="button">Noise domains…</button>
+            <button id="btn-open-noise-files" type="button">File noise…</button>
+            <button id="btn-open-noise-registry" type="button">Registry noise…</button>
+          </div>
         </fieldset>
         <fieldset>
           <legend>File preview</legend>
@@ -192,6 +206,71 @@
         <button id="btn-ui-save" type="button" class="btn-primary">Save</button>
         <button id="btn-settings-cancel" type="button">Cancel</button>
         <p id="ui-save-msg" class="muted action-msg"></p>
+      </div>
+    </div>
+  </div>
+  <div id="cases-overlay" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="cases-title">
+    <div class="modal settings-modal cases-modal">
+      <div class="settings-head">
+        <h2 id="cases-title">Cases</h2>
+        <button id="btn-cases-close" type="button" class="log-close" title="Close">×</button>
+      </div>
+      <p class="muted snap-hint">Compare first, then Save case while snapshots still exist. Click a case to review it. Deleting a snapshot does not remove cases.</p>
+      <ul id="case-list" class="snap-list case-list"></ul>
+      <div class="modal-actions">
+        <button id="btn-refresh-cases" type="button">Refresh</button>
+        <button id="btn-save-case" type="button" class="btn-primary">Save case</button>
+        <button id="btn-delete-case" type="button" class="btn-danger">Delete case</button>
+        <button id="btn-cases-done" type="button">Close</button>
+        <p id="case-action-msg" class="muted action-msg"></p>
+      </div>
+    </div>
+  </div>
+  <div id="noise-domains-overlay" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="noise-domains-title">
+    <div class="modal settings-modal filters-modal">
+      <div class="settings-head">
+        <h2 id="noise-domains-title">Noise domains</h2>
+        <button id="btn-noise-domains-close" type="button" class="log-close" title="Close">×</button>
+      </div>
+      <p class="muted snap-hint">Host suffixes hidden when Hide routine noise is on (DNS, HTTP, Sysmon, Traffic names). One per line. localhost, .local, and home.arpa stay hidden.</p>
+      <textarea id="ui-noise-domains" rows="16" spellcheck="false"></textarea>
+      <div class="modal-actions">
+        <button id="btn-noise-domains-default" type="button">Restore defaults</button>
+        <button id="btn-noise-domains-save" type="button" class="btn-primary">Save</button>
+        <button id="btn-noise-domains-cancel" type="button">Cancel</button>
+        <p id="noise-domains-msg" class="muted action-msg"></p>
+      </div>
+    </div>
+  </div>
+  <div id="noise-files-overlay" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="noise-files-title">
+    <div class="modal settings-modal filters-modal">
+      <div class="settings-head">
+        <h2 id="noise-files-title">File noise</h2>
+        <button id="btn-noise-files-close" type="button" class="log-close" title="Close">×</button>
+      </div>
+      <p class="muted snap-hint">Guest-path substrings hidden when Hide routine noise is on (Files, Sysmon, USN). One per line, case-insensitive. High-signal extensions (.exe, .dll, …) are still kept. Compiler / WER / EBWebView rules stay built-in.</p>
+      <textarea id="ui-noise-files" rows="16" spellcheck="false"></textarea>
+      <div class="modal-actions">
+        <button id="btn-noise-files-default" type="button">Restore defaults</button>
+        <button id="btn-noise-files-save" type="button" class="btn-primary">Save</button>
+        <button id="btn-noise-files-cancel" type="button">Cancel</button>
+        <p id="noise-files-msg" class="muted action-msg"></p>
+      </div>
+    </div>
+  </div>
+  <div id="noise-registry-overlay" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="noise-registry-title">
+    <div class="modal settings-modal filters-modal">
+      <div class="settings-head">
+        <h2 id="noise-registry-title">Registry noise</h2>
+        <button id="btn-noise-registry-close" type="button" class="log-close" title="Close">×</button>
+      </div>
+      <p class="muted snap-hint">Registry-key substrings hidden when Hide routine noise is on. One per line, case-insensitive. Matches anywhere in the key path (value names are not required).</p>
+      <textarea id="ui-noise-registry" rows="16" spellcheck="false"></textarea>
+      <div class="modal-actions">
+        <button id="btn-noise-registry-default" type="button">Restore defaults</button>
+        <button id="btn-noise-registry-save" type="button" class="btn-primary">Save</button>
+        <button id="btn-noise-registry-cancel" type="button">Cancel</button>
+        <p id="noise-registry-msg" class="muted action-msg"></p>
       </div>
     </div>
   </div>

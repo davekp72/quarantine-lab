@@ -355,6 +355,50 @@ func (s *Service) FileSidecarEntry(snapshotName, guestPath string) (map[string]a
 	return nil, false
 }
 
+// FileSidecarIndex loads the changed-files sidecar once and keys rows by guest path.
+func (s *Service) FileSidecarIndex(snapshotName string) map[string]map[string]any {
+	if s == nil || s.Cfg == nil {
+		return nil
+	}
+	snap := s.Cfg.ResolveSnapshotName(snapshotName)
+	sc, err := s.LoadSidecar(snap, "-changed-files.json")
+	if err != nil {
+		return nil
+	}
+	files, _ := sc["files"].([]any)
+	out := make(map[string]map[string]any, len(files))
+	for _, item := range files {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		p, _ := m["p"].(string)
+		if p == "" {
+			p, _ = m["path"].(string)
+		}
+		if p == "" {
+			continue
+		}
+		out[sidecarPathKey(p)] = m
+	}
+	return out
+}
+
+func sidecarPathKey(p string) string {
+	return strings.ToLower(filepath.Clean(p))
+}
+
+// FileSidecarLookup finds a row in an index from FileSidecarIndex.
+func FileSidecarLookup(index map[string]map[string]any, guestPath string) (map[string]any, bool) {
+	if len(index) == 0 {
+		return nil, false
+	}
+	if e, ok := index[sidecarPathKey(guestPath)]; ok {
+		return e, true
+	}
+	return nil, false
+}
+
 // FileCapturedInSidecar reports whether changed-files sidecar captured bytes or a hash.
 func FileCapturedInSidecar(entry map[string]any) bool {
 	if entry == nil {
@@ -840,7 +884,20 @@ func moveFile(src, dst string) error {
 	return os.Remove(src)
 }
 
+func isUnderDir(path, root string) bool {
+	if root == "" || path == "" {
+		return false
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	rel = filepath.ToSlash(rel)
+	return rel != ".." && !strings.HasPrefix(rel, "../")
+}
+
 // RemoveSnapshotArtifacts deletes host-side manifest JSON, sidecars, and related diff files.
+// Saved compare packs under {logDir}/cases/ are never removed.
 func (s *Service) RemoveSnapshotArtifacts(snapshotName string) []string {
 	logDir := s.Cfg.ManifestLogDir()
 	if logDir == "" {
@@ -890,9 +947,13 @@ func (s *Service) RemoveSnapshotArtifacts(snapshotName string) []string {
 		filepath.Join(logDir, "diff-*-vs-"+safe+".diff.json"),
 		filepath.Join(logDir, "diff-"+safe+"-vs-*.diff.json"),
 	}
+	casesRoot := filepath.Join(logDir, "cases")
 	for _, pattern := range diffPatterns {
 		matches, _ := filepath.Glob(pattern)
 		for _, path := range matches {
+			if isUnderDir(path, casesRoot) {
+				continue
+			}
 			if err := os.Remove(path); err == nil {
 				removed = append(removed, path)
 			}

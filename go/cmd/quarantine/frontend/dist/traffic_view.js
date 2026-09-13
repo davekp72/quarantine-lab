@@ -6,7 +6,7 @@ import {
 } from './safe_dom.js';
 import { isTrafficFlowNoise } from './noise.js';
 
-let cache = { snapshot: '', data: null, error: '', loading: false };
+let cache = { key: '', snapshot: '', data: null, error: '', loading: false };
 let filters = { proto: '', transport: '', q: '', breaches: false };
 let selectedId = '';
 let payloadMode = 'ascii';
@@ -57,23 +57,24 @@ function endpoint(flow) {
 }
 
 export function invalidateTrafficCache() {
-  cache = { snapshot: '', data: null, error: '', loading: false };
+  cache = { key: '', snapshot: '', data: null, error: '', loading: false };
   selectedId = '';
 }
 
-export async function renderTraffic(panel, { snapshot, hideNoise, backend }) {
+export async function renderTraffic(panel, { snapshot, hideNoise, backend, caseId }) {
   if (!panel) return;
   const prevQ = document.activeElement?.id === 'traffic-q' ? {
     start: document.activeElement.selectionStart,
     end: document.activeElement.selectionEnd,
   } : null;
-  if (!snapshot) {
+  const cacheKey = `${caseId || 'live'}::${snapshot || ''}`;
+  if (!snapshot && !caseId) {
     setMutedMessage(panel, 'Compare snapshots first — Traffic reads the evidence PCAP for the To snapshot.');
     return;
   }
 
-  if (cache.snapshot !== snapshot || (!cache.data && !cache.loading && !cache.error)) {
-    cache = { snapshot, data: null, error: '', loading: true };
+  if (cache.key !== cacheKey || (!cache.data && !cache.loading && !cache.error)) {
+    cache = { key: cacheKey, snapshot, data: null, error: '', loading: true };
     panel.replaceChildren();
     appendMuted(panel, 'Dissecting PCAP with tshark…');
     try {
@@ -122,12 +123,38 @@ export async function renderTraffic(panel, { snapshot, hideNoise, backend }) {
   bar.className = 'traffic-filters';
   bar.appendChild(selectControl('Protocol', 'traffic-proto', [['', 'All protocols'], ...protos.map((p) => [p, p])], filters.proto, (v) => {
     filters.proto = v;
-    renderTraffic(panel, { snapshot, hideNoise, backend });
+    renderTraffic(panel, { snapshot, hideNoise, backend, caseId });
   }));
   bar.appendChild(selectControl('Transport', 'traffic-transport', TRANSPORTS, filters.transport, (v) => {
     filters.transport = v;
-    renderTraffic(panel, { snapshot, hideNoise, backend });
+    renderTraffic(panel, { snapshot, hideNoise, backend, caseId });
   }));
+  const pcapBtn = document.createElement('button');
+  pcapBtn.type = 'button';
+  pcapBtn.textContent = 'Download PCAP';
+  pcapBtn.disabled = !data.pcap;
+  pcapBtn.title = data.pcap ? 'Save the evidence capture' : 'No PCAP in this evidence';
+  const pcapMsg = document.createElement('span');
+  pcapMsg.className = 'muted action-msg';
+  pcapBtn.addEventListener('click', async () => {
+    pcapBtn.disabled = true;
+    pcapBtn.textContent = 'Saving…';
+    try {
+      const api = await backend();
+      if (!api?.ExportPcapWails) {
+        throw new Error('Restart the UI after this update (ExportPcapWails missing).');
+      }
+      const dest = await api.ExportPcapWails(snapshot);
+      pcapMsg.textContent = dest ? `Saved ${dest}` : '';
+    } catch (e) {
+      pcapMsg.textContent = String(e);
+    } finally {
+      pcapBtn.disabled = !data.pcap;
+      pcapBtn.textContent = 'Download PCAP';
+    }
+  });
+  bar.appendChild(pcapBtn);
+  bar.appendChild(pcapMsg);
   const hostLabel = document.createElement('label');
   hostLabel.textContent = 'Host / name';
   const hostInput = document.createElement('input');
@@ -137,7 +164,7 @@ export async function renderTraffic(panel, { snapshot, hideNoise, backend }) {
   hostInput.value = filters.q;
   hostInput.addEventListener('input', () => {
     filters.q = hostInput.value;
-    renderTraffic(panel, { snapshot, hideNoise, backend });
+    renderTraffic(panel, { snapshot, hideNoise, backend, caseId });
   });
   hostLabel.appendChild(hostInput);
   bar.appendChild(hostLabel);
@@ -148,7 +175,7 @@ export async function renderTraffic(panel, { snapshot, hideNoise, backend }) {
   breachBox.checked = !!filters.breaches;
   breachBox.addEventListener('change', () => {
     filters.breaches = breachBox.checked;
-    renderTraffic(panel, { snapshot, hideNoise, backend });
+    renderTraffic(panel, { snapshot, hideNoise, backend, caseId });
   });
   breachLabel.appendChild(breachBox);
   breachLabel.appendChild(document.createTextNode(' Policy breaches only'));

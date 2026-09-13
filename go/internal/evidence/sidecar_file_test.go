@@ -2,7 +2,12 @@ package evidence
 
 import (
 	"encoding/base64"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
+
+	"github.com/quarantine-lab/quarantine/internal/config"
 )
 
 func TestFileSidecarSize(t *testing.T) {
@@ -43,5 +48,33 @@ func TestFileSidecarBeforeContent(t *testing.T) {
 	}
 	if _, ok := FileSidecarContent(entry); ok {
 		t.Fatal("before payload must not satisfy FileSidecarContent")
+	}
+}
+
+func TestFileSidecarIndex(t *testing.T) {
+	dir := t.TempDir()
+	path := `C:\payload\note.txt`
+	doc := map[string]any{
+		"files": []any{
+			map[string]any{"p": path, "c": "text", "d": "hello"},
+		},
+	}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := "Evidence-test"
+	if err := os.WriteFile(filepath.Join(dir, name+"-changed-files.json"), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := &Service{Cfg: &config.Config{Manifest: config.ManifestConfig{LogDir: dir}}}
+	idx := s.FileSidecarIndex(name)
+	entry, ok := FileSidecarLookup(idx, path)
+	if !ok {
+		t.Fatal("lookup")
+	}
+	data, ok := FileSidecarContent(entry)
+	if !ok || string(data) != "hello" {
+		t.Fatalf("content=%q ok=%v", data, ok)
 	}
 }

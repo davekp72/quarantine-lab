@@ -153,6 +153,29 @@ func TestSetUISettingsPersists(t *testing.T) {
 	if loaded.HideRoutineNoiseEnabled() || loaded.RefreshOnCompareEnabled() || loaded.WarnPublicIPBeforeLaunchEnabled() {
 		t.Fatalf("bools not saved: %#v", loaded.UI)
 	}
+	if _, err := a.SetNoiseDomainsWails("evil.test\nmicrosoft.com"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.SetNoiseFilesWails(`\payload\noise\`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.SetNoiseRegistryWails(`\Evil\Run`); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := loaded.NoiseDomains()
+	if len(got) != 2 || got[0] != "evil.test" || got[1] != "microsoft.com" {
+		t.Fatalf("noise domains=%v", got)
+	}
+	if files := loaded.NoiseFiles(); len(files) != 1 || files[0] != `\payload\noise\` {
+		t.Fatalf("noise files=%v", files)
+	}
+	if keys := loaded.NoiseRegistry(); len(keys) != 1 || keys[0] != `\Evil\Run` {
+		t.Fatalf("noise registry=%v", keys)
+	}
 }
 
 func findTreeNode(node map[string]any, name string) map[string]any {

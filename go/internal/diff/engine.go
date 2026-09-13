@@ -43,6 +43,8 @@ type MetaSection struct {
 	ToUserRegistryCount   int      `json:"toUserRegistryCount"`
 	CompareMode           string   `json:"compareMode"`
 	Warnings              []string `json:"warnings"`
+	CaseID                string   `json:"caseId,omitempty"`
+	ExcludeNoise          bool     `json:"excludeNoise,omitempty"`
 }
 
 type SummarySection struct {
@@ -464,10 +466,6 @@ func diffRegistry(left, right []evidence.RegistryEntry) (added, removed []eviden
 	}
 	ridx := map[string]evidence.RegistryEntry{}
 	for _, e := range right {
-		if isVolatileRegistry(e.K) {
-			volatileFiltered++
-			continue
-		}
 		ridx[regKey(e)] = e
 	}
 	for k, e := range ridx {
@@ -476,9 +474,6 @@ func diffRegistry(left, right []evidence.RegistryEntry) (added, removed []eviden
 		}
 	}
 	for k, e := range lidx {
-		if isVolatileRegistry(e.K) {
-			continue
-		}
 		if _, ok := ridx[k]; !ok {
 			removed = append(removed, e)
 		}
@@ -496,19 +491,6 @@ func diffRegistry(left, right []evidence.RegistryEntry) (added, removed []eviden
 		}
 	}
 	return
-}
-
-func isVolatileRegistry(key string) bool {
-	patterns := []string{
-		`\IrisService\Cache\`, `\TaskCache\Tasks\{`, `\Explorer\SessionInfo\`,
-		`\ContentDeliveryManager\`, `\InstallService\State`, `\Volatile Environment\`,
-	}
-	for _, p := range patterns {
-		if strings.Contains(key, p) {
-			return true
-		}
-	}
-	return false
 }
 
 func countHKU(entries []evidence.RegistryEntry) int {

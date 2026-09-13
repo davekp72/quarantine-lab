@@ -20,22 +20,30 @@ func (a *App) evidenceNetworkDir(snapshot string) string {
 }
 
 func (a *App) evidencePcapPath(snapshot string) (string, error) {
-	snapshot = strings.TrimSpace(snapshot)
-	if snapshot == "" {
-		return "", fmt.Errorf("snapshot name required")
-	}
-	dir := a.evidenceNetworkDir(snapshot)
-	pcap := filepath.Join(dir, "capture.pcap")
-	if _, err := os.Stat(pcap); err != nil {
-		alt := filepath.Join(dir, "capture.pcapng")
-		if _, err2 := os.Stat(alt); err2 == nil {
-			pcap = alt
-		} else {
-			return "", fmt.Errorf("no capture.pcap under %s", dir)
+	var pcap string
+	var err error
+	if a != nil && strings.TrimSpace(a.ActiveCase) != "" {
+		pcap, err = a.casePcapPath()
+	} else {
+		snapshot = strings.TrimSpace(snapshot)
+		if snapshot == "" {
+			return "", fmt.Errorf("snapshot name required")
+		}
+		dir := a.evidenceNetworkDir(snapshot)
+		pcap = filepath.Join(dir, "capture.pcap")
+		if _, err = os.Stat(pcap); err != nil {
+			alt := filepath.Join(dir, "capture.pcapng")
+			if _, err2 := os.Stat(alt); err2 == nil {
+				pcap = alt
+			} else {
+				return "", fmt.Errorf("no capture.pcap under %s", dir)
+			}
 		}
 	}
-	roots := a.pcapAllowRoots()
-	if !httpbody.AllowedFlowPath(pcap, roots...) {
+	if err != nil {
+		return "", err
+	}
+	if !httpbody.AllowedFlowPath(pcap, a.pcapAllowRoots()...) {
 		return "", fmt.Errorf("pcap not under lab log dirs")
 	}
 	return pcap, nil
@@ -109,7 +117,11 @@ func (a *App) policyForSnapshot(snapshot string) (config.PermissivePolicy, strin
 	g := a.Cfg.Network.Gateway.WithDefaults(a.Cfg.Network.IntnetName)
 	pol := g.Permissive
 	mode := a.configuredTrafficMode()
-	path := filepath.Join(a.evidenceNetworkDir(snapshot), "permissive-policy.json")
+	netDir := a.evidenceNetworkDir(snapshot)
+	if caseDir := a.caseNetworkDir(); caseDir != "" {
+		netDir = caseDir
+	}
+	path := filepath.Join(netDir, "permissive-policy.json")
 	raw, err := os.ReadFile(path)
 	if err == nil {
 		var doc struct {

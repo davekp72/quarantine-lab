@@ -308,11 +308,17 @@ func (a *App) enrichChangedFilesBefore(evidenceSnap string) {
 
 // DiffSnapshotFileWails reads From+To contents for the Changed-files preview.
 func (a *App) DiffSnapshotFileWails(fromSnap, toSnap, guestPath string) (map[string]any, error) {
+	if a != nil && strings.TrimSpace(a.ActiveCase) != "" {
+		return a.DiffCaseFileWails(a.ActiveCase, guestPath)
+	}
 	return a.DiffSnapshotFile(fromSnap, toSnap, guestPath)
 }
 
 // ReadSnapshotFileWails reads guest file for preview panel.
 func (a *App) ReadSnapshotFileWails(snapshotName, guestPath string) (map[string]any, error) {
+	if a != nil && strings.TrimSpace(a.ActiveCase) != "" {
+		return a.ReadCaseFileWails(a.ActiveCase, guestPath)
+	}
 	// Prefer sidecar; VDI chain when the path was never listed in changed-files.
 	return a.readSnapshotFile(snapshotName, guestPath, true, true)
 }

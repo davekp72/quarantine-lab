@@ -62,6 +62,7 @@ func main() {
 	root.AddCommand(baselineCmd(&cfgPath))
 	root.AddCommand(deleteSnapshotCmd(&cfgPath))
 	root.AddCommand(manifestCmd(&cfgPath))
+	root.AddCommand(caseCmd(&cfgPath))
 	root.AddCommand(networkCmd(&cfgPath))
 	root.AddCommand(proxyCmd(&cfgPath))
 	root.AddCommand(captureCmd(&cfgPath))
@@ -340,6 +341,73 @@ func manifestCmd(cfgPath *string) *cobra.Command {
 	viewCmd.Flags().StringVar(&to, "to", "", "To snapshot")
 	viewCmd.Flags().BoolVar(&refresh, "refresh", true, "Rebuild manifests")
 	cmd.AddCommand(viewCmd)
+	return cmd
+}
+
+func caseCmd(cfgPath *string) *cobra.Command {
+	cmd := &cobra.Command{Use: "case", Short: "Saved compare cases"}
+	cmd.AddCommand(&cobra.Command{
+		Use:   "list",
+		Short: "List archived compares",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			a, err := app.New(*cfgPath)
+			if err != nil {
+				return err
+			}
+			list, err := a.ListCasesWails()
+			if err != nil {
+				return err
+			}
+			if len(list) == 0 {
+				fmt.Println("No saved cases")
+				return nil
+			}
+			raw, err := json.MarshalIndent(list, "", "  ")
+			if err != nil {
+				return err
+			}
+			fmt.Println(string(raw))
+			return nil
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use:   "show [id]",
+		Short: "Print archived compare JSON path",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) < 1 {
+				return fmt.Errorf("case id required")
+			}
+			a, err := app.New(*cfgPath)
+			if err != nil {
+				return err
+			}
+			res, err := a.LoadCaseWails(args[0])
+			if err != nil {
+				return err
+			}
+			fmt.Println(res["id"], res["fromSnapshot"], "→", res["toSnapshot"])
+			return nil
+		},
+	})
+	cmd.AddCommand(&cobra.Command{
+		Use:   "delete [id]",
+		Short: "Delete a saved case (not VM snapshots)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) < 1 {
+				return fmt.Errorf("case id required")
+			}
+			a, err := app.New(*cfgPath)
+			if err != nil {
+				return err
+			}
+			msg, err := a.DeleteCaseWails(args[0])
+			if err != nil {
+				return err
+			}
+			fmt.Println(msg)
+			return nil
+		},
+	})
 	return cmd
 }
 

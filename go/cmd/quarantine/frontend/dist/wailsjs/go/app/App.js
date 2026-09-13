@@ -1,5 +1,5 @@
-export function CompareSnapshotsJSON(from, to, refresh) {
-  return window.go.app.App.CompareSnapshotsJSON(from, to, refresh);
+export function CompareSnapshotsJSON(from, to, refresh, excludeNoise) {
+  return window.go.app.App.CompareSnapshotsJSON(from, to, refresh, excludeNoise);
 }
 export function GetVMStatusWails() {
   return window.go.app.App.GetVMStatusWails();
@@ -15,6 +15,12 @@ export function ReadSnapshotFileWails(snap, path) {
 }
 export function DiffSnapshotFileWails(fromSnap, toSnap, path) {
   return window.go.app.App.DiffSnapshotFileWails(fromSnap, toSnap, path);
+}
+export function ExportSnapshotFileWails(snapshotName, guestPath) {
+  return window.go.app.App.ExportSnapshotFileWails(snapshotName, guestPath);
+}
+export function ExportPcapWails(snapshotName) {
+  return window.go.app.App.ExportPcapWails(snapshotName);
 }
 export function LoadDiffFile(path) {
   return window.go.app.App.LoadDiffFile(path);
@@ -96,4 +102,34 @@ export function UISettingsWails() {
 }
 export function SetUISettingsWails(filePreviewMaxKb, hideRoutineNoise, refreshOnCompare, warnPublicIP, homeIspPatterns, contentMaxKb, hashMaxMb, totalEmbedMaxMb) {
   return window.go.app.App.SetUISettingsWails(filePreviewMaxKb, hideRoutineNoise, refreshOnCompare, warnPublicIP, homeIspPatterns, contentMaxKb, hashMaxMb, totalEmbedMaxMb);
+}
+export function SetNoiseDomainsWails(text) {
+  return window.go.app.App.SetNoiseDomainsWails(text);
+}
+export function SetNoiseFilesWails(text) {
+  return window.go.app.App.SetNoiseFilesWails(text);
+}
+export function SetNoiseRegistryWails(text) {
+  return window.go.app.App.SetNoiseRegistryWails(text);
+}
+export function ListCasesWails() {
+  return window.go.app.App.ListCasesWails();
+}
+export function SaveCaseWails(excludeNoise) {
+  return window.go.app.App.SaveCaseWails(excludeNoise);
+}
+export function LoadCaseWails(id) {
+  return window.go.app.App.LoadCaseWails(id);
+}
+export function DeleteCaseWails(id) {
+  return window.go.app.App.DeleteCaseWails(id);
+}
+export function ReadCaseFileWails(caseID, guestPath) {
+  return window.go.app.App.ReadCaseFileWails(caseID, guestPath);
+}
+export function DiffCaseFileWails(caseID, guestPath) {
+  return window.go.app.App.DiffCaseFileWails(caseID, guestPath);
+}
+export function ClearActiveCaseWails() {
+  return window.go.app.App.ClearActiveCaseWails();
 }

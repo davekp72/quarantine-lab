@@ -13,6 +13,7 @@ import (
 	agenttypes "github.com/quarantine-lab/quarantine/internal/agent/types"
 	"github.com/quarantine-lab/quarantine/internal/applog"
 	"github.com/quarantine-lab/quarantine/internal/capture"
+	"github.com/quarantine-lab/quarantine/internal/cases"
 	"github.com/quarantine-lab/quarantine/internal/config"
 	"github.com/quarantine-lab/quarantine/internal/diff"
 	"github.com/quarantine-lab/quarantine/internal/disk"
@@ -39,8 +40,11 @@ type App struct {
 	Gateway      *gateway.Manager
 	Inbox        *inbox.Service
 	Disk         *disk.Reader
+	Cases        *cases.Store
+	ActiveCase   string
 	WailsCtx     context.Context
 	LastDiffPath string
+	LastResult   *diff.Result
 	Log          *applog.Buffer
 }
 
@@ -78,6 +82,7 @@ func New(configPath string) (*App, error) {
 		Gateway:    gw,
 		Inbox:      inbox.New(cfg, vms.VBox),
 		Disk:       dr,
+		Cases:      cases.NewStore(cfg),
 		Log:        applog.New(1000),
 	}
 	a.wireLogging()
@@ -87,8 +92,12 @@ func New(configPath string) (*App, error) {
 	return a, nil
 }
 
-// CompareSnapshots builds diff JSON for a snapshot pair.
+// CompareSnapshots builds diff JSON for a snapshot pair. Does not write a case pack.
 func (a *App) CompareSnapshots(ctx context.Context, fromSnap, toSnap string, refresh bool) (*diff.Result, string, error) {
+	return a.compareSnapshots(ctx, fromSnap, toSnap, refresh)
+}
+
+func (a *App) compareSnapshots(ctx context.Context, fromSnap, toSnap string, refresh bool) (*diff.Result, string, error) {
 	from := a.Cfg.ResolveSnapshotName(fromSnap)
 	to := a.Cfg.ResolveSnapshotName(toSnap)
 	if refresh {
@@ -124,6 +133,8 @@ func (a *App) CompareSnapshots(ctx context.Context, fromSnap, toSnap string, ref
 	if err := os.WriteFile(outPath, raw, 0o644); err != nil {
 		return nil, "", err
 	}
+	a.LastResult = result
+	a.LastDiffPath = outPath
 	return result, outPath, nil
 }
 
@@ -692,10 +703,11 @@ func (a *App) LoadDiffFile(path string) (string, error) {
 	return string(raw), nil
 }
 
-// CompareSnapshotsJSON runs diff and returns JSON string for UI.
-func (a *App) CompareSnapshotsJSON(fromSnap, toSnap string, refresh bool) (string, error) {
-	a.logInfo(fmt.Sprintf("Compare %s → %s (refresh=%v)", fromSnap, toSnap, refresh))
-	result, path, err := a.CompareSnapshots(a.WailsCtx, fromSnap, toSnap, refresh)
+// CompareSnapshotsJSON runs a live diff and returns JSON. Does not write a case pack.
+func (a *App) CompareSnapshotsJSON(fromSnap, toSnap string, refresh bool, excludeNoise bool) (string, error) {
+	a.ActiveCase = ""
+	a.logInfo(fmt.Sprintf("Compare %s → %s (refresh=%v hideNoise=%v)", fromSnap, toSnap, refresh, excludeNoise))
+	result, path, err := a.compareSnapshots(a.WailsCtx, fromSnap, toSnap, refresh)
 	if err != nil {
 		a.logError(err.Error())
 		return "", err
@@ -1243,7 +1255,7 @@ func (a *App) DeleteSnapshotWails(name string, force bool) (string, error) {
 		a.Evidence.RemoveSnapshotArtifacts(snapName)
 		deleted = append(deleted, snapName)
 	}
-	msg := fmt.Sprintf("Deleted: %s", strings.Join(deleted, ", "))
+	msg := fmt.Sprintf("Deleted: %s. Saved compare cases are kept.", strings.Join(deleted, ", "))
 	a.logInfo(msg)
 	return msg, nil
 }

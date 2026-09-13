@@ -1,5 +1,5 @@
 import { EventsOn } from './wailsjs/runtime/runtime.js';
-import { filterDiff, isEphemeralTempPath, isUsnLeafPath } from './noise.js';
+import { filterDiff, isEphemeralTempPath, isUsnLeafPath, setNoiseDomains, setNoiseFiles, setNoiseRegistry, DEFAULT_NOISE_DOMAINS, DEFAULT_NOISE_FILES, DEFAULT_NOISE_REGISTRY } from './noise.js';
 import { resolveHttpFlow } from './http_body.js';
 import { renderTraffic, invalidateTrafficCache } from './traffic_view.js';
 import {
@@ -15,8 +15,12 @@ let toSnapshot = '';
 let snapshotNames = [];
 let logDrawerOpen = false;
 let fileChangeTab = 'added';
+let selectedFilePath = '';
 let regChangeTab = 'added';
 let FILE_PREVIEW_MAX_BYTES = 4096 * 1024;
+let activeCaseId = '';
+let activeCaseExcludeNoise = false;
+let caseList = [];
 
 function formatByteSize(n) {
   n = Number(n) || 0;
@@ -465,6 +469,178 @@ async function loadSnapshots(preferFrom, preferTo) {
   }
 }
 
+function formatCaseTime(iso) {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return iso || '';
+  return new Date(t).toLocaleString();
+}
+
+function selectedCaseId() {
+  return $('#case-list li.selected')?.dataset.id || '';
+}
+
+function updateCaseBanner() {
+  const banner = $('#case-banner');
+  const text = $('#case-banner-text');
+  if (!banner) return;
+  const on = !!activeCaseId;
+  banner.classList.toggle('hidden', !on);
+  if (text && on) {
+    const row = caseList.find((c) => c.id === activeCaseId);
+    const pair = row ? `${row.fromSnapshot || ''} → ${row.toSnapshot || ''}` : activeCaseId;
+    const noise = activeCaseExcludeNoise ? 'Routine noise already excluded.' : 'Full lists archived.';
+    text.textContent = `Archived compare — snapshots not required. ${pair}. ${noise}`;
+  }
+}
+
+function renderCaseList(items) {
+  if (items) caseList = items;
+  const list = $('#case-list');
+  if (!list) return;
+  list.innerHTML = '';
+  if (!caseList.length) {
+    const li = document.createElement('li');
+    li.className = 'muted';
+    li.textContent = 'No saved cases';
+    li.style.cursor = 'default';
+    list.appendChild(li);
+    return;
+  }
+  caseList.forEach((c) => {
+    const li = document.createElement('li');
+    li.dataset.id = c.id;
+    const pair = document.createElement('span');
+    pair.className = 'case-pair';
+    pair.textContent = `${c.fromSnapshot || '?'} → ${c.toSnapshot || '?'}`;
+    const meta = document.createElement('span');
+    meta.className = 'case-meta';
+    const noise = c.excludeNoise ? 'noise hidden' : 'full lists';
+    meta.textContent = `${formatCaseTime(c.createdAt)} · ${noise}`;
+    li.append(pair, meta);
+    if (c.id === activeCaseId) li.classList.add('selected');
+    li.onclick = () => {
+      list.querySelectorAll('li').forEach((el) => el.classList.remove('selected'));
+      li.classList.add('selected');
+      openCase(c.id).then(() => closeCases()).catch((e) => {
+        const msg = $('#case-action-msg');
+        if (msg) msg.textContent = String(e);
+      });
+    };
+    list.appendChild(li);
+  });
+}
+
+async function loadCases() {
+  const api = await backend();
+  const msg = $('#case-action-msg');
+  if (!api?.ListCasesWails) {
+    if (msg) msg.textContent = 'Restart the UI after this update (ListCasesWails missing).';
+    return;
+  }
+  try {
+    const items = await api.ListCasesWails() || [];
+    renderCaseList(items);
+    if (msg && !activeCaseId) {
+      msg.textContent = items.length ? `${items.length} case(s)` : 'No saved cases';
+    }
+  } catch (e) {
+    if (msg) msg.textContent = String(e);
+  }
+}
+
+async function openCase(id) {
+  const api = await backend();
+  const msg = $('#case-action-msg');
+  if (!api?.LoadCaseWails) {
+    alert('Restart the UI after this update (LoadCaseWails missing).');
+    return;
+  }
+  const res = await api.LoadCaseWails(id);
+  activeCaseId = res.id || id;
+  activeCaseExcludeNoise = !!res.excludeNoise;
+  if (activeCaseExcludeNoise) {
+    const box = $('#hideNoise');
+    if (box) box.checked = true;
+  }
+  if (res.fromSnapshot && $('#from-snap')) $('#from-snap').value = res.fromSnapshot;
+  if (res.toSnapshot && $('#to-snap')) $('#to-snap').value = res.toSnapshot;
+  if (msg) msg.textContent = `Reviewing ${activeCaseId}`;
+  updateCaseBanner();
+  renderCaseList();
+  await loadDiff(res.compareJSON);
+}
+
+async function saveCase() {
+  const api = await backend();
+  const msg = $('#case-action-msg');
+  if (activeCaseId) {
+    if (msg) msg.textContent = 'Already reviewing a saved case';
+    return;
+  }
+  if (!diffData) {
+    if (msg) msg.textContent = 'Compare snapshots first';
+    return;
+  }
+  if (!api?.SaveCaseWails) {
+    alert('Restart the UI after this update (SaveCaseWails missing).');
+    return;
+  }
+  const btn = $('#btn-save-case');
+  setBusy(btn, true, 'Saving…');
+  try {
+    const res = await api.SaveCaseWails(hideNoiseEnabled());
+    if (msg) msg.textContent = res?.id ? `Saved case ${res.id}` : 'Case saved';
+    await loadCases();
+  } catch (e) {
+    if (msg) msg.textContent = String(e);
+  } finally {
+    setBusy(btn, false, 'Save case');
+  }
+}
+
+async function deleteSelectedCase() {
+  const api = await backend();
+  const id = selectedCaseId() || activeCaseId;
+  const msg = $('#case-action-msg');
+  if (!id) {
+    if (msg) msg.textContent = 'Select a case in the list';
+    return;
+  }
+  if (!confirm(`Delete case "${id}"?\n\nThis does not delete VM snapshots.`)) {
+    return;
+  }
+  const btn = $('#btn-delete-case');
+  setBusy(btn, true, 'Deleting…');
+  try {
+    const result = await api.DeleteCaseWails(id);
+    if (activeCaseId === id) {
+      activeCaseId = '';
+      activeCaseExcludeNoise = false;
+      updateCaseBanner();
+    }
+    if (msg) msg.textContent = result || `Deleted case ${id}`;
+    await loadCases();
+  } catch (e) {
+    if (msg) msg.textContent = String(e);
+  } finally {
+    setBusy(btn, false, 'Delete case');
+  }
+}
+
+async function exitReviewMode() {
+  activeCaseId = '';
+  activeCaseExcludeNoise = false;
+  const api = await backend();
+  if (api?.ClearActiveCaseWails) {
+    await api.ClearActiveCaseWails();
+  }
+  updateCaseBanner();
+  renderCaseList();
+  invalidateTrafficCache();
+  const msg = $('#case-action-msg');
+  if (msg) msg.textContent = 'Live mode — Compare needs snapshots';
+}
+
 async function takeSnapshot() {
   const api = await backend();
   const selected = selectedSnapshot();
@@ -661,7 +837,7 @@ async function deleteSnapshot() {
     msg.textContent = 'Select a snapshot in the list';
     return;
   }
-  if (!confirm(`Delete snapshot "${name}"?`)) {
+  if (!confirm(`Delete snapshot "${name}"?\n\nHost-side manifests and network for this snapshot are removed. Saved compare cases are kept.`)) {
     return;
   }
   const btn = $('#btn-delete-snap');
@@ -784,6 +960,24 @@ function applyUISettings(st, applySession) {
   if (warnEl) warnEl.checked = warn;
   const ispEl = $('#ui-home-isp');
   if (ispEl) ispEl.value = st.homeIspPatternsText || (st.homeIspPatterns || []).join(', ');
+  const domains = Array.isArray(st.noiseDomains) ? st.noiseDomains : DEFAULT_NOISE_DOMAINS;
+  setNoiseDomains(domains);
+  const domEl = $('#ui-noise-domains');
+  if (domEl) {
+    domEl.value = st.noiseDomainsText || domains.join('\n');
+  }
+  const files = Array.isArray(st.noiseFiles) ? st.noiseFiles : DEFAULT_NOISE_FILES;
+  setNoiseFiles(files);
+  const fileEl = $('#ui-noise-files');
+  if (fileEl) {
+    fileEl.value = st.noiseFilesText || files.join('\n');
+  }
+  const registry = Array.isArray(st.noiseRegistry) ? st.noiseRegistry : DEFAULT_NOISE_REGISTRY;
+  setNoiseRegistry(registry);
+  const regEl = $('#ui-noise-registry');
+  if (regEl) {
+    regEl.value = st.noiseRegistryText || registry.join('\n');
+  }
   if (applySession) {
     const barHide = $('#hideNoise');
     if (barHide) barHide.checked = hide;
@@ -803,6 +997,125 @@ function openSettings() {
 
 function closeSettings() {
   $('#settings-overlay')?.classList.add('hidden');
+}
+
+function openOverlay(id) {
+  const el = $(id);
+  if (!el) return;
+  el.classList.remove('hidden');
+}
+
+function closeOverlay(id) {
+  $(id)?.classList.add('hidden');
+}
+
+function openCases() {
+  const msg = $('#case-action-msg');
+  if (msg && !msg.textContent) msg.textContent = '';
+  openOverlay('#cases-overlay');
+  loadCases().catch((e) => {
+    if (msg) msg.textContent = String(e);
+  });
+}
+
+function closeCases() {
+  closeOverlay('#cases-overlay');
+}
+
+function openNoiseDomains() {
+  const msg = $('#noise-domains-msg');
+  if (msg) msg.textContent = '';
+  openOverlay('#noise-domains-overlay');
+  $('#ui-noise-domains')?.focus();
+}
+
+function openNoiseFiles() {
+  const msg = $('#noise-files-msg');
+  if (msg) msg.textContent = '';
+  openOverlay('#noise-files-overlay');
+  $('#ui-noise-files')?.focus();
+}
+
+function openNoiseRegistry() {
+  const msg = $('#noise-registry-msg');
+  if (msg) msg.textContent = '';
+  openOverlay('#noise-registry-overlay');
+  $('#ui-noise-registry')?.focus();
+}
+
+function topNoiseOverlay() {
+  if (!$('#noise-registry-overlay')?.classList.contains('hidden')) return '#noise-registry-overlay';
+  if (!$('#noise-files-overlay')?.classList.contains('hidden')) return '#noise-files-overlay';
+  if (!$('#noise-domains-overlay')?.classList.contains('hidden')) return '#noise-domains-overlay';
+  if (!$('#cases-overlay')?.classList.contains('hidden')) return '#cases-overlay';
+  if (!$('#settings-overlay')?.classList.contains('hidden')) return '#settings-overlay';
+  return '';
+}
+
+async function saveNoiseDomains() {
+  const api = await backend();
+  const msg = $('#noise-domains-msg');
+  if (!api?.SetNoiseDomainsWails) {
+    if (msg) msg.textContent = 'Restart the UI after this update (SetNoiseDomainsWails missing).';
+    return;
+  }
+  const btn = $('#btn-noise-domains-save');
+  setBusy(btn, true, 'Saving…');
+  try {
+    const st = await api.SetNoiseDomainsWails($('#ui-noise-domains')?.value || '');
+    applyUISettings(st, false);
+    if (msg) msg.textContent = 'Saved';
+    if (diffData) await rerenderDiff();
+    setTimeout(() => closeOverlay('#noise-domains-overlay'), 300);
+  } catch (e) {
+    if (msg) msg.textContent = String(e);
+  } finally {
+    setBusy(btn, false, 'Save');
+  }
+}
+
+async function saveNoiseFiles() {
+  const api = await backend();
+  const msg = $('#noise-files-msg');
+  if (!api?.SetNoiseFilesWails) {
+    if (msg) msg.textContent = 'Restart the UI after this update (SetNoiseFilesWails missing).';
+    return;
+  }
+  const btn = $('#btn-noise-files-save');
+  setBusy(btn, true, 'Saving…');
+  try {
+    const st = await api.SetNoiseFilesWails($('#ui-noise-files')?.value || '');
+    applyUISettings(st, false);
+    if (msg) msg.textContent = 'Saved';
+    if (diffData) await rerenderDiff();
+    setTimeout(() => closeOverlay('#noise-files-overlay'), 300);
+  } catch (e) {
+    if (msg) msg.textContent = String(e);
+  } finally {
+    setBusy(btn, false, 'Save');
+  }
+}
+
+async function saveNoiseRegistry() {
+  const api = await backend();
+  const msg = $('#noise-registry-msg');
+  if (!api?.SetNoiseRegistryWails) {
+    if (msg) msg.textContent = 'Restart the UI after this update (SetNoiseRegistryWails missing).';
+    return;
+  }
+  const btn = $('#btn-noise-registry-save');
+  setBusy(btn, true, 'Saving…');
+  try {
+    const st = await api.SetNoiseRegistryWails($('#ui-noise-registry')?.value || '');
+    applyUISettings(st, false);
+    if (msg) msg.textContent = 'Saved';
+    if (diffData) await rerenderDiff();
+    setTimeout(() => closeOverlay('#noise-registry-overlay'), 300);
+  } catch (e) {
+    if (msg) msg.textContent = String(e);
+  } finally {
+    setBusy(btn, false, 'Save');
+  }
 }
 
 async function loadUISettings() {
@@ -847,6 +1160,7 @@ async function saveUISettings() {
 }
 
 function hideNoiseEnabled() {
+  if (activeCaseExcludeNoise) return true;
   return $('#hideNoise')?.checked !== false;
 }
 
@@ -880,8 +1194,13 @@ function renderOverview() {
     regLine += ` · index entries ${m.fromUserRegistryCount || 0} → ${m.toUserRegistryCount || 0}`;
   }
   appendMuted(panel, regLine);
+  if (activeCaseId) {
+    appendMuted(panel, `Reviewing archived case ${activeCaseId}. Snapshots are not required.`);
+  }
   if (hideNoiseEnabled()) {
-    appendMuted(panel, 'Routine noise hidden — uncheck to show all changes.');
+    appendMuted(panel, activeCaseExcludeNoise
+      ? 'Routine noise was excluded when this case was saved.'
+      : 'Routine noise hidden — uncheck to show all changes.');
   }
   if ((m.warnings || []).length) {
     const ul = document.createElement('ul');
@@ -929,7 +1248,49 @@ function showFileTab(name) {
   document.querySelectorAll('.file-tabs button').forEach((b) => {
     b.classList.toggle('active', b.dataset.fileTab === name);
   });
+  setSelectedFile('');
   renderFileTree().catch((e) => alert(e));
+}
+
+function setSelectedFile(path) {
+  selectedFilePath = String(path || '').trim();
+  const btn = $('#btn-download-file');
+  if (btn) btn.disabled = !selectedFilePath;
+}
+
+async function downloadSelectedFile() {
+  const msg = $('#file-download-msg');
+  if (!selectedFilePath) {
+    if (msg) msg.textContent = 'Select a file first';
+    return;
+  }
+  const api = await backend();
+  if (!api?.ExportSnapshotFileWails) {
+    if (msg) msg.textContent = 'Restart the UI after this update (ExportSnapshotFileWails missing).';
+    return;
+  }
+  const snap = toSnapshot || diffData?.meta?.toSnapshot || $('#to-snap')?.value || '';
+  const btn = $('#btn-download-file');
+  setBusy(btn, true, 'Saving…');
+  try {
+    const dest = await api.ExportSnapshotFileWails(snap, selectedFilePath);
+    if (msg) msg.textContent = dest ? `Saved ${dest}` : '';
+  } catch (e) {
+    if (msg) msg.textContent = String(e);
+  } finally {
+    setBusy(btn, false, 'Download');
+    if (btn) btn.disabled = !selectedFilePath;
+  }
+}
+
+async function downloadPcap() {
+  const api = await backend();
+  if (!api?.ExportPcapWails) {
+    alert('Restart the UI after this update (ExportPcapWails missing).');
+    return '';
+  }
+  const snap = toSnapshot || diffData?.meta?.toSnapshot || $('#to-snap')?.value || '';
+  return api.ExportPcapWails(snap);
 }
 
 function filterDiffForFileTab(diff, tab) {
@@ -1147,12 +1508,16 @@ async function renderFileTree() {
   const host = $('#file-tree');
   host.innerHTML = '';
   const d = activeDiff();
-  if (!d) return;
+  if (!d) {
+    setSelectedFile('');
+    return;
+  }
   updateFileTabCounts(d);
   const filtered = filterDiffForFileTab(d, fileChangeTab);
   const count = (filtered.files?.[fileChangeTab] || []).length;
   if (!count) {
     host.innerHTML = `<p class="muted">${fileTabEmptyMessage(fileChangeTab)}</p>`;
+    setSelectedFile('');
     return;
   }
   const api = await backend();
@@ -1160,11 +1525,12 @@ async function renderFileTree() {
   const tree = api?.BuildFileTreeWails ? await api.BuildFileTreeWails(json) : buildFileTreeLocal(filtered);
   renderTreeNode(tree, host, async (node) => {
     if (!node.path || (node.children && Object.keys(node.children).length)) return;
+    setSelectedFile(node.path);
     const preview = $('#file-preview');
     const knownSize = Number(node.size) || 0;
     if (knownSize > FILE_PREVIEW_MAX_BYTES) {
       preview.classList.add('preview-unavailable');
-      preview.textContent = `Preview skipped — file is ${formatByteSize(knownSize)} (limit ${formatByteSize(FILE_PREVIEW_MAX_BYTES)}).\n\nPath: ${node.path}`;
+      preview.textContent = `Preview skipped — file is ${formatByteSize(knownSize)} (limit ${formatByteSize(FILE_PREVIEW_MAX_BYTES)}).\n\nPath: ${node.path}\n\nUse Download to save the file.`;
       return;
     }
     preview.textContent = 'Loading...';
@@ -1570,6 +1936,23 @@ function renderNetwork() {
     ? `${filtered.length} of ${allReqs.length} HTTP/proxy`
     : `${allReqs.length} HTTP/proxy`;
   appendMuted(panel, `${windowText} · ${countText}`);
+  const httpBar = document.createElement('div');
+  httpBar.className = 'file-toolbar';
+  const pcapBtn = document.createElement('button');
+  pcapBtn.type = 'button';
+  pcapBtn.textContent = 'Download PCAP';
+  const pcapMsg = document.createElement('p');
+  pcapMsg.className = 'muted action-msg';
+  pcapBtn.addEventListener('click', () => {
+    setBusy(pcapBtn, true, 'Saving…');
+    downloadPcap().then((dest) => {
+      pcapMsg.textContent = dest ? `Saved ${dest}` : '';
+    }).catch((e) => {
+      pcapMsg.textContent = String(e);
+    }).finally(() => setBusy(pcapBtn, false, 'Download PCAP'));
+  });
+  httpBar.append(pcapBtn, pcapMsg);
+  panel.appendChild(httpBar);
   if (shown.capped) {
     appendMuted(panel, `Showing latest ${shown.rows.length} of ${shown.total} (older rows omitted).`);
   }
@@ -1825,6 +2208,7 @@ async function renderTrafficPanel() {
     snapshot: toSnapshot || $('#to-snap')?.value || '',
     hideNoise: hideNoiseEnabled(),
     backend,
+    caseId: activeCaseId,
   });
 }
 
@@ -1852,8 +2236,13 @@ async function compare() {
   const btn = $('#btn-compare');
   setBusy(btn, true, 'Comparing…');
   try {
-    const json = await api.CompareSnapshotsJSON(from, to, refresh);
+    activeCaseId = '';
+    activeCaseExcludeNoise = false;
+    updateCaseBanner();
+    const json = await api.CompareSnapshotsJSON(from, to, refresh, hideNoiseEnabled());
     await loadDiff(json);
+    const msg = $('#case-action-msg');
+    if (msg) msg.textContent = 'Compare finished — Save case to keep it after snapshots are deleted';
   } finally {
     setBusy(btn, false, 'Compare');
   }
@@ -1868,8 +2257,18 @@ document.querySelectorAll('.file-tabs button[data-file-tab]').forEach((b) => {
 document.querySelectorAll('.reg-tabs button[data-reg-tab]').forEach((b) => {
   b.addEventListener('click', () => showRegTab(b.dataset.regTab));
 });
+$('#btn-download-file')?.addEventListener('click', () => downloadSelectedFile().catch((e) => {
+  const el = $('#file-download-msg');
+  if (el) el.textContent = String(e);
+}));
 $('#btn-compare').addEventListener('click', () => compare().catch((e) => alert(e)));
-$('#hideNoise').addEventListener('change', () => rerenderDiff().catch((e) => alert(e)));
+$('#hideNoise').addEventListener('change', () => {
+  if (activeCaseExcludeNoise) {
+    const box = $('#hideNoise');
+    if (box) box.checked = true;
+  }
+  rerenderDiff().catch((e) => alert(e));
+});
 $('#btn-settings')?.addEventListener('click', () => {
   loadUISettings().then(() => openSettings()).catch((e) => alert(e));
 });
@@ -1878,16 +2277,70 @@ $('#btn-settings-cancel')?.addEventListener('click', () => closeSettings());
 $('#settings-overlay')?.addEventListener('click', (e) => {
   if (e.target === e.currentTarget) closeSettings();
 });
+$('#btn-open-noise-domains')?.addEventListener('click', () => openNoiseDomains());
+$('#btn-open-noise-files')?.addEventListener('click', () => openNoiseFiles());
+$('#btn-open-noise-registry')?.addEventListener('click', () => openNoiseRegistry());
+$('#btn-noise-domains-close')?.addEventListener('click', () => closeOverlay('#noise-domains-overlay'));
+$('#btn-noise-domains-cancel')?.addEventListener('click', () => closeOverlay('#noise-domains-overlay'));
+$('#noise-domains-overlay')?.addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) closeOverlay('#noise-domains-overlay');
+});
+$('#btn-noise-domains-default')?.addEventListener('click', () => {
+  const el = $('#ui-noise-domains');
+  if (el) el.value = DEFAULT_NOISE_DOMAINS.join('\n');
+});
+$('#btn-noise-domains-save')?.addEventListener('click', () => saveNoiseDomains().catch((e) => {
+  const el = $('#noise-domains-msg');
+  if (el) el.textContent = String(e);
+}));
+$('#btn-noise-files-close')?.addEventListener('click', () => closeOverlay('#noise-files-overlay'));
+$('#btn-noise-files-cancel')?.addEventListener('click', () => closeOverlay('#noise-files-overlay'));
+$('#noise-files-overlay')?.addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) closeOverlay('#noise-files-overlay');
+});
+$('#btn-noise-files-default')?.addEventListener('click', () => {
+  const el = $('#ui-noise-files');
+  if (el) el.value = DEFAULT_NOISE_FILES.join('\n');
+});
+$('#btn-noise-files-save')?.addEventListener('click', () => saveNoiseFiles().catch((e) => {
+  const el = $('#noise-files-msg');
+  if (el) el.textContent = String(e);
+}));
+$('#btn-noise-registry-close')?.addEventListener('click', () => closeOverlay('#noise-registry-overlay'));
+$('#btn-noise-registry-cancel')?.addEventListener('click', () => closeOverlay('#noise-registry-overlay'));
+$('#noise-registry-overlay')?.addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) closeOverlay('#noise-registry-overlay');
+});
+$('#btn-noise-registry-default')?.addEventListener('click', () => {
+  const el = $('#ui-noise-registry');
+  if (el) el.value = DEFAULT_NOISE_REGISTRY.join('\n');
+});
+$('#btn-noise-registry-save')?.addEventListener('click', () => saveNoiseRegistry().catch((e) => {
+  const el = $('#noise-registry-msg');
+  if (el) el.textContent = String(e);
+}));
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !$('#settings-overlay')?.classList.contains('hidden')) {
-    closeSettings();
-  }
+  if (e.key !== 'Escape') return;
+  const top = topNoiseOverlay();
+  if (top === '#settings-overlay') closeSettings();
+  else if (top === '#cases-overlay') closeCases();
+  else if (top) closeOverlay(top);
+});
+$('#btn-cases')?.addEventListener('click', () => openCases());
+$('#btn-cases-close')?.addEventListener('click', () => closeCases());
+$('#btn-cases-done')?.addEventListener('click', () => closeCases());
+$('#cases-overlay')?.addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) closeCases();
 });
 $('#btn-ui-save')?.addEventListener('click', () => saveUISettings().catch((e) => {
   const el = $('#ui-save-msg');
   if (el) el.textContent = String(e);
 }));
 $('#btn-refresh-snaps').addEventListener('click', () => loadSnapshots($('#from-snap').value, $('#to-snap').value).catch(alert));
+$('#btn-refresh-cases')?.addEventListener('click', () => loadCases().catch(alert));
+$('#btn-save-case')?.addEventListener('click', () => saveCase().catch(alert));
+$('#btn-delete-case')?.addEventListener('click', () => deleteSelectedCase());
+$('#btn-case-live')?.addEventListener('click', () => exitReviewMode().catch(alert));
 $('#btn-launch-snap').addEventListener('click', () => launchSnapshot());
 $('#btn-take-snap').addEventListener('click', () => takeSnapshot());
 $('#btn-preserve').addEventListener('click', () => preserveEvidence());
@@ -1920,6 +2373,7 @@ $('#btn-gw-policy')?.addEventListener('click', () => savePermissivePolicy().catc
 $('#btn-load-file').addEventListener('click', async () => {
   const path = prompt('Diff JSON path');
   if (!path) return;
+  await exitReviewMode();
   const api = await backend();
   const json = api?.LoadDiffFile ? await api.LoadDiffFile(path) : null;
   if (json) await loadDiff(json);
@@ -1954,6 +2408,7 @@ EventsOn('applog', (entry) => {
     refreshGatewayStatus(),
     refreshCaptureStatus(),
     loadSnapshots(),
+    loadCases(),
   ]);
   const failed = results.filter((r) => r.status === 'rejected');
   if (failed.length) {

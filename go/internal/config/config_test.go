@@ -214,6 +214,58 @@ func TestIsHomeISP(t *testing.T) {
 	}
 }
 
+func TestNoiseDomains(t *testing.T) {
+	var nilCfg *Config
+	defs := nilCfg.NoiseDomains()
+	if len(defs) == 0 || defs[0] != DefaultNoiseDomains[0] {
+		t.Fatalf("default domains=%v", defs)
+	}
+	empty := &Config{UI: UIConfig{NoiseDomains: []string{}}}
+	if len(empty.NoiseDomains()) != 0 {
+		t.Fatal("empty list must stay empty")
+	}
+	custom := &Config{UI: UIConfig{NoiseDomains: []string{"evil.test"}}}
+	if got := custom.NoiseDomains(); len(got) != 1 || got[0] != "evil.test" {
+		t.Fatalf("custom=%v", got)
+	}
+	parsed := ParseNoiseDomains(" .Evil.TEST\nmicrosoft.com, microsoft.com ")
+	if len(parsed) != 2 || parsed[0] != "evil.test" || parsed[1] != "microsoft.com" {
+		t.Fatalf("parsed=%v", parsed)
+	}
+}
+
+func TestNoiseFiles(t *testing.T) {
+	var nilCfg *Config
+	defs := nilCfg.NoiseFiles()
+	if len(defs) == 0 || defs[0] != DefaultNoiseFiles[0] {
+		t.Fatalf("default files=%v", defs)
+	}
+	empty := &Config{UI: UIConfig{NoiseFiles: []string{}}}
+	if len(empty.NoiseFiles()) != 0 {
+		t.Fatal("empty list must stay empty")
+	}
+	parsed := ParseNoiseFiles(" /Temp/foo \n\\EdgeUpdate\\, \\EdgeUpdate\\ ")
+	if len(parsed) != 2 || parsed[0] != `\Temp\foo` || parsed[1] != `\EdgeUpdate\` {
+		t.Fatalf("parsed=%v", parsed)
+	}
+}
+
+func TestNoiseRegistry(t *testing.T) {
+	var nilCfg *Config
+	defs := nilCfg.NoiseRegistry()
+	if len(defs) == 0 || defs[0] != DefaultNoiseRegistry[0] {
+		t.Fatalf("default registry=%v", defs)
+	}
+	empty := &Config{UI: UIConfig{NoiseRegistry: []string{}}}
+	if len(empty.NoiseRegistry()) != 0 {
+		t.Fatal("empty list must stay empty")
+	}
+	parsed := ParseNoiseRegistry(" /IrisService/Cache/ \n\\TaskCache\\Tasks\\{, \\TaskCache\\Tasks\\{ ")
+	if len(parsed) != 2 || parsed[0] != `\IrisService\Cache\` || parsed[1] != `\TaskCache\Tasks\{` {
+		t.Fatalf("parsed=%v", parsed)
+	}
+}
+
 func TestResolveSnapshotName(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &Config{

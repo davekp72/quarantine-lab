@@ -22,30 +22,99 @@ const EPHEMERAL_TEMP_PATTERNS = [
   /\\(?:SystemTemp|Temp)\\__?PSScriptPolicyTest_[^\\]+\.ps1$/i,
 ];
 
-const NOISE_PATTERNS = [
-  /\\Microsoft\\EdgeUpdate\\/i,
-  /\\Microsoft\\OneDrive\\ListSync/i,
-  /\\AppData\\Local\\Microsoft\\OneDrive\\/i,
-  /\\\$Extend\\/i,
-  /\\Windows\\ServiceState\\/i,
-  /\\Microsoft\\Windows\\AppRepository\\/i,
-  /\\Microsoft\\InstallService\\/i,
-  /\\Users\\Public\\Quarantine\\/i,
-  /\\Windows Security Health\\/i,
-  /\\PowerGrid\\/i,
-  /manifest-capture\.json$/i,
-  /Get-QuarantineGuestManifest\.ps1$/i,
-  /Get-QuarantineGuestSysmonEvents\.ps1$/i,
-  /\.etl$/i,
-  /\\Windows\\Temp\\/i,
-  /\\Temp\\/i,
-  /\\SearchIndexer\.exe/i,
-  /\\svchost\.exe/i,
-  /\\MsMpEng\.exe/i,
-  /\\SecurityHealthService\.exe/i,
+export const DEFAULT_NOISE_FILES = [
+  '\\Microsoft\\EdgeUpdate\\',
+  '\\Microsoft\\OneDrive\\ListSync',
+  '\\AppData\\Local\\Microsoft\\OneDrive\\',
+  '\\$Extend\\',
+  '\\Windows\\ServiceState\\',
+  '\\Microsoft\\Windows\\AppRepository\\',
+  '\\Microsoft\\InstallService\\',
+  '\\Users\\Public\\Quarantine\\',
+  '\\Windows Security Health\\',
+  '\\PowerGrid\\',
+  'manifest-capture.json',
+  'Get-QuarantineGuestManifest.ps1',
+  'Get-QuarantineGuestSysmonEvents.ps1',
+  '.etl',
+  '\\Windows\\Temp\\',
+  '\\Temp\\',
+  '\\SearchIndexer.exe',
+  '\\svchost.exe',
+  '\\MsMpEng.exe',
+  '\\SecurityHealthService.exe',
 ];
 
-const NETWORK_HOST_SUFFIXES = [
+let noiseFiles = DEFAULT_NOISE_FILES.slice();
+
+export function setNoiseFiles(list) {
+  if (!Array.isArray(list)) {
+    noiseFiles = DEFAULT_NOISE_FILES.slice();
+    return noiseFiles.slice();
+  }
+  const seen = new Set();
+  noiseFiles = [];
+  for (const raw of list) {
+    const p = String(raw || '').trim().replace(/\//g, '\\');
+    if (!p) continue;
+    const key = p.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    noiseFiles.push(p);
+  }
+  return noiseFiles.slice();
+}
+
+export function getNoiseFiles() {
+  return noiseFiles.slice();
+}
+
+export const DEFAULT_NOISE_REGISTRY = [
+  '\\IrisService\\Cache\\',
+  '\\TaskCache\\Tasks\\{',
+  '\\Explorer\\SessionInfo\\',
+  '\\ContentDeliveryManager\\',
+  '\\InstallService\\State',
+  '\\Volatile Environment\\',
+];
+
+let noiseRegistry = DEFAULT_NOISE_REGISTRY.slice();
+
+export function setNoiseRegistry(list) {
+  if (!Array.isArray(list)) {
+    noiseRegistry = DEFAULT_NOISE_REGISTRY.slice();
+    return noiseRegistry.slice();
+  }
+  const seen = new Set();
+  noiseRegistry = [];
+  for (const raw of list) {
+    const p = String(raw || '').trim().replace(/\//g, '\\');
+    if (!p) continue;
+    const key = p.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    noiseRegistry.push(p);
+  }
+  return noiseRegistry.slice();
+}
+
+export function getNoiseRegistry() {
+  return noiseRegistry.slice();
+}
+
+export function isRegistryNoise(entryOrKey) {
+  const key = typeof entryOrKey === 'string'
+    ? entryOrKey
+    : (entryOrKey?.k || entryOrKey?.key || '');
+  const n = String(key || '').trim().replace(/\//g, '\\').toLowerCase();
+  if (!n) return false;
+  return noiseRegistry.some((p) => {
+    const needle = String(p || '').replace(/\//g, '\\').toLowerCase();
+    return needle && n.includes(needle);
+  });
+}
+
+export const DEFAULT_NOISE_DOMAINS = [
   'msftconnecttest.com', 'microsoft.com', 'microsoft.net', 'msn.com', 'bing.com',
   'windowsupdate.com', 'office.com', 'office365.com', 'live.com', 'microsoftpersonalcontent.com',
   'onedrive.com', 'sharepoint.com', 'skype.com', 'windows.com', 'xboxlive.com', 'xboxab.com',
@@ -56,21 +125,28 @@ const NETWORK_HOST_SUFFIXES = [
   'cloud.microsoft', 'office.net', 'sfx.ms', 's-microsoft.com', 'akamaized.net',
 ];
 
-const NETWORK_NOISE_PATTERNS = [
-  /\.msftconnecttest\.com/i, /\.microsoft\.com(\/|$)/i, /\.msn\.com(\/|$)/i, /\.bing\.com(\/|$)/i,
-  /\.windowsupdate\.com(\/|$)/i, /\.office\.com(\/|$)/i, /\.live\.com(\/|$)/i,
-  /\.microsoftpersonalcontent\.com(\/|$)/i, /\.onedrive\.com(\/|$)/i, /\.microsoft\.net(\/|$)/i,
-  /\.windows\.com(\/|$)/i, /\.update\.microsoft\.com(\/|$)/i, /\.mp\.microsoft\.com(\/|$)/i,
-  /\.data\.microsoft\.com(\/|$)/i, /msftncsi\.com/i, /\.office365\.com(\/|$)/i, /\.msauth\.net(\/|$)/i,
-  /\.msidentity\.com(\/|$)/i, /\.azure\.com(\/|$)/i, /\.azureedge\.net(\/|$)/i,
-  /\.trafficmanager\.net(\/|$)/i, /\.msedge\.net(\/|$)/i, /edge\.microsoft\.com/i,
-  /\.digicert\.com(\/|$)/i, /\.akamai(hd)?\.net(\/|$)/i, /\.akamaiedge\.net(\/|$)/i,
-  /\.aspnetcdn\.com(\/|$)/i, /\.windows\.net(\/|$)/i, /\.hotmail\.com(\/|$)/i,
-  /\.outlook\.com(\/|$)/i, /\.skype\.com(\/|$)/i, /\.visualstudio\.com(\/|$)/i,
-  /ctldl\.windowsupdate\.com/i, /settings-win\.data\.microsoft\.com/i,
-  /v\d+\.events\.data\.microsoft\.com/i, /watson\.microsoft\.com/i,
-  /watson\.telemetry\.microsoft\.com/i, /crl\.microsoft\.com/i, /ocsp\.digicert\.com/i,
-];
+let noiseDomains = DEFAULT_NOISE_DOMAINS.slice();
+
+export function setNoiseDomains(list) {
+  if (!Array.isArray(list)) {
+    noiseDomains = DEFAULT_NOISE_DOMAINS.slice();
+    return noiseDomains.slice();
+  }
+  const seen = new Set();
+  noiseDomains = [];
+  for (const raw of list) {
+    let d = String(raw || '').trim().toLowerCase();
+    if (d.startsWith('.')) d = d.slice(1);
+    if (!d || seen.has(d)) continue;
+    seen.add(d);
+    noiseDomains.push(d);
+  }
+  return noiseDomains.slice();
+}
+
+export function getNoiseDomains() {
+  return noiseDomains.slice();
+}
 
 export function normalizePath(path) {
   return String(path || '').replace(/\//g, '\\');
@@ -100,7 +176,11 @@ export function isEphemeralTempPath(path) {
 
 function isPathNoise(path) {
   if (!path) return false;
-  return NOISE_PATTERNS.some((re) => re.test(normalizePath(path)));
+  const norm = normalizePath(path).toLowerCase();
+  return noiseFiles.some((p) => {
+    const needle = String(p || '').replace(/\//g, '\\').toLowerCase();
+    return needle && norm.includes(needle);
+  });
 }
 
 function normalizeFile(item) {
@@ -118,9 +198,6 @@ export function isFileNoise(fileOrPath) {
   if (!path) return false;
   if (isEphemeralTempPath(path)) return true;
   if (isCompilerTempNoise(path)) return true;
-  if (/\\\$Extend\\/i.test(normalizePath(path))) return true;
-  if (/\\AppData\\Local\\Microsoft\\OneDrive\\/i.test(normalizePath(path))) return true;
-  if (/\\Windows\\ServiceState\\/i.test(normalizePath(path))) return true;
   if (isHighSignalFilePath(path)) return false;
   if (isWerNoisePath(path)) return true;
   if (isEbWebViewNoisePath(path, f)) return true;
@@ -149,7 +226,7 @@ export function isNetworkHostNoise(text) {
   if (!host) return false;
   if (host === 'home.arpa' || host.endsWith('.home.arpa')) return true;
   if (host.endsWith('.local') || host === 'localhost' || host === 'localhost.') return true;
-  return NETWORK_HOST_SUFFIXES.some((suffix) => host === suffix || host.endsWith('.' + suffix));
+  return noiseDomains.some((suffix) => host === suffix || host.endsWith('.' + suffix));
 }
 
 export function isNetworkDnsNoise(entry) {
@@ -183,7 +260,7 @@ export function isNoise(text) {
   if (!text) return false;
   const normalized = normalizePath(text);
   if (isNetworkHostNoise(normalized)) return true;
-  return isPathNoise(normalized) || NETWORK_NOISE_PATTERNS.some((re) => re.test(normalized));
+  return isPathNoise(normalized);
 }
 
 export function isSysmonNoise(ev) {
@@ -238,12 +315,25 @@ export function filterDiff(diff, hideNoise) {
   const files = base.files || {};
   const dns = (base.network?.dns || []).filter((e) => !isNetworkDnsNoise(e));
   const requests = (base.network?.requests || []).filter((e) => !isNetworkRequestNoise(e));
+  const reg = base.registry || {};
+  const registry = {
+    added: (reg.added || []).filter((e) => !isRegistryNoise(e)),
+    removed: (reg.removed || []).filter((e) => !isRegistryNoise(e)),
+    modified: (reg.modified || []).filter((e) => !isRegistryNoise(e)),
+  };
+  const dropped = ((reg.added || []).length - registry.added.length)
+    + ((reg.removed || []).length - registry.removed.length)
+    + ((reg.modified || []).length - registry.modified.length);
   const filtered = {
     ...base,
     files: {
       added: (files.added || []).filter((f) => !isFileNoise(f)),
       removed: (files.removed || []).filter((f) => !isFileNoise(f)),
       modified: (files.modified || []).filter((f) => !isFileNoise(f)),
+    },
+    registry: {
+      ...(base.registry || {}),
+      ...registry,
     },
     sysmon: {
       ...(base.sysmon || {}),
@@ -267,9 +357,10 @@ export function filterDiff(diff, hideNoise) {
     sysmonAdded: filtered.sysmon.added.length,
     dnsQueries: dns.length,
     networkRequests: requests.length,
-    registryAdded: (base.registry?.added || []).length,
-    registryRemoved: (base.registry?.removed || []).length,
-    registryModified: (base.registry?.modified || []).length,
+    registryAdded: registry.added.length,
+    registryRemoved: registry.removed.length,
+    registryModified: registry.modified.length,
+    registryVolatileFiltered: (base.summary?.registryVolatileFiltered || 0) + dropped,
   };
   return filtered;
 }
