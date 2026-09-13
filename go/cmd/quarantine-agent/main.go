@@ -9,12 +9,11 @@ import (
 
 	"github.com/quarantine-lab/quarantine/internal/agent/agentsvc"
 	"github.com/quarantine-lab/quarantine/internal/agent/types"
-	"golang.org/x/sys/windows/svc"
 )
 
 func main() {
 	// SCM starts the service without going through subcommand routing.
-	if isSvc, err := svc.IsWindowsService(); err == nil && isSvc {
+	if isSvc, err := agentsvc.IsWindowsService(); err == nil && isSvc {
 		runAgent(true)
 		return
 	}

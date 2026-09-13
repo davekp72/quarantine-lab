@@ -116,20 +116,18 @@ ssh_pwauth: false
 		t.Fatal("generated a known default")
 	}
 	// Passwords must remain in the gitignored JSON config.
+	// encoding/json escapes '&' as \u0026, so compare the unmarshaled value.
 	saved, err := os.ReadFile(cfgPath)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if !strings.Contains(string(saved), cfg.Guest.Password) {
-		t.Fatal("guest password was not persisted in config JSON")
 	}
 	var doc map[string]any
 	if err := json.Unmarshal(saved, &doc); err != nil {
 		t.Fatal(err)
 	}
 	guest := doc["guest"].(map[string]any)
-	if strings.TrimSpace(guest["password"].(string)) == "" {
-		t.Fatal("guest password cleared in config JSON")
+	if savedPW, _ := guest["password"].(string); savedPW != cfg.Guest.Password {
+		t.Fatalf("guest password was not persisted in config JSON")
 	}
 	if guest["username"] != "quarantine" {
 		t.Fatalf("guest username lost: %v", guest["username"])

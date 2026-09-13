@@ -71,7 +71,7 @@ try {
         Write-UpgradeLog 'simple start failed; falling back to Install-QuarantineAgent.ps1'
         $installer = Join-Path $StagingDir 'Install-QuarantineAgent.ps1'
         if (Test-Path -LiteralPath $installer) {
-            & $installer *>>&1 | ForEach-Object { Write-UpgradeLog "$_" }
+            & $installer *>&1 | ForEach-Object { Write-UpgradeLog "$_" }
         } else {
             Write-UpgradeLog 'ERROR: Install-QuarantineAgent.ps1 missing in staging'
         }

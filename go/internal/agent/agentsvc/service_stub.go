@@ -5,10 +5,15 @@ package agentsvc
 import (
 	"fmt"
 
+	"github.com/quarantine-lab/quarantine/internal/agent/guestpaths"
 	"github.com/quarantine-lab/quarantine/internal/agent/types"
 )
 
 const ServiceName = "QuarantineLabAgent"
+
+func DefaultTokenPath() string {
+	return guestpaths.TokenPath()
+}
 
 func RunConsole(token string, cfg types.AgentConfig) error {
 	return fmt.Errorf("quarantine-agent requires windows")

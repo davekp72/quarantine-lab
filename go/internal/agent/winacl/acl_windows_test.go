@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -18,7 +19,14 @@ func TestProtectRemovesUsersACE(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := CheckProtected(dir); err == nil {
-		t.Fatal("inherited extra principals should fail CheckProtected")
+		// Some runners already omit Users/Everyone from %TEMP%. Add a
+		// well-known extra ACE so CheckProtected still has something to reject.
+		if out, grantErr := exec.Command("icacls", dir, "/grant", "Users:(OI)(CI)(RX)").CombinedOutput(); grantErr != nil {
+			t.Fatalf("grant Users for test setup: %v (%s)", grantErr, strings.TrimSpace(string(out)))
+		}
+		if err := CheckProtected(dir); err == nil {
+			t.Fatal("Users ACE should fail CheckProtected")
+		}
 	}
 	if err := Protect(dir); err != nil {
 		t.Skip("Protect requires Administrators: " + err.Error())

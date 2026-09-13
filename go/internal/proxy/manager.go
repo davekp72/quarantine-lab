@@ -10,11 +10,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/quarantine-lab/quarantine/internal/config"
-	"golang.org/x/sys/windows"
 )
 
 // Manager runs mitmproxy as a detached host process with a persisted PID state file.
@@ -107,34 +105,6 @@ func (m *Manager) writeState(st networkState) error {
 
 func (m *Manager) clearState() {
 	_ = os.Remove(m.statePath())
-}
-
-func processAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
-	if err != nil {
-		return false
-	}
-	defer windows.CloseHandle(h)
-	var code uint32
-	if err := windows.GetExitCodeProcess(h, &code); err != nil {
-		return false
-	}
-	return code == 259 // STILL_ACTIVE
-}
-
-func killPID(pid int) {
-	if pid <= 0 || !processAlive(pid) {
-		return
-	}
-	h, err := windows.OpenProcess(windows.PROCESS_TERMINATE, false, uint32(pid))
-	if err != nil {
-		return
-	}
-	defer windows.CloseHandle(h)
-	_ = windows.TerminateProcess(h, 1)
 }
 
 func processName(pid int) string {
@@ -338,7 +308,7 @@ func (m *Manager) Start() error {
 	}
 	cmd.Stdout = startupFile
 	cmd.Stderr = startupFile
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	hideWindow(cmd)
 	if err := cmd.Start(); err != nil {
 		startupFile.Close()
 		return err
@@ -374,7 +344,7 @@ func (m *Manager) Start() error {
 	pacPID := 0
 	if py := findPython(); py != "" {
 		pacCmd := exec.Command(py, "-m", "http.server", strconv.Itoa(m.pacPort()), "--bind", "0.0.0.0", "--directory", pacDir)
-		pacCmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+		hideWindow(pacCmd)
 		if err := pacCmd.Start(); err == nil {
 			pacPID = pacCmd.Process.Pid
 			_ = pacCmd.Process.Release()

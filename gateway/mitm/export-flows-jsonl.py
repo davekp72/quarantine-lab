@@ -102,7 +102,7 @@ def _headers(msg) -> dict:
         return {str(k): str(v) for k, v in dict(msg.headers).items()}
 
 
-def flow_to_record(flow) -> dict | None:
+def flow_to_record(flow, max_body: int = MAX_BODY) -> dict | None:
     from mitmproxy import http
 
     if not isinstance(flow, http.HTTPFlow):
@@ -133,7 +133,7 @@ def flow_to_record(flow) -> dict | None:
         "resolvedIps": resolved,
         "request": {
             "headers": _headers(flow.request),
-            **_body_preview(flow.request),
+            **_body_preview(flow.request, max_body),
         },
     }
     if flow.response is not None:
@@ -141,7 +141,7 @@ def flow_to_record(flow) -> dict | None:
         rec["reason"] = flow.response.reason
         rec["response"] = {
             "headers": _headers(flow.response),
-            **_body_preview(flow.response),
+            **_body_preview(flow.response, max_body),
         }
     else:
         rec["status"] = None
@@ -155,8 +155,6 @@ def main() -> int:
     ap.add_argument("jsonl_path")
     ap.add_argument("--max-body", type=int, default=MAX_BODY)
     args = ap.parse_args()
-    global MAX_BODY
-    MAX_BODY = args.max_body
 
     src = Path(args.mitm_path)
     dst = Path(args.jsonl_path)
@@ -170,7 +168,7 @@ def main() -> int:
     with src.open("rb") as fh, dst.open("w", encoding="utf-8") as out:
         reader = io.FlowReader(fh)
         for flow in reader.stream():
-            rec = flow_to_record(flow)
+            rec = flow_to_record(flow, args.max_body)
             if not rec:
                 continue
             out.write(json.dumps(rec, ensure_ascii=False) + "\n")
