@@ -9,7 +9,7 @@ require (
 	github.com/pierrec/lz4/v4 v4.1.29
 	github.com/spf13/cobra v1.9.1
 	github.com/ulikunitz/xz v0.5.16
-	github.com/wailsapp/wails/v2 v2.15.0
+	github.com/wailsapp/wails/v2 v2.16.0
 	golang.org/x/crypto v0.53.0
 	golang.org/x/sys v0.46.0
 	www.velocidex.com/golang/go-ntfs v0.2.1
